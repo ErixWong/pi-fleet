@@ -10,27 +10,32 @@ export interface DueTask {
   task_id: string;
   title: string;
   instruction: string;
+  kind: 'manual' | 'scheduled';
   topic: string | null;
   workdir: string | null;
 }
 
 /**
- * 认领该 agent 已到期的定时任务（放行）：
+ * 认领该 agent 可执行的任务（领取动作，pending → running）：
+ * - manual：已指派且未领取（pending）
+ * - scheduled：已到期（next_due_at <= now）
  * - 同 agent 同 workdir 已有 running 任务时不并发放行（防项目互踩）
- * - 放行即置 running + 记录认领/活跃时间 + 推进 next_due_at（窗口内随机，错峰）
+ * - 放行即置 running + 记录认领/活跃时间；scheduled 同时推进 next_due_at（窗口内随机，错峰）
  */
 export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
   return withTransaction(async (conn) => {
     const rows = (await conn.query(
-      `SELECT t.id, t.task_id, t.title, t.instruction, t.schedule_cron,
+      `SELECT t.id, t.task_id, t.title, t.instruction, t.kind, t.schedule_cron,
               t.window_start, t.window_end, t.topic_id, t.workdir, tp.topic AS topic,
               t.next_due_at
          FROM tasks t
          LEFT JOIN topics tp ON tp.id = t.topic_id
-        WHERE t.assignee_id = ? AND t.kind = 'scheduled'
-          AND t.status IN ('pending','done','failed')
-          AND t.next_due_at IS NOT NULL
-          AND t.next_due_at <= ?
+        WHERE t.assignee_id = ?
+          AND (
+                (t.kind = 'manual' AND t.status = 'pending')
+                OR (t.kind = 'scheduled' AND t.status IN ('pending','done','failed')
+                    AND t.next_due_at IS NOT NULL AND t.next_due_at <= ?)
+              )
           AND (
                 t.workdir IS NULL
                 OR t.workdir NOT IN (
@@ -38,7 +43,7 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
                    WHERE assignee_id = ? AND status = 'running' AND workdir IS NOT NULL
                 )
               )
-        ORDER BY t.next_due_at ASC
+        ORDER BY t.created_at ASC
         LIMIT 20
         FOR UPDATE`,
       [agent.id, nowString(), agent.id],
@@ -46,22 +51,26 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
 
     const dueTasks: DueTask[] = [];
     for (const r of rows) {
-      const nextDue = computeNextDue(
-        (r.schedule_cron as string | null) ?? 'daily',
-        (r.window_start as string | null) ?? null,
-        (r.window_end as string | null) ?? null,
-        new Date(),
-      );
+      const isScheduled = r.kind === 'scheduled';
+      const nextDue = isScheduled
+        ? computeNextDue(
+            (r.schedule_cron as string | null) ?? 'daily',
+            (r.window_start as string | null) ?? null,
+            (r.window_end as string | null) ?? null,
+            new Date(),
+          )
+        : null;
       await conn.query(
         `UPDATE tasks
             SET status = 'running', claimed_at = ?, next_due_at = ?, last_activity_at = ?
-          WHERE id = ?`,
-        [nowString(), toLocalString(nextDue), nowString(), r.id],
+          WHERE id = ? AND status IN ('pending','done','failed')`,
+        [nowString(), nextDue ? toLocalString(nextDue) : null, nowString(), r.id],
       );
       dueTasks.push({
         task_id: String(r.task_id),
         title: String(r.title),
         instruction: String(r.instruction),
+        kind: (r.kind as 'manual' | 'scheduled') ?? 'manual',
         topic: (r.topic as string | null) ?? null,
         workdir: (r.workdir as string | null) ?? null,
       });

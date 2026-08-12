@@ -89,7 +89,9 @@ try {
   const oldDue = sched.next_due_at;
   const due = await client.callTool({ name: 'check_due_tasks', arguments: {} });
   const dueData = JSON.parse(due.content[0].text);
-  check('check_due_tasks 放行定时任务', dueData.due_tasks.length === 1 && dueData.due_tasks[0].task_id === sched.task_id, JSON.stringify(dueData));
+  check('check_due_tasks 领取 manual + 放行 scheduled', dueData.due_tasks.length === 2, JSON.stringify(dueData));
+  check('manual 被领取（running）', dueData.due_tasks.some((t) => t.task_id === manual.task_id && t.kind === 'manual'), JSON.stringify(dueData.due_tasks));
+  check('scheduled 被放行（running）', dueData.due_tasks.some((t) => t.task_id === sched.task_id && t.kind === 'scheduled'), JSON.stringify(dueData.due_tasks));
 
   // report_progress 续期（长任务防误杀核心）
   const prog = await client.callTool({

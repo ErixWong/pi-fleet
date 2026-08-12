@@ -61,8 +61,10 @@ const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password:
 await pool.query(`UPDATE tasks SET next_due_at = DATE_SUB(NOW(), INTERVAL 30 MINUTE) WHERE task_id = ?`, [sTask.task_id]);
 
 const poll = await api('POST', '/api/agent/poll', {}, KEY);
-check('poll 放行定时任务', poll.data.tasks.length === 1 && poll.data.tasks[0].task_id === sTask.task_id, JSON.stringify(poll.data));
-check('poll 返回 workdir', poll.data.tasks[0].workdir === null); // scheduled 没 workdir
+check('poll 领取 manual + 放行 scheduled', poll.data.tasks.length === 2, JSON.stringify(poll.data));
+check('poll 含 manual 任务', poll.data.tasks.some((t) => t.task_id === mTask.task_id && t.kind === 'manual'), JSON.stringify(poll.data.tasks));
+check('poll 含 scheduled 任务', poll.data.tasks.some((t) => t.task_id === sTask.task_id && t.kind === 'scheduled'), JSON.stringify(poll.data.tasks));
+check('poll 返回 workdir（scheduled 无）', poll.data.tasks.find((t) => t.task_id === sTask.task_id)?.workdir === null);
 
 // renew 续期
 const renew = await api('POST', '/api/agent/tasks/renew', { task_id: sTask.task_id }, KEY);
