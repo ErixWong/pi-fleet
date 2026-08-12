@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+
+# 任务记录不入版本控制
+docs/tasks/
+
+# 环境与密钥
+.env
+.env.*
+*.key
+*.pem
+
+# 数据
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# OS
+.DS_Store
+Thumbs.db

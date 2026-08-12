@@ -1,0 +1,44 @@
+body {
+  background: #14171c;
+}
+
+.navbar-brand {
+  font-weight: 700;
+}
+
+.card {
+  border-color: #2c313a;
+}
+
+.table > :not(caption) > * > * {
+  background-color: transparent;
+  color: inherit;
+}
+
+.badge-status {
+  font-weight: 600;
+}
+
+pre {
+  background: #0e1013;
+  border: 1px solid #2c313a;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.key-box {
+  background: #0e1013;
+  border: 1px dashed #ffc107;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+  color: #ffc107;
+}
+
+.form-label {
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
