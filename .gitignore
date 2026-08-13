@@ -22,3 +22,7 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# 本地运行产物
+work/
+.playwright-mcp/

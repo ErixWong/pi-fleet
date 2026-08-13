@@ -8,8 +8,6 @@ const routes = [
   { path: '/tasks/:taskId', component: () => import('./views/TaskDetail.vue'), meta: { auth: true } },
   { path: '/agents', component: () => import('./views/Agents.vue'), meta: { auth: true } },
   { path: '/agents/:id', component: () => import('./views/AgentDetail.vue'), meta: { auth: true } },
-  { path: '/topics', component: () => import('./views/Topics.vue'), meta: { auth: true } },
-  { path: '/topics/:topic', component: () => import('./views/TopicDetail.vue'), meta: { auth: true } },
 ];
 
 export const router = createRouter({

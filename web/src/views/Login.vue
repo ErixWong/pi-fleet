@@ -24,16 +24,31 @@ async function submit() {
 
 <template>
   <div class="d-flex justify-content-center align-items-center" style="min-height:80vh">
-    <div class="card" style="width:380px">
+    <div class="card border-0 p-2" style="width:400px; background:linear-gradient(160deg, rgba(99,102,241,0.15), rgba(34,211,238,0.08));">
       <div class="card-body p-4">
-        <h4 class="mb-3">管理员登录</h4>
-        <div v-if="error" class="alert alert-danger py-2">{{ error }}</div>
+        <div class="text-center mb-4">
+          <div class="mx-auto mb-3 d-flex align-items-center justify-content-center"
+            style="width:64px;height:64px;border-radius:1.2rem;background:linear-gradient(135deg,#6366f1,#22d3ee);box-shadow:0 10px 30px -8px rgba(99,102,241,0.7)">
+            <i class="bi bi-hdd-network-fill" style="font-size:1.8rem;color:#fff"></i>
+          </div>
+          <h4 class="mb-1 fw-bold">任务分发平台</h4>
+          <div class="text-secondary small">Agent 协作 · 任务调度 · 报告归档</div>
+        </div>
+        <div v-if="error" class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>{{ error }}</div>
         <form @submit.prevent="submit">
-          <label class="form-label">密码</label>
-          <input v-model="password" type="password" class="form-control mb-3" autofocus required>
-          <button class="btn btn-primary w-100" :disabled="loading">{{ loading ? '登录中…' : '登录' }}</button>
+          <label class="form-label">管理员密码</label>
+          <input v-model="password" type="password" class="form-control form-control-lg mb-3" autofocus required placeholder="••••••••">
+          <button class="btn btn-primary w-100 py-2" :disabled="loading">
+            <i v-if="loading" class="bi bi-arrow-repeat me-1 spin"></i>
+            <i v-else class="bi bi-box-arrow-in-right me-1"></i>{{ loading ? '登录中…' : '登录' }}
+          </button>
         </form>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.spin { display: inline-block; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

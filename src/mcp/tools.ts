@@ -2,7 +2,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, withTransaction } from '../db.js';
 import { currentAgent } from '../auth.js';
-import { claimDueTasks, renewTaskActivity, submitTaskResult } from '../service/tasks.js';
+import {
+  claimDueTasks,
+  getTaskMessages,
+  listMyThreads,
+  postMessageToTask,
+  renewTaskActivity,
+  requestTask,
+  resolveTask,
+  submitTaskResult,
+} from '../service/tasks.js';
 
 /**
  * 创建 MCP Server 实例并注册全部工具。
@@ -11,7 +20,7 @@ import { claimDueTasks, renewTaskActivity, submitTaskResult } from '../service/t
  */
 export function createMcpServer(): McpServer {
   const server = new McpServer(
-    { name: 'task-dispatch', version: '0.1.0' },
+    { name: 'task-dispatch', version: '0.2.0' },
     { capabilities: { tools: {} } },
   );
   registerTools(server);
@@ -51,20 +60,104 @@ function registerTools(server: McpServer): void {
     },
   );
 
-  // ─────────────────────────── list_my_tasks ───────────────────────────
+  // ─────────────────────────── 会话：我参与的任务 ───────────────────────────
+  server.tool(
+    'list_threads',
+    '列出我参与的任务线程（我发起或指派给我的）。每条含：任务、状态、最后消息、awaiting_me（是否轮到本机回复）。',
+    {},
+    async () => {
+      const agent = requireAgent();
+      const threads = await listMyThreads(agent);
+      return text({ threads });
+    },
+  );
+
+  server.tool(
+    'get_messages',
+    '拉取指定任务的完整消息流（协作会话的所有回合，时间正序）。',
+    { task_id: z.string().describe('任务 ID，如 T-260813-xxxx') },
+    async ({ task_id }) => {
+      const agent = requireAgent();
+      const { isParticipant } = await import('../service/tasks.js');
+      if (!(await isParticipant(agent.id, task_id))) {
+        return text({ error: `任务 ${task_id} 不存在或你未参与` });
+      }
+      const messages = await getTaskMessages(task_id);
+      return text({ task_id, messages });
+    },
+  );
+
+  server.tool(
+    'post_message',
+    '向任务回复一条消息（协作会话的回合回复）。回复后等待对方继续；若任务已关闭则拒绝。',
+    {
+      task_id: z.string().describe('任务 ID'),
+      content: z.string().describe('回复内容（处理结果、进展、问题、请求等）'),
+    },
+    async ({ task_id, content }) => {
+      const agent = requireAgent();
+      const r = await postMessageToTask(agent, task_id, content);
+      if (!r.ok) return text({ error: r.error });
+      return text({ ok: true, task_id, message: '已回复' });
+    },
+  );
+
+  server.tool(
+    'resolve_task',
+    '关闭任务（协作会话结束）。可选附最终总结；关闭后任务状态为 resolved。',
+    {
+      task_id: z.string().describe('任务 ID'),
+      final_result: z.string().optional().describe('可选：最终总结/结论'),
+    },
+    async ({ task_id, final_result }) => {
+      const agent = requireAgent();
+      const r = await resolveTask(agent, task_id, final_result);
+      if (!r.ok) return text({ error: r.error });
+      return text({ ok: true, task_id, status: 'resolved', message: '任务已关闭' });
+    },
+  );
+
+  server.tool(
+    'request_task',
+    '向另一台主机发起协作任务：创建会话并写入首条请求消息。目标主机下次轮询时领取处理，完成后回复，本机可轮询查看。',
+    {
+      assignee: z.string().describe('目标主机的 agent_id（如 agent-xxxx，用 whoami/list_threads 可查到）'),
+      title: z.string().describe('任务标题'),
+      instruction: z.string().describe('请求内容（明确要对方做什么、提供什么）'),
+      workdir: z.string().optional().describe('可选：对方机器上的工作目录'),
+    },
+    async ({ assignee, title, instruction, workdir }) => {
+      const agent = requireAgent();
+      const r = await requestTask(agent, assignee, title, instruction, workdir);
+      if (!r.ok) return text({ error: r.error });
+      return text({ ok: true, task_id: r.task_id, message: `已发起任务，等待 ${assignee} 处理` });
+    },
+  );
+
+  // ─────────────────────────── 回合领取 ───────────────────────────
+  server.tool(
+    'check_due_tasks',
+    '领取"等待本机动作"的任务回合：①被指派且对方刚回复的协作任务 ②本机发起且对方已回复的协作任务 ③到期的定时任务。协作任务附带完整消息流（上下文重建）；领取后需处理并 post_message 回复。',
+    {},
+    async () => {
+      const agent = requireAgent();
+      const tasks = await claimDueTasks(agent);
+      return text({ due_tasks: tasks });
+    },
+  );
+
+  // ─────────────────────────── 兼容：定时任务单轮 ───────────────────────────
   server.tool(
     'list_my_tasks',
-    '列出指派给当前 agent 的任务（含手动任务与定时任务）。可按状态过滤：pending/assigned/running/done/failed。',
+    '列出指派给当前 agent 的定时任务（可按状态过滤：pending/running/done/failed）。协作会话请用 list_threads。',
     { status: z.string().optional().describe('可选：按任务状态过滤') },
     async ({ status }) => {
       const agent = requireAgent();
       const params: unknown[] = [agent.id];
       let sql = `
         SELECT t.task_id, t.title, t.kind, t.status, t.schedule_cron,
-               t.window_start, t.window_end, t.next_due_at, t.claimed_at, t.workdir,
-               tp.topic AS topic
+               t.window_start, t.window_end, t.next_due_at, t.claimed_at, t.workdir
           FROM tasks t
-          LEFT JOIN topics tp ON tp.id = t.topic_id
          WHERE t.assignee_id = ?`;
       if (status) {
         sql += ' AND t.status = ?';
@@ -83,7 +176,6 @@ function registerTools(server: McpServer): void {
           window_start: rr.window_start ?? null,
           window_end: rr.window_end ?? null,
           next_due_at: rr.next_due_at ?? null,
-          topic: rr.topic ?? null,
           workdir: rr.workdir ?? null,
           claimed_at: rr.claimed_at ?? null,
         };
@@ -92,20 +184,17 @@ function registerTools(server: McpServer): void {
     },
   );
 
-  // ─────────────────────────── fetch_task ───────────────────────────
   server.tool(
     'fetch_task',
-    '拉取指派给当前 agent 的单个任务详情，包含完整自然语言指令与上下文。',
+    '拉取指派给当前 agent 的单个任务详情（含完整指令、workdir；协作任务含消息流）。',
     { task_id: z.string().describe('任务 ID，如 T-20260812-0001') },
     async ({ task_id }) => {
       const agent = requireAgent();
       const rows = await query(
         `SELECT t.task_id, t.title, t.instruction, t.kind, t.status,
                 t.schedule_cron, t.window_start, t.window_end, t.next_due_at,
-                t.result, t.result_status, t.claimed_at, t.workdir,
-                tp.topic AS topic
+                t.result, t.result_status, t.claimed_at, t.workdir
            FROM tasks t
-           LEFT JOIN topics tp ON tp.id = t.topic_id
           WHERE t.task_id = ? AND t.assignee_id = ? LIMIT 1`,
         [task_id, agent.id],
       );
@@ -113,6 +202,7 @@ function registerTools(server: McpServer): void {
         return text({ error: `任务 ${task_id} 不存在或未指派给当前 agent` });
       }
       const r = rows[0] as Record<string, unknown>;
+      const messages = r.kind === 'manual' ? await getTaskMessages(task_id) : [];
       return text({
         task_id: r.task_id,
         title: r.title,
@@ -123,18 +213,17 @@ function registerTools(server: McpServer): void {
         window_start: r.window_start ?? null,
         window_end: r.window_end ?? null,
         next_due_at: r.next_due_at ?? null,
-        topic: r.topic ?? null,
         workdir: r.workdir ?? null,
+        messages,
         previous_result: r.result ?? null,
         previous_result_status: r.result_status ?? null,
       });
     },
   );
 
-  // ─────────────────────────── submit_result ───────────────────────────
   server.tool(
     'submit_result',
-    '汇报任务执行结果。status 为 success 或 failed，result 为执行结果/总结文本。',
+    '汇报定时任务执行结果（scheduled 单轮任务用）。status 为 success 或 failed。协作会话请用 post_message。',
     {
       task_id: z.string().describe('任务 ID'),
       status: z.enum(['success', 'failed']).describe('执行结果状态'),
@@ -148,7 +237,6 @@ function registerTools(server: McpServer): void {
     },
   );
 
-  // ─────────────────────────── report_progress ───────────────────────────
   server.tool(
     'report_progress',
     '长任务执行中上报进度：刷新任务的最后活跃时间（续期，避免被超时回收误杀）。建议执行超过 1 小时的长时间任务每 30-60 分钟调用一次。',
@@ -164,59 +252,19 @@ function registerTools(server: McpServer): void {
     },
   );
 
-  // ─────────────────────────── publish_report ───────────────────────────
   server.tool(
     'publish_report',
-    '向指定主题投递一份报告（定时任务常用）。主题不存在会自动创建。可关联任务 ID。',
+    '向任务投递一份报告（定时任务产出归档，直接挂在任务下）。报告可在任务详情页查看历史时间线。',
     {
-      topic: z.string().describe('主题名，如 disk-report'),
+      task_id: z.string().describe('关联的任务 ID'),
       content: z.string().describe('报告正文'),
-      task_id: z.string().optional().describe('可选：关联的任务 ID'),
     },
-    async ({ topic, content, task_id }) => {
+    async ({ task_id, content }) => {
       const agent = requireAgent();
-      const data = await withTransaction(async (conn) => {
-        // 主题不存在则创建
-        const topics = await conn.query(`SELECT id FROM topics WHERE topic = ? LIMIT 1`, [topic]);
-        let topicId: number;
-        if ((topics as unknown[]).length === 0) {
-          const ins = await conn.query(`INSERT INTO topics (topic) VALUES (?)`, [topic]);
-          topicId = Number((ins as unknown as { insertId: unknown }).insertId);
-        } else {
-          topicId = Number(((topics as unknown[])[0] as { id: unknown }).id);
-        }
-
-        // 关联任务（若提供）：校验属于当前 agent
-        let taskId: number | null = null;
-        if (task_id) {
-          const tasks = await conn.query(
-            `SELECT id FROM tasks WHERE task_id = ? AND assignee_id = ? LIMIT 1`,
-            [task_id, agent.id],
-          );
-          if ((tasks as unknown[]).length > 0) {
-            taskId = Number(((tasks as unknown[])[0] as { id: unknown }).id);
-          }
-        }
-
-        await conn.query(
-          `INSERT INTO reports (topic_id, task_id, agent_id, content) VALUES (?, ?, ?, ?)`,
-          [topicId, taskId, agent.id, content],
-        );
-        return { ok: true, topic, task_id: task_id ?? null };
-      });
-      return text(data);
-    },
-  );
-
-  // ─────────────────────────── check_due_tasks ───────────────────────────
-  server.tool(
-    'check_due_tasks',
-    '主 agent 轮询接口：返回当前 agent 已到期的定时任务（含完整指令）。调用后任务被标记为 running 并推进下次到期时间；无到期任务返回空数组。',
-    {},
-    async () => {
-      const agent = requireAgent();
-      const dueTasks = await claimDueTasks(agent);
-      return text({ due_tasks: dueTasks });
+      const { publishReportToTask } = await import('../service/tasks.js');
+      const data = await publishReportToTask(agent, task_id, content);
+      if (!data.ok) return text({ error: data.error });
+      return text({ ok: true, task_id, message: '报告已归档到任务' });
     },
   );
 }

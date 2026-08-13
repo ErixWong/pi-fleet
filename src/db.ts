@@ -73,26 +73,19 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS topics (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  topic VARCHAR(128) NOT NULL UNIQUE,
-  description VARCHAR(512) NOT NULL DEFAULT '',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
 CREATE TABLE IF NOT EXISTS tasks (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   task_id VARCHAR(32) NOT NULL UNIQUE,
   title VARCHAR(255) NOT NULL,
   instruction TEXT NOT NULL,
   kind ENUM('manual','scheduled') NOT NULL DEFAULT 'manual',
+  creator_id BIGINT NULL,
   assignee_id BIGINT NULL,
-  status ENUM('pending','assigned','running','done','failed','cancelled') NOT NULL DEFAULT 'pending',
+  status ENUM('pending','running','done','failed','cancelled','open','resolved') NOT NULL DEFAULT 'pending',
   schedule_cron VARCHAR(100) NULL,
   window_start TIME NULL,
   window_end TIME NULL,
   next_due_at DATETIME NULL,
-  topic_id BIGINT NULL,
   workdir VARCHAR(512) NULL,
   result TEXT NULL,
   result_status ENUM('success','failed') NULL,
@@ -101,17 +94,26 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_activity_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_tasks_assignee FOREIGN KEY (assignee_id) REFERENCES agents(id),
-  CONSTRAINT fk_tasks_topic FOREIGN KEY (topic_id) REFERENCES topics(id)
+  CONSTRAINT fk_tasks_creator FOREIGN KEY (creator_id) REFERENCES agents(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS messages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id BIGINT NOT NULL,
+  sender_id BIGINT NULL,
+  sender_role ENUM('agent','admin','system') NOT NULL DEFAULT 'agent',
+  content MEDIUMTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_messages_task FOREIGN KEY (task_id) REFERENCES tasks(id),
+  CONSTRAINT fk_messages_sender FOREIGN KEY (sender_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS reports (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  topic_id BIGINT NOT NULL,
   task_id BIGINT NULL,
   agent_id BIGINT NULL,
   content MEDIUMTEXT NOT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_reports_topic FOREIGN KEY (topic_id) REFERENCES topics(id),
   CONSTRAINT fk_reports_task FOREIGN KEY (task_id) REFERENCES tasks(id),
   CONSTRAINT fk_reports_agent FOREIGN KEY (agent_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
@@ -119,11 +121,23 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(next_due_at);
-CREATE INDEX IF NOT EXISTS idx_reports_topic ON reports(topic_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reports_task ON reports(task_id, created_at);
 
--- 幂等迁移：已存在的 tasks 表补充新列（workdir / last_activity_at）
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workdir VARCHAR(512) NULL AFTER topic_id;
+-- 幂等迁移（旧库升级）：删除主题概念遗留（topics 表 / topic_id 列 / 相关外键）
+ALTER TABLE reports DROP FOREIGN KEY IF EXISTS fk_reports_topic;
+ALTER TABLE tasks DROP FOREIGN KEY IF EXISTS fk_tasks_topic;
+DROP INDEX IF EXISTS idx_reports_topic ON reports;
+ALTER TABLE reports DROP COLUMN IF EXISTS topic_id;
+ALTER TABLE tasks DROP COLUMN IF EXISTS topic_id;
+DROP TABLE IF EXISTS topics;
+
+-- 幂等迁移：已存在的 tasks 表补充新列（workdir / last_activity_at / creator_id / resolved_by_id）
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workdir VARCHAR(512) NULL AFTER next_due_at;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_activity_at DATETIME NULL AFTER claimed_at;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS creator_id BIGINT NULL AFTER assignee_id;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resolved_by_id BIGINT NULL AFTER result_at;
+-- 状态枚举扩展（旧表迁移）：加入协作会话状态 open / resolved
+ALTER TABLE tasks MODIFY COLUMN status ENUM('pending','running','done','failed','cancelled','open','resolved') NOT NULL DEFAULT 'pending';
 `;
 
 /** 初始化数据库 schema（幂等） */

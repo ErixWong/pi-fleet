@@ -48,7 +48,7 @@ const manual = await api('POST', '/api/tasks', {
 check('manual 创建', manual.status === 201);
 await api('POST', '/api/tasks', {
   kind: 'scheduled', title: 'REST 定时任务', assignee_id: created.data.agent.id,
-  schedule_cron: 'daily', window_start: '00:00', window_end: '23:59', topic_name: 'rest-topic',
+  schedule_cron: 'daily', window_start: '00:00', window_end: '23:59',
   instruction: '测试 poll 放行',
 });
 const list = await api('GET', '/api/tasks');
@@ -66,27 +66,47 @@ check('poll 含 manual 任务', poll.data.tasks.some((t) => t.task_id === mTask.
 check('poll 含 scheduled 任务', poll.data.tasks.some((t) => t.task_id === sTask.task_id && t.kind === 'scheduled'), JSON.stringify(poll.data.tasks));
 check('poll 返回 workdir（scheduled 无）', poll.data.tasks.find((t) => t.task_id === sTask.task_id)?.workdir === null);
 
-// renew 续期
+// renew 续期（scheduled 放行后 running）
 const renew = await api('POST', '/api/agent/tasks/renew', { task_id: sTask.task_id }, KEY);
 check('renew 续期成功', renew.data.ok === true, JSON.stringify(renew.data));
 
-// result 回传
+// manual 协作会话：reply 回复 + resolve 关闭
+const reply = await api('POST', '/api/agent/tasks/reply', {
+  task_id: mTask.task_id, content: 'REST 已处理完毕',
+}, KEY);
+check('reply 回复成功', reply.data.ok === true, JSON.stringify(reply.data));
+const resolve = await api('POST', '/api/agent/tasks/resolve', {
+  task_id: mTask.task_id, final_result: 'REST 协作完成',
+}, KEY);
+check('resolve 关闭任务', resolve.data.ok === true, JSON.stringify(resolve.data));
+const wrongReply = await api('POST', '/api/agent/tasks/reply', {
+  task_id: mTask.task_id, content: '关闭后回复',
+}, KEY);
+check('关闭后回复被拒', wrongReply.status === 400, JSON.stringify(wrongReply.data));
+
+// workdir 写回
+const wd = await api('POST', '/api/agent/tasks/workdir', {
+  task_id: sTask.task_id, workdir: '/opt/work/tasks/' + sTask.task_id,
+}, KEY);
+check('workdir 写回成功', wd.data.ok === true, JSON.stringify(wd.data));
+
+// result 回传（scheduled）
 const result = await api('POST', '/api/agent/tasks/result', {
-  task_id: mTask.task_id, status: 'success', result: 'REST 回传成功',
+  task_id: sTask.task_id, status: 'success', result: 'REST 定时任务完成',
 }, KEY);
 check('result 回传成功', result.data.ok === true, JSON.stringify(result.data));
 const wrong = await api('POST', '/api/agent/tasks/result', {
-  task_id: mTask.task_id, status: 'success', result: '重复提交',  // 已 done，应拒绝
+  task_id: sTask.task_id, status: 'success', result: '重复提交',  // 已 done，应拒绝
 }, KEY);
 check('重复提交被拒', wrong.status === 400, JSON.stringify(wrong.data));
 
-// reports 投递
-const rep = await api('POST', '/api/agent/reports', {
-  topic: 'rest-topic', content: 'REST 报告内容', task_id: sTask.task_id,
+// 报告归档到任务
+const rep = await api('POST', '/api/agent/tasks/report', {
+  task_id: sTask.task_id, content: 'REST 报告内容',
 }, KEY);
-check('reports 投递成功', rep.data.ok === true, JSON.stringify(rep.data));
-const topic = await api('GET', '/api/topics/rest-topic');
-check('主题报告存在', topic.data.reports.length >= 1);
+check('报告归档成功', rep.data.ok === true, JSON.stringify(rep.data));
+const detail = await api('GET', `/api/tasks/${sTask.task_id}`);
+check('任务详情含报告', detail.data.reports.length >= 1, JSON.stringify(detail.data.reports));
 
 await pool.end();
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

@@ -1,26 +1,87 @@
 <script setup>
-import { onMounted, ref } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { computed, onMounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { api } from '../api';
 
 const route = useRoute();
-const router = useRouter();
 const task = ref(null);
 const reports = ref([]);
+const messages = ref([]);
+const replyText = ref('');
 const error = ref('');
 
-onMounted(async () => {
+async function load() {
   const data = await api.task(route.params.taskId);
   task.value = data.task;
-  reports.value = data.reports;
+  reports.value = data.reports || [];
+  messages.value = data.messages || [];
+}
+
+onMounted(load);
+
+/** 帖子流：首帖=任务要求，随后消息+报告按时间正序合并（论坛式） */
+const posts = computed(() => {
+  if (!task.value) return [];
+  const list = [
+    {
+      id: 'brief',
+      type: 'brief',
+      sender: task.value.creator_name || '管理员',
+      time: task.value.created_at,
+      content: task.value.instruction,
+    },
+    // 消息：跳过创建时写入的首条（内容=任务要求，避免与首帖重复）
+    ...messages.value
+      .filter((m) => m.content !== task.value.instruction)
+      .map((m) => ({
+        id: `m${m.id}`,
+        type: 'message',
+        sender: m.sender_role === 'admin' ? '管理员' : m.sender_role === 'system' ? '系统' : m.sender_name || 'agent',
+        role: m.sender_role,
+        time: m.created_at,
+        content: m.content,
+      })),
+    // 报告：agent 产出帖
+    ...reports.value.map((r) => ({
+      id: `r${r.created_at}`,
+      type: 'report',
+      sender: r.agent_id || 'agent',
+      time: r.created_at,
+      content: r.content,
+    })),
+  ];
+  return list.sort((a, b) => (a.time === b.time ? 0 : a.time < b.time ? -1 : 1));
 });
 
 async function cancel() {
   if (!confirm('确定取消该任务？')) return;
   try {
     await api.cancelTask(task.value.task_id);
-    const data = await api.task(task.value.task_id);
-    task.value = data.task;
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+async function reply() {
+  if (!replyText.value.trim()) return;
+  error.value = '';
+  try {
+    await api.taskReply(task.value.task_id, replyText.value.trim());
+    replyText.value = '';
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+async function resolveTask() {
+  const finalResult = prompt('可选：填写最终结论（回车关闭任务）', '');
+  if (finalResult === null) return;
+  error.value = '';
+  try {
+    await api.taskResolve(task.value.task_id, finalResult.trim());
+    await load();
   } catch (e) {
     error.value = e.message;
   }
@@ -31,73 +92,91 @@ function badge(status) {
     done: 'text-bg-success',
     failed: 'text-bg-danger',
     running: 'text-bg-info',
-    assigned: 'text-bg-warning',
     pending: 'text-bg-warning',
+    open: 'text-bg-info',
+    resolved: 'text-bg-success',
     cancelled: 'text-bg-secondary',
   }[status] || 'text-bg-secondary';
+}
+
+function postIcon(type) {
+  return { brief: 'bi-pin-angle-fill', message: 'bi-chat-left-text', report: 'bi-journal-check' }[type];
+}
+
+function postColor(type) {
+  return {
+    brief: 'rgba(99,102,241,0.18)',
+    message: 'rgba(56,189,248,0.14)',
+    report: 'rgba(16,185,129,0.14)',
+  }[type];
 }
 </script>
 
 <template>
-  <router-link to="/tasks" class="btn btn-sm btn-outline-secondary mb-3">← 任务列表</router-link>
+  <router-link to="/tasks" class="btn btn-sm btn-outline-secondary mb-3"><i class="bi bi-arrow-left me-1"></i>任务列表</router-link>
   <div v-if="task">
-    <h4 class="mb-1">{{ task.title }} <span class="text-secondary small">{{ task.task_id }}</span></h4>
-    <div class="text-secondary small mb-3">创建于 {{ task.created_at }}</div>
-    <div v-if="error" class="alert alert-danger py-2">{{ error }}</div>
-
-    <div class="row">
-      <div class="col-md-6">
-        <div class="card mb-3">
-          <div class="card-body">
-            <table class="table table-sm mb-0">
-              <tbody>
-                <tr><th class="text-secondary" style="width:110px">类型</th>
-                  <td><span class="badge" :class="task.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ task.kind }}</span></td></tr>
-                <tr><th class="text-secondary">状态</th><td><span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span></td></tr>
-                <tr><th class="text-secondary">指派给</th><td>{{ task.assignee_name }} ({{ task.assignee }})</td></tr>
-                <tr v-if="task.workdir"><th class="text-secondary">工作目录</th><td><code>{{ task.workdir }}</code></td></tr>
-                <template v-if="task.kind === 'scheduled'">
-                  <tr><th class="text-secondary">周期</th><td>{{ task.schedule_cron }}</td></tr>
-                  <tr><th class="text-secondary">时间窗口</th><td>{{ task.window_start }} ~ {{ task.window_end }}（窗口内随机时刻，错峰）</td></tr>
-                  <tr><th class="text-secondary">下次执行</th><td>{{ task.next_due_at }}</td></tr>
-                  <tr><th class="text-secondary">报告主题</th><td><router-link :to="`/topics/${task.topic}`">{{ task.topic }}</router-link></td></tr>
-                </template>
-                <tr><th class="text-secondary">认领时间</th><td>{{ task.claimed_at || '—' }}</td></tr>
-              </tbody>
-            </table>
-            <button v-if="['pending','assigned','running'].includes(task.status)"
-              class="btn btn-sm btn-outline-danger mt-3" @click="cancel">取消任务</button>
-          </div>
+    <!-- 任务头部：信息横排 -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+          <h4 class="mb-0 fw-bold">{{ task.title }}</h4>
+          <span class="text-secondary small">{{ task.task_id }}</span>
+          <span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span>
+          <span class="badge" :class="task.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ task.kind }}</span>
         </div>
-
-        <h6>指令</h6>
-        <pre>{{ task.instruction }}</pre>
+        <div class="d-flex flex-wrap gap-4 text-secondary small">
+          <span><i class="bi bi-person-plus me-1"></i>发起方：{{ task.creator_name || '管理员' }} {{ task.creator_agent_id || '' }}</span>
+          <span><i class="bi bi-person-check me-1"></i>执行方：{{ task.assignee_name }} ({{ task.assignee }})</span>
+          <span v-if="task.workdir"><i class="bi bi-folder2-open me-1"></i>工作目录：<code>{{ task.workdir }}</code></span>
+          <template v-if="task.kind === 'scheduled'">
+            <span><i class="bi bi-arrow-repeat me-1"></i>周期：{{ task.schedule_cron }}</span>
+            <span><i class="bi bi-alarm me-1"></i>下次：{{ task.next_due_at }}</span>
+          </template>
+          <span><i class="bi bi-clock me-1"></i>创建：{{ task.created_at }}</span>
+          <span v-if="task.status === 'resolved' || task.status === 'done'">
+            <i class="bi bi-check2-circle me-1"></i>完成：{{ task.resolved_by_name || '管理员' }} · {{ task.result_at }}
+          </span>
+        </div>
+        <div v-if="error" class="alert alert-danger py-2 small mt-2 mb-0">{{ error }}</div>
       </div>
+    </div>
 
-      <div class="col-md-6">
-        <h6>执行结果</h6>
-        <div class="card mb-3">
-          <div class="card-body">
-            <template v-if="task.result">
-              <span class="badge" :class="task.result_status === 'success' ? 'text-bg-success' : 'text-bg-danger'">
-                {{ task.result_status }}
-              </span>
-              <span class="text-secondary small ms-2">于 {{ task.result_at }}</span>
-              <pre class="mt-2 mb-0">{{ task.result }}</pre>
-            </template>
-            <span v-else class="text-secondary">尚未汇报结果。</span>
+    <!-- 帖子流：任务要求 + 消息 + 报告（论坛式） -->
+    <div class="mb-3">
+      <div v-for="p in posts" :key="p.id" class="card mb-2">
+        <div class="card-body py-2">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="d-inline-flex align-items-center justify-content-center"
+              :style="{ width: '26px', height: '26px', borderRadius: '0.5rem', background: postColor(p.type), color: '#c7d2fe' }">
+              <i class="bi" :class="postIcon(p.type)" style="font-size:0.85rem"></i>
+            </span>
+            <span class="sender" :style="{ color: p.type === 'brief' ? '#a5b4fc' : p.type === 'report' ? '#34d399' : '#7dd3fc' }">
+              {{ p.sender }}
+            </span>
+            <span class="badge" :class="p.type === 'brief' ? 'text-bg-primary' : p.type === 'report' ? 'text-bg-success' : 'text-bg-info'" style="font-size:0.65rem">
+              {{ p.type === 'brief' ? '任务要求' : p.type === 'report' ? '报告' : '回复' }}
+            </span>
+            <span class="time ms-auto">{{ p.time }}</span>
           </div>
-        </div>
-
-        <h6>关联报告</h6>
-        <div v-if="reports.length === 0" class="card"><div class="card-body text-secondary">无关联报告。</div></div>
-        <div v-for="r in reports" :key="r.created_at" class="card mb-2">
-          <div class="card-body">
-            <div class="text-secondary small mb-1">agent <code>{{ r.agent_id }}</code> · {{ r.created_at }}</div>
-            <pre class="mb-0">{{ r.content }}</pre>
-          </div>
+          <pre class="mb-0">{{ p.content }}</pre>
         </div>
       </div>
+    </div>
+
+    <!-- 回复框（底部，open 状态） -->
+    <div v-if="task.status === 'open'" class="card">
+      <div class="card-body">
+        <textarea v-model="replyText" class="form-control mb-2" rows="3"
+          placeholder="回复该任务（指导 agent 继续 / 提供信息 / 确认结果）..."></textarea>
+        <div class="d-flex gap-2">
+          <button class="btn btn-primary" @click="reply" :disabled="!replyText.trim()"><i class="bi bi-send me-1"></i>回复</button>
+          <button class="btn btn-outline-success" @click="resolveTask"><i class="bi bi-check2-circle me-1"></i>完成任务</button>
+          <button class="btn btn-outline-danger ms-auto" @click="cancel"><i class="bi bi-x-circle me-1"></i>取消任务</button>
+        </div>
+      </div>
+    </div>
+    <div v-else class="text-secondary small mb-2">
+      任务已 {{ task.status }}，会话已关闭。{{ task.result ? `最终结论：${task.result}` : '' }}
     </div>
   </div>
 </template>

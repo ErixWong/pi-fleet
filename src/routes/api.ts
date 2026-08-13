@@ -53,10 +53,10 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
     query(`SELECT status, COUNT(*) AS cnt FROM agents GROUP BY status`),
     query(`SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status`),
     query(
-      `SELECT r.content, r.created_at, a.agent_id, tp.topic
+      `SELECT r.content, r.created_at, a.agent_id, t.task_id
          FROM reports r
-         JOIN agents a ON a.id = r.agent_id
-         JOIN topics tp ON tp.id = r.topic_id
+         LEFT JOIN agents a ON a.id = r.agent_id
+         LEFT JOIN tasks t ON t.id = r.task_id
         ORDER BY r.created_at DESC LIMIT 5`,
     ),
   ]);
@@ -91,15 +91,21 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
   }
   const agentId = `agent-${randomBytes(3).toString('hex')}`;
   const key = generateApiKey();
-  const systemPrompt = (body.system_prompt ?? '').trim() || null;
+  // 系统提示词：未填时自动生成（主机视角，用户无需关心 agent 细节）
+  const hostname = (body.hostname ?? '').trim();
+  const description = (body.description ?? '').trim();
+  const customPrompt = (body.system_prompt ?? '').trim();
+  const systemPrompt =
+    customPrompt ||
+    `你是主机「${name}」的 agent（agent_id: ${agentId}）。${hostname ? `位于 ${hostname}。` : ''}${description ? `职责：${description}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
   await query(
     `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, key_hash)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       agentId,
       name,
-      (body.hostname ?? '').trim(),
-      (body.description ?? '').trim(),
+      hostname,
+      description,
       systemPrompt,
       (body.tags ?? '').trim(),
       hashApiKey(key),
@@ -176,10 +182,9 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
   let sql = `
     SELECT t.task_id, t.title, t.kind, t.status, t.schedule_cron, t.next_due_at,
            t.result_status, t.result_at, t.created_at, t.workdir,
-           a.agent_id AS assignee, a.name AS assignee_name, tp.topic
+           a.agent_id AS assignee, a.name AS assignee_name
       FROM tasks t
       LEFT JOIN agents a ON a.id = t.assignee_id
-      LEFT JOIN topics tp ON tp.id = t.topic_id
      WHERE 1=1`;
   if (kind) {
     sql += ' AND t.kind = ?';
@@ -191,9 +196,10 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
   }
   sql += ' ORDER BY t.created_at DESC LIMIT 200';
   const tasks = await query(sql, params);
-  const agents = await query(`SELECT id, agent_id, name FROM agents WHERE status='active' ORDER BY name`);
-  const topics = await query(`SELECT id, topic FROM topics ORDER BY topic`);
-  res.json({ tasks, agents, topics });
+  const agents = await query(
+    `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' ORDER BY name`,
+  );
+  res.json({ tasks, agents });
 });
 
 apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
@@ -205,7 +211,6 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     schedule_cron?: string;
     window_start?: string;
     window_end?: string;
-    topic_name?: string;
     workdir?: string;
   };
   const kind = body.kind === 'scheduled' ? 'scheduled' : 'manual';
@@ -226,35 +231,29 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         const cron = (body.schedule_cron ?? 'daily').trim() || 'daily';
         const ws = (body.window_start ?? '').trim() || '03:00';
         const we = (body.window_end ?? '').trim() || '06:00';
-        const topicName = (body.topic_name ?? '').trim();
-        let topicId: number | null = null;
-        if (topicName) {
-          const topics = await conn.query(`SELECT id FROM topics WHERE topic = ? LIMIT 1`, [topicName]);
-          if ((topics as unknown[]).length > 0) {
-            topicId = Number(((topics as unknown[])[0] as { id: unknown }).id);
-          } else {
-            const ins = await conn.query(`INSERT INTO topics (topic) VALUES (?)`, [topicName]);
-            topicId = Number((ins as unknown as { insertId: unknown }).insertId);
-          }
-        }
         if (!assigneeId) {
           throw new Error('定时任务必须指派给一个 agent');
         }
         const nextDue = computeNextDue(cron, ws, we, new Date());
         await conn.query(
           `INSERT INTO tasks (task_id, title, instruction, kind, assignee_id, status,
-                              schedule_cron, window_start, window_end, next_due_at, topic_id, workdir)
-           VALUES (?, ?, ?, 'scheduled', ?, 'pending', ?, ?, ?, ?, ?, ?)`,
-          [taskId, title, instruction, assigneeId, cron, ws, we, toLocalString(nextDue), topicId, workdir],
+                              schedule_cron, window_start, window_end, next_due_at, workdir)
+           VALUES (?, ?, ?, 'scheduled', ?, 'pending', ?, ?, ?, ?, ?)`,
+          [taskId, title, instruction, assigneeId, cron, ws, we, toLocalString(nextDue), workdir],
         );
       } else {
         if (!assigneeId) {
           throw new Error('指派任务必须选择 agent');
         }
-        await conn.query(
+        // manual 协作会话：初始 open + 首条消息（管理员发起）
+        const ins = await conn.query(
           `INSERT INTO tasks (task_id, title, instruction, kind, assignee_id, status, workdir)
-           VALUES (?, ?, ?, 'manual', ?, 'pending', ?)`,
+           VALUES (?, ?, ?, 'manual', ?, 'open', ?)`,
           [taskId, title, instruction, assigneeId, workdir],
+        );
+        await conn.query(
+          `INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, NULL, 'admin', ?)`,
+          [Number((ins as unknown as { insertId: unknown }).insertId), instruction],
         );
       }
     });
@@ -267,10 +266,13 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
 
 apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
   const rows = await query(
-    `SELECT t.*, a.agent_id AS assignee, a.name AS assignee_name, tp.topic
+    `SELECT t.*, a.agent_id AS assignee, a.name AS assignee_name,
+            c.agent_id AS creator_agent_id, c.name AS creator_name,
+            rby.agent_id AS resolved_by_agent_id, rby.name AS resolved_by_name
        FROM tasks t
        LEFT JOIN agents a ON a.id = t.assignee_id
-       LEFT JOIN topics tp ON tp.id = t.topic_id
+       LEFT JOIN agents c ON c.id = t.creator_id
+       LEFT JOIN agents rby ON rby.id = t.resolved_by_id
       WHERE t.task_id = ? LIMIT 1`,
     [req.params.taskId],
   );
@@ -285,12 +287,59 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
       WHERE r.task_id = ? ORDER BY r.created_at DESC LIMIT 10`,
     [task.id],
   );
-  res.json({ task, reports });
+  // 协作会话：返回消息流
+  const messages = await query(
+    `SELECT m.id, m.sender_id, m.sender_role, a.name AS sender_name, m.content, m.created_at
+       FROM messages m LEFT JOIN agents a ON a.id = m.sender_id
+      WHERE m.task_id = ? ORDER BY m.created_at ASC, m.id ASC`,
+    [task.id],
+  );
+  res.json({ task, reports, messages });
+});
+
+// 管理员回复协作任务
+apiRouter.post('/tasks/:taskId/reply', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as { content?: string };
+  if (!body.content) {
+    res.status(400).json({ error: '缺少 content' });
+    return;
+  }
+  const task = await query(`SELECT id, status FROM tasks WHERE task_id = ? LIMIT 1`, [req.params.taskId]);
+  if (task.length === 0) {
+    res.status(404).json({ error: '任务不存在' });
+    return;
+  }
+  if (String(task[0].status) !== 'open') {
+    res.status(400).json({ error: `任务已 ${task[0].status}，无法回复` });
+    return;
+  }
+  await query(`INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, NULL, 'admin', ?)`, [
+    task[0].id,
+    body.content,
+  ]);
+  await query(`UPDATE tasks SET last_activity_at = NOW() WHERE id = ?`, [task[0].id]);
+  res.json({ ok: true });
+});
+
+// 管理员关闭协作任务（关闭者=管理员，resolved_by_id NULL）
+apiRouter.post('/tasks/:taskId/resolve', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as { final_result?: string };
+  const result = await query(
+    `UPDATE tasks SET status='resolved', result=?, result_status='success', result_at=NOW(), resolved_by_id=NULL
+      WHERE task_id = ? AND status = 'open'`,
+    [body.final_result ?? null, req.params.taskId],
+  );
+  const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
+  if (info === 0) {
+    res.status(400).json({ error: '任务不存在或不在进行中' });
+    return;
+  }
+  res.json({ ok: true });
 });
 
 apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
   const result = await query(
-    `UPDATE tasks SET status = 'cancelled' WHERE task_id = ? AND status IN ('pending','assigned','running')`,
+    `UPDATE tasks SET status = 'cancelled' WHERE task_id = ? AND status IN ('pending','assigned','running','open')`,
     [req.params.taskId],
   );
   const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
@@ -301,34 +350,19 @@ apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ─────────────────────────── 主题与报告 ───────────────────────────
-apiRouter.get('/topics', requireAdminJson, async (_req, res) => {
-  const topics = await query(
-    `SELECT tp.id, tp.topic, tp.description, tp.created_at,
-            (SELECT COUNT(*) FROM reports r WHERE r.topic_id = tp.id) AS report_count
-       FROM topics tp ORDER BY tp.created_at DESC`,
+// ─────────────────────────── 全局动态（最新产出/回复） ───────────────────────────
+apiRouter.get('/activity', requireAdminJson, async (_req, res) => {
+  const activity = await query(
+    `(SELECT 'report' AS type, r.created_at, a.agent_id AS who, t.task_id, r.content AS content
+        FROM reports r
+        LEFT JOIN agents a ON a.id = r.agent_id
+        LEFT JOIN tasks t ON t.id = r.task_id)
+     UNION ALL
+     (SELECT 'message' AS type, m.created_at, a.agent_id AS who, t.task_id, m.content AS content
+        FROM messages m
+        LEFT JOIN agents a ON a.id = m.sender_id
+        LEFT JOIN tasks t ON t.id = m.task_id)
+     ORDER BY created_at DESC LIMIT 10`,
   );
-  res.json({ topics });
-});
-
-apiRouter.get('/topics/:topic', requireAdminJson, async (req, res) => {
-  const rows = await query(
-    `SELECT tp.id, tp.topic, tp.description FROM topics tp WHERE tp.topic = ? LIMIT 1`,
-    [req.params.topic],
-  );
-  if (rows.length === 0) {
-    res.status(404).json({ error: '主题不存在' });
-    return;
-  }
-  const topic = rows[0] as Record<string, unknown>;
-  const reports = await query(
-    `SELECT r.content, r.created_at, a.agent_id, t.task_id
-       FROM reports r
-       LEFT JOIN agents a ON a.id = r.agent_id
-       LEFT JOIN tasks t ON t.id = r.task_id
-      WHERE r.topic_id = ?
-      ORDER BY r.created_at DESC LIMIT 100`,
-    [topic.id],
-  );
-  res.json({ topic, reports });
+  res.json({ activity });
 });

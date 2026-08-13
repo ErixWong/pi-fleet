@@ -48,18 +48,23 @@ onBeforeUnmount(() => modal?.dispose());
 
 <template>
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <h4 class="mb-0">Agent 管理</h4>
-    <button class="btn btn-primary" @click="open">+ 注册 Agent</button>
+    <div>
+      <h4 class="mb-0 fw-bold">主机管理</h4>
+      <div class="text-secondary small">各台设备接入与状态</div>
+    </div>
+    <button class="btn btn-primary" @click="open"><i class="bi bi-plus-lg me-1"></i>注册主机</button>
   </div>
 
   <div v-if="newKey" class="alert alert-warning">
-    <div class="fw-bold mb-1">⚠️ API Key 已生成（只显示这一次，请立即保存）— {{ newKey.name }}</div>
+    <div class="fw-bold mb-1"><i class="bi bi-key-fill me-1"></i>API Key 已生成（只显示这一次，请立即保存）— {{ newKey.name }}</div>
     <div class="key-box">{{ newKey.key }}</div>
-    <div class="small mt-2 text-secondary">此 key 用于 MCP 登录（pi-mcp-adapter 的 <code>PI_AGENT_KEY</code>），数据库只存哈希。</div>
-    <button class="btn btn-sm btn-outline-secondary mt-2" @click="newKey = null">我已保存</button>
+    <div class="small mt-2 text-secondary">此 key 用于该主机接入平台（pi-mcp-adapter 的 <code>PI_AGENT_KEY</code>），数据库只存哈希。</div>
+    <button class="btn btn-sm btn-outline-secondary mt-2" @click="newKey = null"><i class="bi bi-check2 me-1"></i>我已保存</button>
   </div>
 
-  <div v-if="agents.length === 0" class="card"><div class="card-body text-secondary">还没有 agent，先注册一个。</div></div>
+  <div v-if="agents.length === 0" class="card"><div class="card-body empty-state">
+    <i class="bi bi-pc-display"></i>还没有主机，先注册一个。
+  </div></div>
   <table v-else class="table table-hover">
     <thead><tr><th>Agent</th><th>主机</th><th>标签</th><th>状态</th><th>最近活跃</th><th></th></tr></thead>
     <tbody>

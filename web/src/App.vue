@@ -13,19 +13,19 @@ async function logout() {
 
 <template>
   <div class="min-vh-100 d-flex flex-column">
-    <nav v-if="route.path !== '/login'" class="navbar navbar-expand navbar-dark bg-dark border-bottom px-3">
-      <span class="navbar-brand me-4">⚙ 任务分发平台</span>
-      <div class="navbar-nav">
-        <router-link to="/" class="nav-link" exact-active-class="active">仪表盘</router-link>
-        <router-link to="/tasks" class="nav-link" active-class="active">任务</router-link>
-        <router-link to="/agents" class="nav-link" active-class="active">Agent</router-link>
-        <router-link to="/topics" class="nav-link" active-class="active">主题报告</router-link>
+    <nav v-if="route.path !== '/login'" class="navbar navbar-expand navbar-dark px-3">
+      <span class="navbar-brand me-3"><i class="bi bi-hdd-network me-1"></i>任务分发平台</span>
+      <div class="navbar-nav d-flex gap-1">
+        <router-link to="/" class="nav-link" exact-active-class="active"><i class="bi bi-grid-1x2 me-1"></i>仪表盘</router-link>
+        <router-link to="/tasks" class="nav-link" active-class="active"><i class="bi bi-list-check me-1"></i>任务</router-link>
+        <router-link to="/agents" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
       </div>
       <div class="ms-auto">
-        <button class="btn btn-sm btn-outline-secondary" @click="logout">退出</button>
+        <button class="btn btn-sm btn-outline-secondary" @click="logout"><i class="bi bi-box-arrow-right me-1"></i>退出</button>
       </div>
     </nav>
-    <main class="container-fluid py-4 flex-grow-1" style="max-width:1200px">
+    <!-- 加宽布局：全宽 + 适度留白 -->
+    <main class="container-fluid py-4 flex-grow-1 px-4 px-xxl-5" style="max-width:1720px; width:100%; margin:0 auto">
       <router-view />
     </main>
   </div>

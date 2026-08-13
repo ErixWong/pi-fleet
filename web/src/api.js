@@ -32,6 +32,7 @@ export const api = {
   createTask: (payload) => req('POST', '/api/tasks', payload),
   task: (id) => req('GET', `/api/tasks/${id}`),
   cancelTask: (id) => req('POST', `/api/tasks/${id}/cancel`),
-  topics: () => req('GET', '/api/topics'),
-  topic: (t) => req('GET', `/api/topics/${encodeURIComponent(t)}`),
+  taskReply: (id, content) => req('POST', `/api/tasks/${id}/reply`, { content }),
+  taskResolve: (id, final_result) => req('POST', `/api/tasks/${id}/resolve`, { final_result: final_result || undefined }),
+  activity: () => req('GET', '/api/activity'),
 };
