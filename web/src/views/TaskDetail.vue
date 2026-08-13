@@ -8,6 +8,7 @@ const route = useRoute();
 const task = ref(null);
 const reports = ref([]);
 const messages = ref([]);
+const deliverables = ref({ spec: [], versions: [] });
 const replyText = ref('');
 const error = ref('');
 
@@ -16,6 +17,7 @@ async function load() {
   task.value = data.task;
   reports.value = data.reports || [];
   messages.value = data.messages || [];
+  deliverables.value = data.deliverables || { spec: [], versions: [] };
 }
 
 onMounted(load);
@@ -137,6 +139,7 @@ function postColor(type) {
           <span v-if="task.status === 'resolved' || task.status === 'done'">
             <i class="bi bi-check2-circle me-1"></i>完成：{{ task.resolved_by_name || '管理员' }} · {{ task.result_at }}
           </span>
+          <span v-if="task.deliverable_version"><i class="bi bi-box-seam me-1"></i>交付版本：{{ task.deliverable_version }}</span>
         </div>
         <div v-if="error" class="alert alert-danger py-2 small mt-2 mb-0">{{ error }}</div>
       </div>
@@ -160,6 +163,41 @@ function postColor(type) {
             <span class="time ms-auto">{{ p.time }}</span>
           </div>
           <div class="md-content mb-0" v-html="renderMd(p.content)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 交付物：约定 + 版本 -->
+    <div v-if="deliverables.spec.length || deliverables.versions.length" class="card mb-3">
+      <div class="card-body">
+        <h6 class="fw-bold mb-2"><i class="bi bi-box-seam me-1"></i>交付物</h6>
+        <div v-if="deliverables.spec.length" class="mb-3">
+          <div class="text-secondary small mb-1">约定清单</div>
+          <table class="table table-sm">
+            <thead><tr><th>名称</th><th>路径</th><th>验收标准</th></tr></thead>
+            <tbody>
+              <tr v-for="s in deliverables.spec" :key="s.name">
+                <td class="fw-semibold">{{ s.name }}</td>
+                <td><code>{{ s.path || '—' }}</code></td>
+                <td>{{ s.criteria || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="deliverables.versions.length">
+          <div class="text-secondary small mb-1">已提交版本</div>
+          <div v-for="v in deliverables.versions" :key="v.id" class="d-flex align-items-start gap-2 py-2 border-bottom" style="border-color:var(--border-soft)">
+            <span class="badge" :class="v.current ? 'text-bg-success' : 'text-bg-secondary'">{{ v.version }}</span>
+            <div class="flex-grow-1">
+              <div class="d-flex gap-2 align-items-center flex-wrap">
+                <span class="fw-semibold small">{{ v.name }}</span>
+                <span class="text-secondary small">{{ v.created_at }}</span>
+                <span v-if="v.current" class="badge text-bg-info" style="font-size:0.65rem">当前</span>
+              </div>
+              <div v-if="v.path" class="small"><code>{{ v.path }}</code></div>
+              <div v-if="v.message" class="small text-secondary">{{ v.message }}</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

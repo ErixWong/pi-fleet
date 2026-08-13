@@ -9,7 +9,7 @@ const filter = ref({ kind: '', status: '' });
 const error = ref('');
 
 // 指派任务表单
-const manualForm = ref({ title: '', instruction: '', assignee_id: '', workdir: '' });
+const manualForm = ref({ title: '', instruction: '', assignee_id: '', workdir: '', deliverableSpec: [] });
 // 定时任务表单
 const schedForm = ref({
   title: '',
@@ -19,7 +19,18 @@ const schedForm = ref({
   window_start: '03:00',
   window_end: '06:00',
   workdir: '',
+  deliverableSpec: [],
 });
+
+function addDeliverable(form) {
+  form.deliverableSpec.push({ name: '', path: '', criteria: '' });
+}
+function removeDeliverable(form, i) {
+  form.deliverableSpec.splice(i, 1);
+}
+function cleanDeliverables(form) {
+  return form.deliverableSpec.filter((d) => d.name && d.name.trim());
+}
 
 let manualModal = null;
 let schedModal = null;
@@ -57,9 +68,10 @@ function openSched() {
 async function submitManual() {
   error.value = '';
   try {
-    await api.createTask({ kind: 'manual', ...manualForm.value });
+    const spec = cleanDeliverables(manualForm.value);
+    await api.createTask({ kind: 'manual', ...manualForm.value, deliverable_spec: spec.length ? spec : undefined });
     manualModal.hide();
-    manualForm.value = { title: '', instruction: '', assignee_id: '', workdir: '' };
+    manualForm.value = { title: '', instruction: '', assignee_id: '', workdir: '', deliverableSpec: [] };
     await load();
   } catch (e) {
     error.value = e.message;
@@ -69,11 +81,12 @@ async function submitManual() {
 async function submitSched() {
   error.value = '';
   try {
-    await api.createTask({ kind: 'scheduled', ...schedForm.value });
+    const spec = cleanDeliverables(schedForm.value);
+    await api.createTask({ kind: 'scheduled', ...schedForm.value, deliverable_spec: spec.length ? spec : undefined });
     schedModal.hide();
     schedForm.value = {
       title: '', instruction: '', assignee_id: '',
-      schedule_cron: 'daily', window_start: '03:00', window_end: '06:00', workdir: '',
+      schedule_cron: 'daily', window_start: '03:00', window_end: '06:00', workdir: '', deliverableSpec: [],
     };
     await load();
   } catch (e) {
@@ -166,6 +179,16 @@ function badge(status) {
             </select>
             <label class="form-label mt-2">工作目录（可选，在既有项目干活时填项目路径）</label>
             <input v-model="manualForm.workdir" class="form-control" placeholder="如 /home/dev/projects/prjxxx1">
+            <label class="form-label mt-2">交付物约定（可选，任务要交付什么 + 验收标准）</label>
+            <div v-for="(d, i) in manualForm.deliverableSpec" :key="i" class="border rounded p-2 mb-2" style="border-color:var(--border-soft)">
+              <div class="row g-2 align-items-center">
+                <div class="col-4"><input v-model="d.name" class="form-control form-control-sm" placeholder="名称 *（如 代码变更）"></div>
+                <div class="col-4"><input v-model="d.path" class="form-control form-control-sm" placeholder="路径（src/login.ts）"></div>
+                <div class="col-3"><input v-model="d.criteria" class="form-control form-control-sm" placeholder="验收标准（通过单测）"></div>
+                <div class="col-1"><button type="button" class="btn btn-sm btn-outline-danger w-100" @click="removeDeliverable(manualForm, i)"><i class="bi bi-x"></i></button></div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary" @click="addDeliverable(manualForm)"><i class="bi bi-plus me-1"></i>添加交付物</button>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
@@ -217,6 +240,16 @@ function badge(status) {
             </div>
             <label class="form-label mt-2">工作目录（可选，在既有项目干活时填项目路径）</label>
             <input v-model="schedForm.workdir" class="form-control" placeholder="如 /home/dev/projects/prjxxx1">
+            <label class="form-label mt-2">交付物约定（可选，任务要交付什么 + 验收标准）</label>
+            <div v-for="(d, i) in schedForm.deliverableSpec" :key="i" class="border rounded p-2 mb-2" style="border-color:var(--border-soft)">
+              <div class="row g-2 align-items-center">
+                <div class="col-4"><input v-model="d.name" class="form-control form-control-sm" placeholder="名称 *（如 代码变更）"></div>
+                <div class="col-4"><input v-model="d.path" class="form-control form-control-sm" placeholder="路径（src/login.ts）"></div>
+                <div class="col-3"><input v-model="d.criteria" class="form-control form-control-sm" placeholder="验收标准（通过单测）"></div>
+                <div class="col-1"><button type="button" class="btn btn-sm btn-outline-danger w-100" @click="removeDeliverable(schedForm, i)"><i class="bi bi-x"></i></button></div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary" @click="addDeliverable(schedForm)"><i class="bi bi-plus me-1"></i>添加交付物</button>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>

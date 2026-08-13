@@ -267,4 +267,38 @@ function registerTools(server: McpServer): void {
       return text({ ok: true, task_id, message: '报告已归档到任务' });
     },
   );
+
+  // ─────────────────────────── 交付物 ───────────────────────────
+  server.tool(
+    'list_deliverables',
+    '查看任务的交付物约定清单（创建任务时约定：名称/路径/验收标准）与全部已提交版本历史。',
+    { task_id: z.string().describe('任务 ID') },
+    async ({ task_id }) => {
+      const agent = requireAgent();
+      const { isParticipant, listDeliverables } = await import('../service/tasks.js');
+      if (!(await isParticipant(agent.id, task_id))) {
+        return text({ error: `任务 ${task_id} 不存在或你未参与` });
+      }
+      const data = await listDeliverables(task_id);
+      return text({ task_id, spec: data.spec, versions: data.versions });
+    },
+  );
+
+  server.tool(
+    'submit_deliverable',
+    '提交交付物版本（任务约定要交付的东西）。name 需与任务约定对齐（若有约定）；同一交付物每次提交版本自增（v1→v2…），历史全留。提交后应 post_message 告知对方。',
+    {
+      task_id: z.string().describe('任务 ID'),
+      name: z.string().describe('交付物名称（对应任务约定）'),
+      path: z.string().describe('交付物实际路径（如 src/login.ts）'),
+      message: z.string().optional().describe('可选：本次版本变更说明'),
+    },
+    async ({ task_id, name, path, message }) => {
+      const agent = requireAgent();
+      const { submitDeliverable } = await import('../service/tasks.js');
+      const r = await submitDeliverable(agent, task_id, name, path, message);
+      if (!r.ok) return text({ error: r.error });
+      return text({ ok: true, task_id, name, version: r.version, message: '交付物已提交' });
+    },
+  );
 }

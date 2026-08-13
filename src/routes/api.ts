@@ -212,6 +212,7 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     window_start?: string;
     window_end?: string;
     workdir?: string;
+    deliverable_spec?: unknown;
   };
   const kind = body.kind === 'scheduled' ? 'scheduled' : 'manual';
   const title = (body.title ?? '').trim();
@@ -226,6 +227,13 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     await withTransaction(async (conn) => {
       const taskId = nextTaskId();
       const workdir = (body.workdir ?? '').trim() || null;
+      // 交付物约定：数组 → JSON 字符串落库
+      const deliverableSpec =
+        body.deliverable_spec === undefined || body.deliverable_spec === null
+          ? null
+          : typeof body.deliverable_spec === 'string'
+            ? (body.deliverable_spec as string).trim() || null
+            : JSON.stringify(body.deliverable_spec);
 
       if (kind === 'scheduled') {
         const cron = (body.schedule_cron ?? 'daily').trim() || 'daily';
@@ -237,9 +245,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         const nextDue = computeNextDue(cron, ws, we, new Date());
         await conn.query(
           `INSERT INTO tasks (task_id, title, instruction, kind, assignee_id, status,
-                              schedule_cron, window_start, window_end, next_due_at, workdir)
-           VALUES (?, ?, ?, 'scheduled', ?, 'pending', ?, ?, ?, ?, ?)`,
-          [taskId, title, instruction, assigneeId, cron, ws, we, toLocalString(nextDue), workdir],
+                              schedule_cron, window_start, window_end, next_due_at, workdir, deliverable_spec)
+           VALUES (?, ?, ?, 'scheduled', ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+          [taskId, title, instruction, assigneeId, cron, ws, we, toLocalString(nextDue), workdir, deliverableSpec],
         );
       } else {
         if (!assigneeId) {
@@ -247,9 +255,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         }
         // manual 协作会话：初始 open + 首条消息（管理员发起）
         const ins = await conn.query(
-          `INSERT INTO tasks (task_id, title, instruction, kind, assignee_id, status, workdir)
-           VALUES (?, ?, ?, 'manual', ?, 'open', ?)`,
-          [taskId, title, instruction, assigneeId, workdir],
+          `INSERT INTO tasks (task_id, title, instruction, kind, assignee_id, status, workdir, deliverable_spec)
+           VALUES (?, ?, ?, 'manual', ?, 'open', ?, ?)`,
+          [taskId, title, instruction, assigneeId, workdir, deliverableSpec],
         );
         await conn.query(
           `INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, NULL, 'admin', ?)`,
@@ -294,7 +302,10 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
       WHERE m.task_id = ? ORDER BY m.created_at ASC, m.id ASC`,
     [task.id],
   );
-  res.json({ task, reports, messages });
+  // 交付物：约定（解析为数组）+ 版本记录
+  const { listDeliverables } = await import('../service/tasks.js');
+  const deliverables = await listDeliverables(String(task.task_id));
+  res.json({ task, reports, messages, deliverables });
 });
 
 // 管理员回复协作任务

@@ -380,6 +380,116 @@ export async function renewTaskActivity(
   return { ok: true };
 }
 
+// ─────────────────────────── 交付物（约定 + 版本） ───────────────────────────
+
+export interface DeliverableSpecItem {
+  name: string;
+  path?: string;
+  format?: string;
+  criteria?: string;
+}
+
+export interface DeliverableView {
+  id: number;
+  name: string;
+  path: string;
+  version: string;
+  message: string | null;
+  current: boolean;
+  agent_id: number;
+  created_at: string;
+}
+
+/** 解析任务的交付物约定（JSON 数组） */
+export function parseDeliverableSpec(spec: string | null): DeliverableSpecItem[] {
+  if (!spec) return [];
+  try {
+    const parsed = JSON.parse(spec);
+    return Array.isArray(parsed) ? (parsed as DeliverableSpecItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 任务的交付物约定 + 全部版本记录 */
+export async function listDeliverables(taskId: string): Promise<{
+  spec: DeliverableSpecItem[];
+  versions: DeliverableView[];
+}> {
+  const tasks = await query(`SELECT deliverable_spec FROM tasks WHERE task_id = ? LIMIT 1`, [taskId]);
+  if (tasks.length === 0) return { spec: [], versions: [] };
+  const spec = parseDeliverableSpec((tasks[0] as Record<string, unknown>).deliverable_spec as string | null);
+  const rows = await query(
+    `SELECT id, name, path, version, message, current, agent_id, created_at
+       FROM deliverables WHERE task_id = (SELECT id FROM tasks WHERE task_id = ?)
+      ORDER BY name ASC, version ASC`,
+    [taskId],
+  );
+  const versions = (rows as Array<Record<string, unknown>>).map((r) => ({
+    id: Number(r.id),
+    name: String(r.name),
+    path: String(r.path ?? ''),
+    version: String(r.version),
+    message: (r.message as string | null) ?? null,
+    current: Boolean(r.current),
+    agent_id: Number(r.agent_id),
+    created_at: String(r.created_at),
+  }));
+  return { spec, versions };
+}
+
+/**
+ * 提交交付物版本：校验参与任务 + 名称在约定中（若有约定），版本自增（v1→v2…）
+ * 旧版本 current=false，新版本 current=true，并刷新任务当前交付版本。
+ */
+export async function submitDeliverable(
+  agent: AgentIdentity,
+  taskId: string,
+  name: string,
+  path: string,
+  message?: string,
+): Promise<{ ok: boolean; version?: string; error?: string }> {
+  return withTransaction(async (conn) => {
+    const tasks = (await conn.query(
+      `SELECT id, status, deliverable_spec FROM tasks
+        WHERE task_id = ? AND (assignee_id = ? OR creator_id = ?) LIMIT 1 FOR UPDATE`,
+      [taskId, agent.id, agent.id],
+    )) as Array<Record<string, unknown>>;
+    if (tasks.length === 0) return { ok: false, error: `任务 ${taskId} 不存在或你未参与` };
+    const status = String(tasks[0].status);
+    if (status !== 'open' && status !== 'running' && status !== 'pending') {
+      return { ok: false, error: `任务已 ${status}，无法提交交付物` };
+    }
+    // 约定校验：任务有约定时，名称必须对齐
+    const spec = parseDeliverableSpec((tasks[0].deliverable_spec as string | null) ?? null);
+    if (spec.length > 0 && !spec.some((s) => s.name === name)) {
+      return {
+        ok: false,
+        error: `交付物「${name}」不在任务约定中（约定：${spec.map((s) => s.name).join('、')}）`,
+      };
+    }
+    // 版本自增：取该任务+名称的当前最大版本号
+    const maxRow = (await conn.query(
+      `SELECT MAX(CAST(REPLACE(version, 'v', '') AS UNSIGNED)) AS max_v
+         FROM deliverables WHERE task_id = ? AND name = ?`,
+      [tasks[0].id, name],
+    )) as Array<Record<string, unknown>>;
+    const nextVersion = `v${(Number(maxRow[0].max_v) || 0) + 1}`;
+    // 旧版本失效
+    await conn.query(`UPDATE deliverables SET current = FALSE WHERE task_id = ? AND name = ?`, [
+      tasks[0].id,
+      name,
+    ]);
+    await conn.query(
+      `INSERT INTO deliverables (task_id, name, path, version, message, current, agent_id)
+       VALUES (?, ?, ?, ?, ?, TRUE, ?)`,
+      [tasks[0].id, name, path, nextVersion, message ?? null, agent.id],
+    );
+    await conn.query(`UPDATE tasks SET deliverable_version = ? WHERE id = ?`, [nextVersion, tasks[0].id]);
+    return { ok: true, version: nextVersion };
+  });
+}
+
 // ─────────────────────────── 工具 ───────────────────────────
 
 function yymmdd(): string {

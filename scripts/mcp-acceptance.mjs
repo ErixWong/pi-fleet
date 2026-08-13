@@ -100,6 +100,44 @@ try {
   const detailA = await api('GET', `/api/tasks/${collabTaskId}`);
   check('workdir 已写回任务', detailA.task.workdir === '/opt/pi-agent/work/tasks/' + collabTaskId, JSON.stringify(detailA.task.workdir));
 
+  // 3.5 交付物：约定 + 版本
+  console.log('== 3.5 交付物（约定 + 版本） ==');
+  await api('POST', '/api/tasks', {
+    kind: 'manual', title: '交付物测试任务', assignee_id: agentA.agent.id,
+    instruction: '实现登录模块',
+    deliverable_spec: [
+      { name: '代码变更', path: 'src/login.ts', criteria: '通过单测' },
+      { name: '变更说明', path: 'docs/changelog.md' },
+    ],
+  });
+  const dlList = await api('GET', '/api/tasks');
+  const dlTask = dlList.tasks.find((t) => t.title === '交付物测试任务');
+  check('创建任务带交付物约定', !!dlTask);
+
+  const dlInfo = await call(clientA, 'list_deliverables', { task_id: dlTask.task_id });
+  check('list_deliverables 返回约定', dlInfo.spec.length === 2, JSON.stringify(dlInfo.spec));
+  check('约定含验收标准', dlInfo.spec[0].criteria === '通过单测', JSON.stringify(dlInfo.spec[0]));
+
+  const sub1 = await call(clientA, 'submit_deliverable', {
+    task_id: dlTask.task_id, name: '代码变更', path: 'src/login.ts', message: '初版实现',
+  });
+  check('提交交付物 v1', sub1.ok === true && sub1.version === 'v1', JSON.stringify(sub1));
+  const sub2 = await call(clientA, 'submit_deliverable', {
+    task_id: dlTask.task_id, name: '代码变更', path: 'src/login.ts', message: '修复 lint',
+  });
+  check('再次提交 v2（版本自增）', sub2.ok === true && sub2.version === 'v2', JSON.stringify(sub2));
+  const subBad = await call(clientA, 'submit_deliverable', {
+    task_id: dlTask.task_id, name: '不在约定', path: 'x.txt',
+  });
+  check('未约定交付物被拒', subBad.error?.includes('不在任务约定中'), JSON.stringify(subBad));
+
+  const dlInfo2 = await call(clientA, 'list_deliverables', { task_id: dlTask.task_id });
+  check('版本历史 2 条', dlInfo2.versions.length === 2, JSON.stringify(dlInfo2.versions));
+  check('v2 为当前版本', dlInfo2.versions.find((v) => v.version === 'v2')?.current === true, JSON.stringify(dlInfo2.versions));
+  const dlDetail = await api('GET', `/api/tasks/${dlTask.task_id}`);
+  check('任务交付版本快照 v2', dlDetail.task.deliverable_version === 'v2', JSON.stringify(dlDetail.task.deliverable_version));
+  check('详情含约定与版本', dlDetail.deliverables.spec.length === 2 && dlDetail.deliverables.versions.length === 2);
+
   // 4. 定时任务单轮（scheduled 走 submit_result）
   console.log('== 4. 定时任务（单轮） ==');
   await api('POST', '/api/tasks', {

@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   window_end TIME NULL,
   next_due_at DATETIME NULL,
   workdir VARCHAR(512) NULL,
+  deliverable_spec TEXT NULL,
+  deliverable_version VARCHAR(16) NULL,
   result TEXT NULL,
   result_status ENUM('success','failed') NULL,
   result_at DATETIME NULL,
@@ -118,6 +120,20 @@ CREATE TABLE IF NOT EXISTS reports (
   CONSTRAINT fk_reports_agent FOREIGN KEY (agent_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS deliverables (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id BIGINT NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  path VARCHAR(512) NOT NULL DEFAULT '',
+  version VARCHAR(16) NOT NULL,
+  message TEXT NULL,
+  current BOOLEAN NOT NULL DEFAULT FALSE,
+  agent_id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_deliv_task FOREIGN KEY (task_id) REFERENCES tasks(id),
+  CONSTRAINT fk_deliv_agent FOREIGN KEY (agent_id) REFERENCES agents(id)
+) ENGINE=InnoDB;
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(next_due_at);
@@ -131,11 +147,13 @@ ALTER TABLE reports DROP COLUMN IF EXISTS topic_id;
 ALTER TABLE tasks DROP COLUMN IF EXISTS topic_id;
 DROP TABLE IF EXISTS topics;
 
--- 幂等迁移：已存在的 tasks 表补充新列（workdir / last_activity_at / creator_id / resolved_by_id）
+-- 幂等迁移：已存在的 tasks 表补充新列（workdir / last_activity_at / creator_id / resolved_by_id / deliverable_*）
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workdir VARCHAR(512) NULL AFTER next_due_at;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_activity_at DATETIME NULL AFTER claimed_at;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS creator_id BIGINT NULL AFTER assignee_id;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resolved_by_id BIGINT NULL AFTER result_at;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliverable_spec TEXT NULL AFTER workdir;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliverable_version VARCHAR(16) NULL AFTER deliverable_spec;
 -- 状态枚举扩展（旧表迁移）：加入协作会话状态 open / resolved
 ALTER TABLE tasks MODIFY COLUMN status ENUM('pending','running','done','failed','cancelled','open','resolved') NOT NULL DEFAULT 'pending';
 `;
