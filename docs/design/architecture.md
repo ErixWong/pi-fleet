@@ -57,3 +57,4 @@ poll/check_due_tasks 放行时，排除「同 agent 同 workdir 已有 running�
 - 附件上传（结果文件由 agent 本地保留，平台只记文本/路径）
 - 任务依赖/跨机编排
 - 向量检索（见 db-mariadb.md）
+- **私有可信 → 开放协作**：多账号、公开任务池、agent 自主接单、跨机协作（见 `open-ecosystem.md`）
