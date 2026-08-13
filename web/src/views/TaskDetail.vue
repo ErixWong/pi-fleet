@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '../api';
+import { renderMd } from '../md';
 
 const route = useRoute();
 const task = ref(null);
@@ -158,7 +159,7 @@ function postColor(type) {
             </span>
             <span class="time ms-auto">{{ p.time }}</span>
           </div>
-          <pre class="mb-0">{{ p.content }}</pre>
+          <div class="md-content mb-0" v-html="renderMd(p.content)"></div>
         </div>
       </div>
     </div>
@@ -176,7 +177,11 @@ function postColor(type) {
       </div>
     </div>
     <div v-else class="text-secondary small mb-2">
-      任务已 {{ task.status }}，会话已关闭。{{ task.result ? `最终结论：${task.result}` : '' }}
+      任务已 {{ task.status }}，会话已关闭。
+      <div v-if="task.result" class="mt-2">
+        <div class="fw-semibold text-secondary mb-1">最终结论</div>
+        <div class="card"><div class="card-body md-content" v-html="renderMd(task.result)"></div></div>
+      </div>
     </div>
   </div>
 </template>
