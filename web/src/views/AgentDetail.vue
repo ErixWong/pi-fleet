@@ -34,6 +34,12 @@ async function resetKey() {
   }
 }
 
+async function toggleAccept() {
+  await api.toggleAgentAccept(agent.value.id);
+  const data = await api.agent(agent.value.id);
+  agent.value = data.agent;
+}
+
 function badge(status) {
   return {
     done: 'text-bg-success',
@@ -68,6 +74,15 @@ function badge(status) {
                 <tr><th class="text-secondary" style="width:110px">主机标识</th><td>{{ agent.hostname }}</td></tr>
                 <tr><th class="text-secondary">描述</th><td>{{ agent.description }}</td></tr>
                 <tr><th class="text-secondary">角色标签</th><td>{{ agent.tags }}</td></tr>
+                <tr><th class="text-secondary">接外单（公共池）</th>
+                  <td>
+                    <span class="badge" :class="agent.accept_external ? 'text-bg-warning' : 'text-bg-secondary'"
+                          role="button" @click="toggleAccept"
+                          :title="agent.accept_external ? '开启中：可认领公共池外单（点击关闭）' : '关闭（默认）：只做内部指派任务（点击开启）'">
+                      {{ agent.accept_external ? '开' : '关' }}
+                    </span>
+                    <span class="text-secondary small ms-1">内外分离：接外单的主机应为隔离环境</span>
+                  </td></tr>
                 <tr><th class="text-secondary">状态</th>
                   <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span></td></tr>
                 <tr><th class="text-secondary">最近活跃</th><td>{{ agent.last_seen_at || '从未连接' }}</td></tr>

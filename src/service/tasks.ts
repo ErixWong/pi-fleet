@@ -16,8 +16,9 @@ import { computeNextDue, nowString, toLocalString } from '../scheduler.js';
 export interface MessageView {
   id: number;
   sender_id: number | null;
-  sender_role: 'agent' | 'admin' | 'system';
+  sender_role: 'agent' | 'admin' | 'system' | 'platform';
   sender_name: string | null;
+  type: 'chat' | 'progress' | 'report' | 'verdict' | 'system';
   content: string;
   created_at: string;
 }
@@ -25,7 +26,7 @@ export interface MessageView {
 /** 任务的完整消息流（时间正序） */
 export async function getTaskMessages(taskId: string): Promise<MessageView[]> {
   const rows = await query(
-    `SELECT m.id, m.sender_id, m.sender_role, a.name AS sender_name, m.content, m.created_at
+    `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, m.content, m.created_at
        FROM messages m
        LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.task_id = (SELECT id FROM tasks WHERE task_id = ?)
@@ -37,6 +38,7 @@ export async function getTaskMessages(taskId: string): Promise<MessageView[]> {
     sender_id: r.sender_id === null ? null : Number(r.sender_id),
     sender_role: (r.sender_role as MessageView['sender_role']) ?? 'agent',
     sender_name: (r.sender_name as string | null) ?? null,
+    type: (r.type as MessageView['type']) ?? 'chat',
     content: String(r.content),
     created_at: String(r.created_at),
   }));
@@ -45,7 +47,7 @@ export async function getTaskMessages(taskId: string): Promise<MessageView[]> {
 /** 最后一条消息 */
 export async function getLastMessage(taskId: string): Promise<MessageView | null> {
   const rows = await query(
-    `SELECT m.id, m.sender_id, m.sender_role, a.name AS sender_name, m.content, m.created_at
+    `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, m.content, m.created_at
        FROM messages m
        LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.task_id = (SELECT id FROM tasks WHERE task_id = ?)
@@ -59,6 +61,7 @@ export async function getLastMessage(taskId: string): Promise<MessageView | null
     sender_id: r.sender_id === null ? null : Number(r.sender_id),
     sender_role: (r.sender_role as MessageView['sender_role']) ?? 'agent',
     sender_name: (r.sender_name as string | null) ?? null,
+    type: (r.type as MessageView['type']) ?? 'chat',
     content: String(r.content),
     created_at: String(r.created_at),
   };
@@ -87,7 +90,8 @@ export interface DueTask {
 
 /**
  * 返回"等待该 agent 动作"的任务：
- * - manual（协作会话）：status=open，且最后消息发送者 ≠ 该 agent（无消息时 assignee 先处理）
+ * - manual（协作会话/认领）：status IN (open,claimed) 且最后消息发送者 ≠ 该 agent（无消息时 assignee 先处理）；
+ *   认领后待验收（submitted/pending_confirm）时发起人（creator）被返回
  * - scheduled：到期（next_due_at <= now）
  * manual 不改变状态（会话中）；scheduled 放行置 running + 推进下次执行。
  * 同 agent 同 workdir 已有占用时不并发放行（防项目互踩）。
@@ -105,10 +109,10 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
             WHERE m1.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.task_id = m1.task_id)
          ) lm ON lm.task_id = t.id
         WHERE (
-               (t.kind = 'manual' AND t.status = 'open' AND (
-                 (t.assignee_id = ? AND (lm.sender_id IS NULL OR lm.sender_id != ?))
-                 OR (t.creator_id = ? AND lm.sender_id IS NOT NULL AND lm.sender_id != ?)
-               ))
+               (t.kind = 'manual' AND t.status IN ('open','claimed')
+                 AND (t.assignee_id = ? AND (lm.sender_id IS NULL OR lm.sender_id != ?)))
+               OR (t.kind = 'manual' AND t.status IN ('open','claimed','submitted','pending_confirm')
+                 AND (t.creator_id = ? AND (lm.sender_id IS NULL OR lm.sender_id != ?)))
                OR (t.kind = 'scheduled' AND t.status IN ('pending','done','failed')
                    AND t.next_due_at IS NOT NULL AND t.next_due_at <= ?)
               )
@@ -116,7 +120,7 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
                 t.workdir IS NULL
                 OR t.workdir NOT IN (
                   SELECT workdir FROM tasks
-                   WHERE assignee_id = ? AND status IN ('running','open') AND workdir IS NOT NULL
+                   WHERE assignee_id = ? AND status IN ('running','open','claimed','active') AND workdir IS NOT NULL
                      AND id != t.id
                 )
               )
@@ -181,11 +185,11 @@ export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]>
   const me = agent.id;
   const rows = await query(
     `SELECT t.task_id, t.title, t.kind, t.status, t.workdir, t.created_at,
-            lm.id AS lm_id, lm.sender_id AS lm_sender, lm.sender_role AS lm_role,
+            lm.id AS lm_id, lm.sender_id AS lm_sender, lm.sender_role AS lm_role, lm.type AS lm_type,
             a.name AS lm_sender_name, lm.content AS lm_content, lm.created_at AS lm_created
        FROM tasks t
        LEFT JOIN (
-         SELECT task_id, id, sender_id, sender_role, content, created_at
+         SELECT task_id, id, sender_id, sender_role, type, content, created_at
            FROM messages m1
           WHERE m1.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.task_id = m1.task_id)
        ) lm ON lm.task_id = t.id
@@ -200,12 +204,13 @@ export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]>
       sender_id: r.lm_sender === null ? null : Number(r.lm_sender),
       sender_role: (r.lm_role as MessageView['sender_role']) ?? 'agent',
       sender_name: (r.lm_sender_name as string | null) ?? null,
+      type: (r.lm_type as MessageView['type']) ?? 'chat',
       content: String(r.lm_content),
       created_at: String(r.lm_created),
     };
     // 待我回复：最后消息 sender 不是我（或无消息且我是 assignee）
     const awaitingMe =
-      r.status === 'open' &&
+      ['open', 'claimed', 'submitted', 'pending_confirm'].includes(String(r.status)) &&
       (last === null ? Number(r.assignee_id) === me : last.sender_id !== me);
     return {
       task_id: String(r.task_id),
@@ -222,24 +227,31 @@ export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]>
 
 // ─────────────────────────── 会话操作 ───────────────────────────
 
-/** 回复任务（校验：参与该任务且状态 open） */
+/** 回复任务（§3.6 reply 吸收 post_message/publish_report/report_progress）：
+ * - manual：参与且状态 open/claimed（会话进行中）
+ * - scheduled：执行方任意状态可回帖（type=report 作归档，吸收 publish_report）
+ * 回复即续期（副作用：刷新 last_activity_at） */
 export async function postMessageToTask(
   agent: AgentIdentity,
   taskId: string,
   content: string,
+  type: 'chat' | 'progress' | 'report' = 'chat',
 ): Promise<{ ok: boolean; error?: string }> {
   return withTransaction(async (conn) => {
     const tasks = (await conn.query(
-      `SELECT id, status FROM tasks WHERE task_id = ? AND (assignee_id = ? OR creator_id = ?) LIMIT 1
+      `SELECT id, status, kind FROM tasks WHERE task_id = ? AND (assignee_id = ? OR creator_id = ?) LIMIT 1
         FOR UPDATE`,
       [taskId, agent.id, agent.id],
     )) as Array<Record<string, unknown>>;
     if (tasks.length === 0) return { ok: false, error: `任务 ${taskId} 不存在或你未参与` };
     const status = String(tasks[0].status);
-    if (status !== 'open') return { ok: false, error: `任务已 ${status}，无法回复` };
+    const kind = String(tasks[0].kind);
+    if (kind !== 'scheduled' && status !== 'open' && status !== 'claimed') {
+      return { ok: false, error: `任务已 ${status}，无法回复` };
+    }
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'agent', ?)`,
-      [tasks[0].id, agent.id, content],
+      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', ?, ?)`,
+      [tasks[0].id, agent.id, type, content],
     );
     await conn.query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), tasks[0].id]);
     return { ok: true };
@@ -384,9 +396,14 @@ export async function renewTaskActivity(
 
 export interface DeliverableSpecItem {
   name: string;
+  /** 遗留字段：建议路径（§3.7 废止，仅展示） */
   path?: string;
-  format?: string;
+  /** 遗留字段：验收标准（§3.7 后由 LLM 语义校验承担，仅展示） */
   criteria?: string;
+  /** §3.7：最少数量（默认 1） */
+  min_count?: number;
+  /** §3.7：类型约束，如 '.md'（扩展名）或 'text/'（mime 前缀） */
+  type?: string;
 }
 
 export interface DeliverableView {
@@ -397,6 +414,14 @@ export interface DeliverableView {
   message: string | null;
   current: boolean;
   agent_id: number;
+  /** 附件（§3.7）：引用的附件元数据，供展示/下载 */
+  attachment: {
+    attachment_id: string;
+    filename: string;
+    mime: string;
+    size_bytes: number;
+    scan_status: string;
+  } | null;
   created_at: string;
 }
 
@@ -411,6 +436,46 @@ export function parseDeliverableSpec(spec: string | null): DeliverableSpecItem[]
   }
 }
 
+/**
+ * 验收方案可操作性校验（§3.3 发布硬阻断）：
+ * - 数组；每项须有非空 name
+ * - min_count 为 >=1 整数（缺省 1）
+ * - type 为字符串（'.ext' 或 'mime/prefix'，仅约束不做合法性枚举）
+ */
+export function validateDeliverableSpec(spec: unknown): { ok: boolean; error?: string } {
+  if (spec === undefined || spec === null) return { ok: true };
+  let arr: unknown[];
+  if (typeof spec === 'string') {
+    try {
+      arr = JSON.parse(spec);
+    } catch {
+      return { ok: false, error: '交付物约定必须是 JSON 数组' };
+    }
+  } else {
+    arr = spec as unknown[];
+  }
+  if (!Array.isArray(arr)) return { ok: false, error: '交付物约定必须是数组' };
+  for (const [i, item] of arr.entries()) {
+    if (typeof item !== 'object' || item === null) {
+      return { ok: false, error: `交付物约定第 ${i + 1} 项不是对象` };
+    }
+    const it = item as Record<string, unknown>;
+    if (typeof it.name !== 'string' || !it.name.trim()) {
+      return { ok: false, error: `交付物约定第 ${i + 1} 项缺少 name` };
+    }
+    if (it.min_count !== undefined) {
+      const mc = Number(it.min_count);
+      if (!Number.isInteger(mc) || mc < 1) {
+        return { ok: false, error: `交付物「${it.name}」的 min_count 必须是 >=1 的整数` };
+      }
+    }
+    if (it.type !== undefined && typeof it.type !== 'string') {
+      return { ok: false, error: `交付物「${it.name}」的 type 必须是字符串` };
+    }
+  }
+  return { ok: true };
+}
+
 /** 任务的交付物约定 + 全部版本记录 */
 export async function listDeliverables(taskId: string): Promise<{
   spec: DeliverableSpecItem[];
@@ -420,9 +485,13 @@ export async function listDeliverables(taskId: string): Promise<{
   if (tasks.length === 0) return { spec: [], versions: [] };
   const spec = parseDeliverableSpec((tasks[0] as Record<string, unknown>).deliverable_spec as string | null);
   const rows = await query(
-    `SELECT id, name, path, version, message, current, agent_id, created_at
-       FROM deliverables WHERE task_id = (SELECT id FROM tasks WHERE task_id = ?)
-      ORDER BY name ASC, version ASC`,
+    `SELECT d.id, d.name, d.path, d.version, d.message, d.current, d.agent_id, d.created_at,
+            a.attachment_id AS att_id, a.filename AS att_filename, a.mime AS att_mime,
+            a.size_bytes AS att_size, a.scan_status AS att_scan
+       FROM deliverables d
+       LEFT JOIN attachments a ON a.id = d.attachment_id
+      WHERE d.task_id = (SELECT id FROM tasks WHERE task_id = ?)
+      ORDER BY d.name ASC, d.version ASC`,
     [taskId],
   );
   const versions = (rows as Array<Record<string, unknown>>).map((r) => ({
@@ -433,6 +502,13 @@ export async function listDeliverables(taskId: string): Promise<{
     message: (r.message as string | null) ?? null,
     current: Boolean(r.current),
     agent_id: Number(r.agent_id),
+    attachment: r.att_id === null ? null : {
+      attachment_id: String(r.att_id),
+      filename: String(r.att_filename ?? ''),
+      mime: String(r.att_mime ?? ''),
+      size_bytes: Number(r.att_size ?? 0),
+      scan_status: String(r.att_scan ?? 'skipped'),
+    },
     created_at: String(r.created_at),
   }));
   return { spec, versions };
@@ -457,7 +533,7 @@ export async function submitDeliverable(
     )) as Array<Record<string, unknown>>;
     if (tasks.length === 0) return { ok: false, error: `任务 ${taskId} 不存在或你未参与` };
     const status = String(tasks[0].status);
-    if (status !== 'open' && status !== 'running' && status !== 'pending') {
+    if (status !== 'open' && status !== 'claimed' && status !== 'running' && status !== 'pending' && status !== 'active') {
       return { ok: false, error: `任务已 ${status}，无法提交交付物` };
     }
     // 约定校验：任务有约定时，名称必须对齐

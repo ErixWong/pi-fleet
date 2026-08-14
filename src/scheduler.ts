@@ -109,3 +109,61 @@ export async function recoverStaleRunningTasks(timeoutHours = 2): Promise<number
   );
   return (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
 }
+
+/**
+ * 认领回收（§10.2 生命周期）：claimed 超时无活动（公共池任务）→ 回 active 重新可认领。
+ * 回帖记录、不计 attempts；仅针对公共池认领（private 指派任务不回流）。
+ */
+export async function recoverStaleClaimedTasks(timeoutHours = 2): Promise<number> {
+  const rows = await query(
+    `SELECT id, task_id FROM tasks
+      WHERE status = 'claimed' AND visibility = 'public'
+        AND last_activity_at IS NOT NULL
+        AND last_activity_at < DATE_SUB(NOW(), INTERVAL ? HOUR)`,
+    [timeoutHours],
+  );
+  if (rows.length === 0) return 0;
+  const ids = rows.map((r) => (r as Record<string, unknown>).id);
+  const placeholders = ids.map(() => '?').join(',');
+  await query(
+    `UPDATE tasks SET status='active', assignee_id=NULL, claimed_at=NULL, last_activity_at=? WHERE id IN (${placeholders})`,
+    [nowString(), ...ids],
+  );
+  for (const r of rows) {
+    const rr = r as Record<string, unknown>;
+    await query(
+      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+       VALUES (?, NULL, 'platform', 'system', ?)`,
+      [rr.id, `[平台] 认领超时无活动，任务回到公共池重新可认领（不计交付尝试次数）`],
+    );
+  }
+  return rows.length;
+}
+
+/**
+ * 挂起确认回收（§10.2）：pending_confirm 挂起超 days 天（默认 7）→ 自动确认 done（发起人缺席不阻塞终态）。
+ */
+export async function autoConfirmPendingConfirm(days = 7): Promise<number> {
+  const rows = await query(
+    `SELECT id FROM tasks
+      WHERE status = 'pending_confirm'
+        AND last_activity_at IS NOT NULL
+        AND last_activity_at < DATE_SUB(NOW(), INTERVAL ? DAY)`,
+    [days],
+  );
+  if (rows.length === 0) return 0;
+  const ids = rows.map((r) => (r as Record<string, unknown>).id);
+  const placeholders = ids.map(() => '?').join(',');
+  await query(
+    `UPDATE tasks SET status='done', result_status='success', result='[auto] 待确认超 ${days} 天，自动确认通过', result_at=?, last_activity_at=? WHERE id IN (${placeholders})`,
+    [nowString(), nowString(), ...ids],
+  );
+  for (const r of rows) {
+    await query(
+      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+       VALUES (?, NULL, 'platform', 'system', ?)`,
+      [(r as Record<string, unknown>).id, `[平台] 待发起人确认超过 ${days} 天，自动确认通过`],
+    );
+  }
+  return rows.length;
+}

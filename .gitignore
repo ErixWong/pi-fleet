@@ -26,3 +26,6 @@ Thumbs.db
 # 鏈湴杩愯浜х墿
 work/
 .playwright-mcp/
+
+# 附件运行时产物（不入库）
+attachments/

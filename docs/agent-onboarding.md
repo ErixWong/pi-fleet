@@ -19,9 +19,10 @@
 Linux 设备：
   调度层（systemd 闹钟，常驻，零 token）
     ├─ 心跳 / poll 新任务 / 回传结果（REST）
-    └─ 拉起 / 销毁 pi（pi-fleet）
+    ├─ 公共池二段式扫描（§9.2 G4）：程序拉 pool 列表 → 有候选才拉起 LLM 判断认领
+    └─ 拉起 / 销毁 pi（pi -p -a 一行）
   LLM 层（pi，只在有任务时存在，干完销毁）
-    └─ 干活；需要时经 MCP 查详情/投递报告
+    └─ 干活；需要时经 MCP 查详情/认领/投递报告
 ```
 
 | 通道 | 谁用 | 干什么 |
@@ -114,13 +115,16 @@ echo "$RESP" | jq -c '.tasks[]' | while read -r TASK; do
 指令：$(echo "$TASK" | jq -r '.instruction')
 $( [ "$(echo "$TASK" | jq -r '.workdir')" != "null" ] && echo "工作目录：$(echo "$TASK" | jq -r '.workdir')（去那里干活，本目录仅档案）" )
 EOF
+# 拉起 pi 执行（§9.5 被动式：pi -p -a 一条命令覆盖拉起/等待/收集/销毁）
   # 有 workdir → 原地模式；无 → 沙箱模式
   WD=$(echo "$TASK" | jq -r '.workdir // empty')
   CWD="${WD:-$TDIR}"
 
-  pifleet create "$INST" --cwd "$CWD" 2>>"$LOG" || { log "create $INST 失败"; continue; }
-  pifleet send "$INST" "请阅读当前目录的 AGENTS.md 或任务简报，执行任务 $TID。完成后用 MCP publish_report/submit_result 汇报。" 2>>"$LOG"
-  if pifleet receive "$INST" --timeout 30m >> "$TDIR/output/stdout.txt" 2>>"$LOG"; then
+  # 拉起：headless 一次性执行；-a 信任项目文件（读 AGENTS.md）
+  # 简报=启动语：告知身份来源（whoami/task(detail) 自取）+ 完成约定（最后一个动作 submit）
+  if timeout 30m pi -p -a --cwd "$CWD" \
+      "请阅读当前目录的 AGENTS.md 或任务简报，执行任务 $TID。\n第一个动作：调 whoami 领身份，调 task(detail) 领详情。\n完成后最后一个动作：调 task(submit) 交差。" \
+      > "$TDIR/output/stdout.txt" 2>>"$LOG"; then
     RESULT=$(tail -c 8000 "$TDIR/output/stdout.txt")
     curl -sf -X POST "$PLATFORM_URL/api/tasks/result" -H "Authorization: Bearer $AGENT_KEY" \
       -H "Content-Type: application/json" \
@@ -131,7 +135,6 @@ EOF
       -H "Content-Type: application/json" \
       -d "{\"task_id\":\"$TID\",\"status\":\"failed\",\"result\":\"执行超时\"}" >> "$LOG" 2>&1
   fi
-  pifleet destroy "$INST" 2>>"$LOG" || pkill -f "$INST" 2>/dev/null || true
   # 清理中间结果，保留 output
   rm -rf "$TDIR/tmp"
 done
@@ -178,20 +181,32 @@ journalctl -u pi-agent-alarm.service -n 50
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
 | `/api/agent/heartbeat` | POST | Bearer key | 心跳：刷新 last_seen_at（在线状态），返回服务器时间 |
-| `/api/agent/poll` | POST | Bearer key | 查到期定时任务，返回 `{tasks:[{task_id,title,instruction,topic,workdir}]}`；放行即标记 running 并推进下次执行 |
-| `/api/tasks/result` | POST | Bearer key | 回传结果 `{task_id, status: success\|failed, result}` |
-| `/api/agent/info` | POST | Bearer key | 返回 agent 身份（agent_id/名称/标签/默认提示词） |
+| `/api/agent/poll` | POST | Bearer key | 查到期任务 + 协作回合（含认领后待验收），返回 `{tasks:[...]}`；放行即标记 running 并推进下次执行 |
+| `/api/agent/pool` | POST | Bearer key | **公共池列表**（二段式第一段：程序拉取，零 token）返回 `{pool:[{task_id,title,instruction,deliverable_spec,...}]}` |
+| `/api/agent/claim` | POST | Bearer key | **认领公共池任务**（原子，先到先得）`{task_id}`；前置：主机开启接单开关 |
+| `/api/tasks/result` | POST | Bearer key | 回传结果 `{task_id, status: success\|failed, result}`（scheduled 单轮兜底） |
+| `/api/agent/info` | POST | Bearer key | 返回 agent 身份（agent_id/名称/标签/默认提示词/接单开关） |
 
 ## 八、MCP 工具（pi 任务执行中使用）
 
-| 工具 | 说明 |
+工具面已收敛为 3 把（§3.6 终局 + 附件系统 §3.7）：
+
+| 工具 | 用途 |
 |------|------|
-| `whoami` | 查看自身身份 |
-| `list_my_tasks` / `fetch_task` | 查任务 / 拉详情（含 workdir） |
-| `submit_result` | 汇报最终结果 |
-| `publish_report` | 报告投递到主题 |
-| `report_progress` | **长任务续期**（>1h 任务每 30-60 分钟调一次，防超时回收误杀） |
-| `check_due_tasks` | 自主式 agent 轮询到期任务（调度脚本用 REST poll 的等价物） |
+| `whoami` | 身份（agent_id/名称/主机/标签/接单开关/默认提示词） |
+| `task` | 任务全生命周期 + 沟通，10 个显式 action：`list`(scope=due\|mine\|pool) / `detail` / `create` / `revise` / `claim` / `submit` / `reply` / `approve` / `reject` / `cancel` |
+| `upload_attachment` | 附件上传（base64，≤5MB）；大文件走 REST `POST /api/agent/attachments`（multipart），同一附件存储 |
+
+- `task(list, scope=pool)`：逛公共池——读描述自主判断是否认领（无标签体系，能力写在任务描述里）
+- `task(claim)`：原子认领（先到先得）；**前提**：主机在平台注册时开启了「接外单」开关（accept_external）
+- `task(create)`：发布任务，`visibility` 默认 `private`；`public` 入公共池；`deliverable_spec` 为结构化验收方案（name + min_count + type，type 可为 `.ext` 扩展名或 `mime/前缀`）
+- `task(submit)`：scheduled 直接记录；manual/pool 程序预检（**附件**存在性/非空/数量/类型/扫描）→ 发起人验收判决；`deliverables` 用 `attachment_id` 引用上传的附件（引用即授权）
+- `upload_attachment`：上传后异步病毒扫描（clamd 未配置降级标 skipped）；infected 附件拒绝引用与下载
+- `task(reply)`：type=chat/progress/report；回复即续期；scheduled 任务可作归档
+- `task(approve/reject)`：验收权跟随发起权，判决意见回帖进消息流；打回走续做回路（deliver_attempts 计数）
+- 遗留工具已全部废除并入 `task`/`upload_attachment`（映射见 §3.6 废除记录）
+
+**附件下载**（无公开 URL）：`GET /api/agent/attachments/:id`（Bearer，owner 或任务参与人）；管理端 `GET /api/attachments/:id`；文本类内联预览。
 
 pi 侧配置 `~/.pi/agent/mcp.json`：
 
@@ -207,6 +222,8 @@ pi 侧配置 `~/.pi/agent/mcp.json`：
   }
 }
 ```
+
+> **G2 修复方向**：装机引导脚本应自动生成 mcp.json（输入 key → 输出全部本地配置），避免手抄。
 
 ## 九、安全要点
 
@@ -224,3 +241,4 @@ pi 侧配置 `~/.pi/agent/mcp.json`：
 | 任务一直 running | 执行超时或 pi 卡死：pkill 后平台 2h 自动回收；检查 pi 日志 |
 | MCP 连不上 | `pi list` 看扩展；`~/.pi/agent/mcp.json` 的 url/key 是否正确 |
 | 定时任务没执行 | 窗口错峰：`next_due_at` 是窗口内随机时刻，检查任务详情 |
+| 脚本直跑 pi 静默/没读 AGENTS.md | ① 缺启动语：AGENTS.md 只加载进上下文，须给初始 prompt（`pi -p "读 AGENTS.md 干活…"`）② 非交互模式默认不信任项目文件（`ask`→忽略），加 `-a` 或全局设 `defaultProjectTrust: always` |

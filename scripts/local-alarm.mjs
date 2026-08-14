@@ -56,7 +56,35 @@ log('心跳 ok');
 // 2. poll 领取任务
 const { tasks } = await api('POST', '/api/agent/poll', {});
 log(`poll 领取 ${tasks.length} 个任务`);
-if (tasks.length === 0) {
+
+// 2.5 公共池二段式扫描（§9.2 G4）：程序拉公开列表（零 token）→ 有候选才拉起 LLM 判断认领
+let pool = [];
+try {
+  const r = await api('POST', '/api/agent/pool', {});
+  pool = r.pool ?? [];
+  if (pool.length > 0) log(`公共池 ${pool.length} 个候选任务`);
+} catch (e) {
+  log(`公共池扫描失败: ${e.message}`);
+}
+if (pool.length > 0 && tasks.length === 0) {
+  // 有候选才拉起 LLM（pi）读描述自主判断是否认领
+  const listText = pool
+    .map((t) => `- ${t.task_id}「${t.title}」\n  指令：${t.instruction.slice(0, 300)}\n  验收方案：${JSON.stringify(t.deliverable_spec || [])}`)
+    .join('\n\n');
+  const judgePrompt =
+    `你是任务分发平台的一台主机 agent。当前公共池有以下公开任务（已开启接单）：\n\n${listText}\n\n` +
+    `请阅读任务描述，判断是否有你能力范围内、值得认领的任务（考虑资源/能力/内外分离边界）。` +
+    `若有，调用 MCP task 工具（task-dispatch 服务器）的 task(claim) 认领其中最合适的一个；` +
+    `若都不合适，直接回复"无"即可，不要认领。`;
+  try {
+    const judge = await runPi('pool-judge', judgePrompt, 3 * 60 * 1000);
+    log(`公共池判断完成：${judge.slice(0, 200)}`);
+  } catch (e) {
+    log(`公共池判断失败: ${e.message}`);
+  }
+}
+
+if (tasks.length === 0 && pool.length === 0) {
   console.log('无任务，结束');
   process.exit(0);
 }

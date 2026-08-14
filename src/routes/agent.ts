@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { currentAgent, mcpAuthMiddleware } from '../auth.js';
 import {
   claimDueTasks,
@@ -7,7 +8,16 @@ import {
   updateTaskWorkdir,
   type SubmitStatus,
 } from '../service/tasks.js';
+import { claimTask, listPoolTasks } from '../service/market.js';
+import {
+  attachmentAbsPath,
+  attachmentViewById,
+  canDownload,
+  uploadAttachment,
+} from '../service/attachments.js';
+import { getSettingInt } from '../service/settings.js';
 import { nowString } from '../scheduler.js';
+import { sendAttachmentFile } from './attach-shared.js';
 
 /**
  * Agent 侧 REST API（调度脚本/闹钟使用，Bearer key 认证）。
@@ -39,6 +49,7 @@ agentRouter.post('/info', async (_req, res) => {
     hostname: agent.hostname,
     tags: agent.tags,
     system_prompt: agent.systemPrompt,
+    accept_external: agent.acceptExternal,
   });
 });
 
@@ -47,6 +58,85 @@ agentRouter.post('/poll', async (_req, res) => {
   const agent = getAgent();
   const tasks = await claimDueTasks(agent);
   res.json({ tasks });
+});
+
+// ─────────────────────────── 公共池（§3.2 二段式：程序拉列表 → 有候选才拉起 LLM 判断认领） ───────────────────────────
+agentRouter.post('/pool', async (_req, res) => {
+  const agent = getAgent();
+  const pool = await listPoolTasks(agent);
+  res.json({ ok: true, count: pool.length, pool });
+});
+
+agentRouter.post('/claim', async (req, res) => {
+  const agent = getAgent();
+  const body = (req.body ?? {}) as { task_id?: string };
+  if (!body.task_id) {
+    res.status(400).json({ error: '缺少 task_id' });
+    return;
+  }
+  const r = await claimTask(agent, body.task_id);
+  if (!r.ok) {
+    res.status(400).json({ error: r.error });
+    return;
+  }
+  res.json({ ok: true, task_id: body.task_id, mode: r.mode });
+});
+
+// ─────────────────────────── 附件（§3.7）：REST multipart 上传（大文件）/ 下载 ───────────────────────────
+// 内存暂存（需要 buffer 计算 sha256）；单文件上限与系统设置一致
+const attachUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: getSettingInt('max_attachment_bytes', 50 * 1024 * 1024) },
+});
+
+/** 上传大文件（调度脚本/程序用；MCP upload_attachment 处理 ≤5MB 小文件） */
+agentRouter.post('/attachments', attachUpload.single('file'), async (req, res) => {
+  const agent = getAgent();
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: '缺少 file（multipart 字段名 file）' });
+    return;
+  }
+  const r = await uploadAttachment(agent, {
+    filename: file.originalname,
+    mime: file.mimetype,
+    buffer: file.buffer,
+  });
+  if (!r.ok) {
+    res.status(400).json({ error: r.error });
+    return;
+  }
+  res.status(201).json({
+    ok: true,
+    attachment_id: r.attachment_id,
+    reused: r.reused ?? false,
+    filename: file.originalname,
+    size_bytes: file.size,
+  });
+});
+
+/** 下载附件：owner 或参与被引用任务的 agent；无公开 URL */
+agentRouter.get('/attachments/:id', async (req, res) => {
+  const agent = getAgent();
+  const view = await attachmentViewById(req.params.id);
+  if (!view) {
+    res.status(404).json({ error: '附件不存在' });
+    return;
+  }
+  if (view.scan_status === 'infected') {
+    res.status(403).json({ error: '附件被判定为感染，拒绝下载' });
+    return;
+  }
+  if (!(await canDownload(agent.id, req.params.id))) {
+    res.status(403).json({ error: '无权限下载该附件（非所属账号，且未被授权参与相关任务）' });
+    return;
+  }
+  const abs = await attachmentAbsPath(req.params.id);
+  if (!abs) {
+    res.status(404).json({ error: '附件文件缺失' });
+    return;
+  }
+  sendAttachmentFile(res, abs, view.filename, view.mime);
 });
 
 // ─────────────────────────── 会话操作（REST 版，调度脚本兜底用） ───────────────────────────

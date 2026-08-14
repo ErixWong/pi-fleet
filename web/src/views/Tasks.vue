@@ -9,7 +9,7 @@ const filter = ref({ kind: '', status: '' });
 const error = ref('');
 
 // 指派任务表单
-const manualForm = ref({ title: '', instruction: '', assignee_id: '', workdir: '', deliverableSpec: [] });
+const manualForm = ref({ title: '', instruction: '', assignee_id: '', workdir: '', visibility: 'private', deliverableSpec: [] });
 // 定时任务表单
 const schedForm = ref({
   title: '',
@@ -71,7 +71,7 @@ async function submitManual() {
     const spec = cleanDeliverables(manualForm.value);
     await api.createTask({ kind: 'manual', ...manualForm.value, deliverable_spec: spec.length ? spec : undefined });
     manualModal.hide();
-    manualForm.value = { title: '', instruction: '', assignee_id: '', workdir: '', deliverableSpec: [] };
+    manualForm.value = { title: '', instruction: '', assignee_id: '', workdir: '', visibility: 'private', deliverableSpec: [] };
     await load();
   } catch (e) {
     error.value = e.message;
@@ -106,6 +106,12 @@ function badge(status) {
     running: 'text-bg-info',
     assigned: 'text-bg-warning',
     pending: 'text-bg-warning',
+    pending_audit: 'text-bg-warning',
+    rejected: 'text-bg-danger',
+    active: 'text-bg-primary',
+    claimed: 'text-bg-warning',
+    submitted: 'text-bg-info',
+    pending_confirm: 'text-bg-warning',
     open: 'text-bg-info',
     resolved: 'text-bg-success',
     cancelled: 'text-bg-secondary',
@@ -133,7 +139,7 @@ function badge(status) {
     </select>
     <select v-model="filter.status" class="form-select form-select-sm" style="width:150px" @change="load">
       <option value="">状态: 全部</option>
-      <option v-for="s in ['open','pending','running','done','failed','resolved','cancelled']" :key="s" :value="s">{{ s }}</option>
+      <option v-for="s in ['pending_audit','rejected','active','claimed','submitted','pending_confirm','open','pending','running','done','failed','resolved','cancelled']" :key="s" :value="s">{{ s }}</option>
     </select>
   </div>
 
@@ -141,7 +147,7 @@ function badge(status) {
     <i class="bi bi-inbox"></i>暂无任务，点击右上角创建。
   </div></div>
   <table v-else class="table table-hover">
-    <thead><tr><th>任务</th><th>类型</th><th>指派给</th><th>状态</th><th>周期</th><th>下次执行</th><th>结果</th></tr></thead>
+    <thead><tr><th>任务</th><th>类型</th><th>可见性</th><th>指派给</th><th>状态</th><th>周期</th><th>下次执行</th><th>结果</th></tr></thead>
     <tbody>
       <tr v-for="t in tasks" :key="t.task_id">
         <td>
@@ -149,7 +155,13 @@ function badge(status) {
           <div class="text-secondary small">{{ t.task_id }}</div>
         </td>
         <td><span class="badge" :class="t.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ t.kind }}</span></td>
-        <td>{{ t.assignee }}</td>
+        <td>
+          <span class="badge" :class="t.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
+                :title="t.visibility === 'public' ? '公开：在公共池，可被其他主机认领' : '私有：仅发起人及指派主机可见'">
+            {{ t.visibility }}
+          </span>
+        </td>
+        <td>{{ t.assignee || (t.status === 'active' ? '（待认领）' : '—') }}</td>
         <td><span class="badge badge-status" :class="badge(t.status)">{{ t.status }}</span></td>
         <td class="text-secondary small">{{ t.schedule_cron || '—' }}</td>
         <td class="text-secondary small">{{ t.next_due_at || '—' }}</td>
@@ -172,11 +184,21 @@ function badge(status) {
             <label class="form-label">自然语言指令 *</label>
             <textarea v-model="manualForm.instruction" class="form-control mb-2" rows="5" required
               placeholder="详细描述要 agent 做什么，包括上下文、验收标准..."></textarea>
-            <label class="form-label">指派给 *</label>
-            <select v-model="manualForm.assignee_id" class="form-select" required>
-              <option value="" disabled>选择 agent</option>
-              <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }} · {{ a.hostname || a.agent_id }}</option>
+            <label class="form-label">可见性（§3.2）</label>
+            <select v-model="manualForm.visibility" class="form-select mb-2">
+              <option value="private">私有（指派给指定主机）</option>
+              <option value="public">公开（丢到公共池，任意开启接单的主机可认领）</option>
             </select>
+            <template v-if="manualForm.visibility === 'private'">
+              <label class="form-label">指派给 *</label>
+              <select v-model="manualForm.assignee_id" class="form-select" required>
+                <option value="" disabled>选择 agent</option>
+                <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }} · {{ a.hostname || a.agent_id }}</option>
+              </select>
+            </template>
+            <template v-else>
+              <div class="alert alert-info py-2 small mb-2">公开任务进入公共池，由开启「接外单」开关的主机 agent 阅读描述后自主认领（先到先得）。</div>
+            </template>
             <label class="form-label mt-2">工作目录（可选，在既有项目干活时填项目路径）</label>
             <input v-model="manualForm.workdir" class="form-control" placeholder="如 /home/dev/projects/prjxxx1">
             <label class="form-label mt-2">交付物约定（可选，任务要交付什么 + 验收标准）</label>

@@ -108,6 +108,61 @@ check('报告归档成功', rep.data.ok === true, JSON.stringify(rep.data));
 const detail = await api('GET', `/api/tasks/${sTask.task_id}`);
 check('任务详情含报告', detail.data.reports.length >= 1, JSON.stringify(detail.data.reports));
 
+// 开放生态：公共池 REST（§8）：二段式程序扫描 + 认领
+console.log('== 开放生态：公共池 REST ==');
+const pubTask = await api('POST', '/api/tasks', {
+  kind: 'manual', title: 'REST 公共池任务', visibility: 'public',
+  instruction: '公开任务：需要整理 CSV 数据',
+  deliverable_spec: [{ name: '数据文件', min_count: 1, type: '.csv' }],
+});
+check('管理员创建公开任务', pubTask.status === 201, JSON.stringify(pubTask.data));
+const poolAll = await api('POST', '/api/agent/pool', {}, KEY);
+const mine = poolAll.data.pool.find((t) => t.title === 'REST 公共池任务');
+check('pool 列表可见（程序扫描，零 token）', !!mine, JSON.stringify(poolAll.data.pool));
+check('pool 带完整指令与验收方案', mine?.instruction.includes('CSV') && mine?.deliverable_spec?.[0]?.type === '.csv', JSON.stringify(mine));
+
+// 未开接单开关（rest-test 默认关）认领应被拒
+const noOpen = await api('POST', '/api/agent/claim', { task_id: mine.task_id }, KEY);
+check('未开接单开关认领被拒', noOpen.status === 400 && noOpen.data.error.includes('接单开关'), JSON.stringify(noOpen.data));
+
+// 开启接单开关后认领成功
+await api('POST', `/api/agents/${created.data.agent.id}/accept-toggle`, {}, undefined);
+const okClaim = await api('POST', '/api/agent/claim', { task_id: mine.task_id }, KEY);
+check('开启接单开关后认领成功（mode=pool）', okClaim.data.ok === true && okClaim.data.mode === 'pool', JSON.stringify(okClaim.data));
+const again = await api('POST', '/api/agent/claim', { task_id: mine.task_id }, KEY);
+check('重复认领被拒', again.status === 400, JSON.stringify(again.data));
+const detail2 = await api('GET', `/api/tasks/${mine.task_id}`);
+check('认领后状态 claimed、可见性 public', detail2.data.task.status === 'claimed' && detail2.data.task.visibility === 'public', JSON.stringify(detail2.data.task));
+
+// 附件系统 REST：multipart 上传（大文件通道）+ 下载 + 管理端浏览 + 孤儿清理
+console.log('== 附件系统 REST ==');
+const fd = new FormData();
+fd.append('file', new Blob(['rest 附件内容：磁盘报告'], { type: 'text/plain' }), 'rest-report.txt');
+const upRes = await fetch(`${BASE}/api/agent/attachments`, {
+  method: 'POST', headers: { authorization: `Bearer ${KEY}` }, body: fd,
+});
+const upData = await upRes.json();
+check('multipart 上传附件 201', upRes.status === 201 && !!upData.attachment_id?.startsWith('att-'), JSON.stringify(upData));
+const attId = upData.attachment_id;
+
+const dlRes = await fetch(`${BASE}/api/agent/attachments/${attId}`, { headers: { authorization: `Bearer ${KEY}` } });
+const dlBody = await dlRes.text();
+check('附件下载 200 且内容正确', dlRes.status === 200 && dlBody.includes('磁盘报告'), `${dlRes.status} ${dlBody}`);
+check('下载含原始文件名（Content-Disposition）', (dlRes.headers.get('content-disposition') || '').includes('rest-report.txt'), dlRes.headers.get('content-disposition'));
+
+const dlNoKey = await fetch(`${BASE}/api/agent/attachments/${attId}`);
+check('下载无 key 401', dlNoKey.status === 401, String(dlNoKey.status));
+
+// 管理端浏览（cookie 会话）
+const adminDl = await fetch(`${BASE}/api/attachments/${attId}`, { headers: { cookie } });
+check('管理端下载附件 200', adminDl.status === 200, String(adminDl.status));
+// 文本类 mime → inline（可预览）
+check('文本类附件 inline 预览', (adminDl.headers.get('content-disposition') || '').startsWith('inline'), adminDl.headers.get('content-disposition'));
+
+// 孤儿清理：新上传未引用的附件可被清理
+const orphan = await api('POST', '/api/attachments/cleanup', {}, undefined);
+check('孤儿附件清理 ≥1', orphan.data.cleaned >= 1, JSON.stringify(orphan.data));
+
 await pool.end();
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);

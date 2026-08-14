@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
+import { Modal } from 'bootstrap';
 import { api } from '../api';
-import { renderMd } from '../md';
+import { renderMd, renderMdWithAttachments } from '../md';
 
 const route = useRoute();
 const task = ref(null);
@@ -21,6 +22,64 @@ async function load() {
 }
 
 onMounted(load);
+
+/** 同任务附件映射：交付物引用的附件 filename（小写）→ attachment_id，供 md 图文混编自动解析 */
+const attMap = computed(() => {
+  const m = {};
+  for (const v of deliverables.value.versions || []) {
+    if (v.attachment?.attachment_id && v.attachment?.filename) {
+      m[String(v.attachment.filename).toLowerCase()] = v.attachment.attachment_id;
+    }
+  }
+  return m;
+});
+
+// ── 附件预览 modal（§3.7 落地）：按 mime 分流 image / markdown / pdf / 其他 ──
+const previewModalEl = ref(null);
+let previewModal = null;
+const preview = ref(null); // { attachment, mode, content?, error? }
+const previewLoading = ref(false);
+
+const TEXT_LIKE_MIMES = ['text/', 'application/json', 'application/xml', 'application/yaml', 'application/x-yaml', 'application/markdown', 'application/javascript', 'application/x-sh'];
+
+function attachmentUrl(attId) {
+  return `/api/attachments/${attId}`;
+}
+
+/** 打开预览：图片直接 <img>；文本/md fetch 后渲染；pdf iframe；其他提示下载 */
+async function openPreview(v) {
+  const att = v.attachment;
+  if (!att) return;
+  previewLoading.value = true;
+  const mime = (att.mime || '').toLowerCase();
+  const mode = mime.startsWith('image/')
+    ? 'image'
+    : mime === 'application/pdf'
+      ? 'pdf'
+      : TEXT_LIKE_MIMES.some((p) => mime.startsWith(p))
+        ? 'markdown'
+        : 'other';
+  preview.value = { attachment: att, mode, content: '', error: '' };
+  if (mode === 'markdown') {
+    try {
+      const res = await fetch(attachmentUrl(att.attachment_id), { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`加载失败 ${res.status}`);
+      preview.value.content = await res.text();
+    } catch (e) {
+      preview.value.error = e.message;
+    }
+  }
+  previewLoading.value = false;
+  if (!previewModal) previewModal = new Modal(previewModalEl.value);
+  previewModal.show();
+}
+
+function closePreview() {
+  previewModal?.hide();
+  preview.value = null;
+}
+
+onBeforeUnmount(() => previewModal?.dispose());
 
 /** 帖子流：首帖=任务要求，随后消息+报告按时间正序合并（论坛式） */
 const posts = computed(() => {
@@ -90,12 +149,30 @@ async function resolveTask() {
   }
 }
 
+async function rejectTask() {
+  const opinion = prompt('填写打回意见（执行方将按此续做）', '');
+  if (opinion === null) return;
+  error.value = '';
+  try {
+    await api.taskReject(task.value.task_id, opinion.trim());
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
 function badge(status) {
   return {
     done: 'text-bg-success',
     failed: 'text-bg-danger',
     running: 'text-bg-info',
     pending: 'text-bg-warning',
+    pending_audit: 'text-bg-warning',
+    rejected: 'text-bg-danger',
+    active: 'text-bg-primary',
+    claimed: 'text-bg-warning',
+    submitted: 'text-bg-info',
+    pending_confirm: 'text-bg-warning',
     open: 'text-bg-info',
     resolved: 'text-bg-success',
     cancelled: 'text-bg-secondary',
@@ -113,6 +190,26 @@ function postColor(type) {
     report: 'rgba(16,185,129,0.14)',
   }[type];
 }
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  let n = bytes;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${u[i]}`;
+}
+
+function scanBadge(s) {
+  return {
+    clean: 'text-bg-success',
+    pending: 'text-bg-warning',
+    pending_audit: 'text-bg-warning',
+    rejected: 'text-bg-danger',
+    skipped: 'text-bg-secondary',
+    infected: 'text-bg-danger',
+  }[s] || 'text-bg-secondary';
+}
 </script>
 
 <template>
@@ -126,6 +223,8 @@ function postColor(type) {
           <span class="text-secondary small">{{ task.task_id }}</span>
           <span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span>
           <span class="badge" :class="task.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ task.kind }}</span>
+          <span class="badge" :class="task.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
+                :title="task.visibility === 'public' ? '公开：公共池可认领' : '私有：仅发起人及指派主机'">{{ task.visibility }}</span>
         </div>
         <div class="d-flex flex-wrap gap-4 text-secondary small">
           <span><i class="bi bi-person-plus me-1"></i>发起方：{{ task.creator_name || '管理员' }} {{ task.creator_agent_id || '' }}</span>
@@ -140,6 +239,8 @@ function postColor(type) {
             <i class="bi bi-check2-circle me-1"></i>完成：{{ task.resolved_by_name || '管理员' }} · {{ task.result_at }}
           </span>
           <span v-if="task.deliverable_version"><i class="bi bi-box-seam me-1"></i>交付版本：{{ task.deliverable_version }}</span>
+          <span v-if="task.deliver_attempts"><i class="bi bi-arrow-repeat me-1"></i>交付尝试：{{ task.deliver_attempts }}/{{ task.max_attempts }}</span>
+          <span v-if="task.status === 'active' && task.visibility === 'public'"><i class="bi bi-globe2 me-1"></i>在公共池中，等待认领</span>
         </div>
         <div v-if="error" class="alert alert-danger py-2 small mt-2 mb-0">{{ error }}</div>
       </div>
@@ -162,7 +263,7 @@ function postColor(type) {
             </span>
             <span class="time ms-auto">{{ p.time }}</span>
           </div>
-          <div class="md-content mb-0" v-html="renderMd(p.content)"></div>
+          <div class="md-content mb-0" v-html="p.type === 'brief' ? renderMd(p.content) : renderMdWithAttachments(p.content, attMap)"></div>
         </div>
       </div>
     </div>
@@ -194,6 +295,15 @@ function postColor(type) {
                 <span class="text-secondary small">{{ v.created_at }}</span>
                 <span v-if="v.current" class="badge text-bg-info" style="font-size:0.65rem">当前</span>
               </div>
+              <div v-if="v.attachment" class="small mt-1">
+                <i class="bi bi-paperclip me-1"></i>
+                <a href="javascript:void(0)" @click="openPreview(v)" class="link-primary text-decoration-none">{{ v.attachment.filename }}</a>
+                <span class="text-secondary ms-2">{{ fmtSize(v.attachment.size_bytes) }} · {{ v.attachment.mime }}</span>
+                <span class="badge ms-2" :class="scanBadge(v.attachment.scan_status)" style="font-size:0.65rem"
+                      :title="v.attachment.scan_status === 'skipped' ? '未配置病毒扫描，降级标记（不阻塞）' : '附件扫描状态'">
+                  {{ v.attachment.scan_status }}
+                </span>
+              </div>
               <div v-if="v.path" class="small"><code>{{ v.path }}</code></div>
               <div v-if="v.message" class="small text-secondary">{{ v.message }}</div>
             </div>
@@ -202,14 +312,59 @@ function postColor(type) {
       </div>
     </div>
 
-    <!-- 回复框（底部，open 状态） -->
-    <div v-if="task.status === 'open'" class="card">
+    <!-- 附件预览 modal -->
+    <div ref="previewModalEl" class="modal fade" tabindex="-1">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header py-2">
+            <h6 class="modal-title d-flex align-items-center gap-2">
+              <i class="bi bi-paperclip"></i>
+              <span>{{ preview?.attachment.filename }}</span>
+              <span class="badge" v-if="preview" :class="scanBadge(preview.attachment.scan_status)" style="font-size:0.65rem">{{ preview.attachment.scan_status }}</span>
+            </h6>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" @click="preview = null"></button>
+          </div>
+          <div class="modal-body">
+            <div v-if="preview" class="d-flex align-items-center gap-3 text-secondary small mb-2 flex-wrap">
+              <span><i class="bi bi-hdd me-1"></i>{{ fmtSize(preview.attachment.size_bytes) }}</span>
+              <span><i class="bi bi-file-earmark me-1"></i>{{ preview.attachment.mime }}</span>
+              <span><i class="bi bi-upc-scan me-1"></i>{{ preview.attachment.attachment_id }}</span>
+              <a class="ms-auto" :href="attachmentUrl(preview.attachment.attachment_id)" target="_blank" rel="noopener">
+                <i class="bi bi-download me-1"></i>下载原文件
+              </a>
+            </div>
+            <div v-if="previewLoading" class="text-secondary py-4 text-center">加载中…</div>
+            <div v-else-if="preview">
+              <!-- 图片：直接渲染，同源带会话，受权限控制 -->
+              <img v-if="preview.mode === 'image'" :src="attachmentUrl(preview.attachment.attachment_id)"
+                   class="img-fluid border rounded" style="max-height:70vh" :alt="preview.attachment.filename">
+              <!-- markdown/文本：fetch 后 marked 渲染（attachment:// 与同任务文件名自动解析） -->
+              <div v-else-if="preview.mode === 'markdown'">
+                <div v-if="preview.error" class="alert alert-danger py-2 small">{{ preview.error }}</div>
+                <div v-else class="md-content" v-html="renderMdWithAttachments(preview.content, attMap)"></div>
+              </div>
+              <!-- pdf：iframe 原生预览 -->
+              <iframe v-else-if="preview.mode === 'pdf'" :src="attachmentUrl(preview.attachment.attachment_id)" class="w-100 border rounded" style="height:70vh"></iframe>
+              <!-- 其他：不支持内联，给下载提示 -->
+              <div v-else class="text-secondary py-5 text-center">
+                <i class="bi bi-file-earmark-x fs-1 d-block mb-2"></i>
+                该格式（{{ preview.attachment.mime }}）不支持内联预览，请<a :href="attachmentUrl(preview.attachment.attachment_id)" target="_blank">下载查看</a>。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 回复框（底部，open/claimed/submitted/pending_confirm 状态） -->
+    <div v-if="['open','claimed','submitted','pending_confirm'].includes(task.status)" class="card">
       <div class="card-body">
         <textarea v-model="replyText" class="form-control mb-2" rows="3"
           placeholder="回复该任务（指导 agent 继续 / 提供信息 / 确认结果）..."></textarea>
         <div class="d-flex gap-2">
           <button class="btn btn-primary" @click="reply" :disabled="!replyText.trim()"><i class="bi bi-send me-1"></i>回复</button>
-          <button class="btn btn-outline-success" @click="resolveTask"><i class="bi bi-check2-circle me-1"></i>完成任务</button>
+          <button class="btn btn-outline-success" @click="resolveTask"><i class="bi bi-check2-circle me-1"></i>验收通过</button>
+          <button v-if="['claimed','submitted','pending_confirm'].includes(task.status)" class="btn btn-outline-danger" @click="rejectTask"><i class="bi bi-x-octagon me-1"></i>打回续做</button>
           <button class="btn btn-outline-danger ms-auto" @click="cancel"><i class="bi bi-x-circle me-1"></i>取消任务</button>
         </div>
       </div>

@@ -6,7 +6,7 @@ import { api } from '../api';
 const agents = ref([]);
 const error = ref('');
 const newKey = ref(null); // 注册成功后的 key（仅内存，刷新即失 = 只展示一次）
-const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: '' });
+const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false });
 
 let modal = null;
 const modalEl = ref(null);
@@ -27,7 +27,7 @@ async function submit() {
   try {
     const data = await api.createAgent(form.value);
     modal.hide();
-    form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: '' };
+    form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false };
     newKey.value = { name: data.agent.name, key: data.key };
     window.scrollTo(0, 0);
     const refreshed = await api.agents();
@@ -39,6 +39,12 @@ async function submit() {
 
 async function toggle(a) {
   await api.toggleAgent(a.id);
+  const data = await api.agents();
+  agents.value = data.agents;
+}
+
+async function toggleAccept(a) {
+  await api.toggleAgentAccept(a.id);
   const data = await api.agents();
   agents.value = data.agents;
 }
@@ -66,7 +72,7 @@ onBeforeUnmount(() => modal?.dispose());
     <i class="bi bi-pc-display"></i>还没有主机，先注册一个。
   </div></div>
   <table v-else class="table table-hover">
-    <thead><tr><th>Agent</th><th>主机</th><th>标签</th><th>状态</th><th>最近活跃</th><th></th></tr></thead>
+    <thead><tr><th>Agent</th><th>主机</th><th>标签</th><th>接外单</th><th>状态</th><th>最近活跃</th><th></th></tr></thead>
     <tbody>
       <tr v-for="a in agents" :key="a.id">
         <td>
@@ -75,6 +81,12 @@ onBeforeUnmount(() => modal?.dispose());
         </td>
         <td>{{ a.hostname }}</td>
         <td>{{ a.tags }}</td>
+        <td>
+          <span class="badge" :class="a.accept_external ? 'text-bg-warning' : 'text-bg-secondary'" role="button"
+                :title="a.accept_external ? '开启中：可认领公共池外单' : '关闭（默认）：只做内部指派任务'" @click="toggleAccept(a)">
+            {{ a.accept_external ? '开' : '关' }}
+          </span>
+        </td>
         <td><span class="badge" :class="a.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ a.status }}</span></td>
         <td class="text-secondary small">{{ a.last_seen_at || '—' }}</td>
         <td>
@@ -103,6 +115,12 @@ onBeforeUnmount(() => modal?.dispose());
             <input v-model="form.description" class="form-control mb-2" placeholder="这台机器负责什么">
             <label class="form-label">角色标签（逗号分隔）</label>
             <input v-model="form.tags" class="form-control mb-2" placeholder="web, prod">
+            <div class="form-check form-switch mb-2">
+              <input v-model="form.accept_external" type="checkbox" class="form-check-input" id="acceptExternal">
+              <label class="form-check-label" for="acceptExternal">允许接外单（认领公共池公开任务）</label>
+              <div class="text-secondary small">默认关闭（safer default）。开启后本主机可自主浏览公共池并认领公开任务；
+                按内外分离原则，接外单的主机应为隔离环境（不持有内部数据与凭据）。</div>
+            </div>
             <label class="form-label">默认提示词（agent 启动时加载，告知身份与职责）</label>
             <textarea v-model="form.system_prompt" class="form-control" rows="4"
               placeholder="你是 web-01 的运维 agent，负责..."></textarea>

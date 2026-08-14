@@ -9,12 +9,16 @@ import { initDb } from './db.js';
 import { apiRouter } from './routes/api.js';
 import { mcpRouter } from './routes/mcp.js';
 import { agentRouter } from './routes/agent.js';
-import { recoverStaleRunningTasks } from './scheduler.js';
+import { recoverStaleRunningTasks, recoverStaleClaimedTasks, autoConfirmPendingConfirm } from './scheduler.js';
+import { initSettings } from './service/settings.js';
+import { scanPendingAttachments } from './service/attachments.js';
+import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 async function main(): Promise<void> {
   await initDb();
+  await initSettings();
   console.log('✓ 数据库 schema 就绪');
 
   const app = express();
@@ -57,17 +61,42 @@ async function main(): Promise<void> {
     console.log(`  MCP 端点:   http://127.0.0.1:${config.port}/mcp`);
   });
 
-  // 超时回收：每小时清理"认领后 2h 无活动"的 running 任务（长任务靠 report_progress 续期）
+  // 生命周期回收（§10.2）：每小时清理——running 超时→failed；公共池 claimed 超时→回池；pending_confirm 超 7 天→自动确认
   const RECOVER_INTERVAL_MS = 60 * 60 * 1000;
   setInterval(() => {
-    recoverStaleRunningTasks(2)
-      .then((n) => {
-        if (n > 0) console.log(`[recover] 超时回收 ${n} 个任务`);
+    Promise.all([
+      recoverStaleRunningTasks(2),
+      recoverStaleClaimedTasks(2),
+      autoConfirmPendingConfirm(7),
+      scanPendingAttachments(),
+    ])
+      .then(([n1, n2, n3, scan]) => {
+        if (n1 + n2 + n3 > 0) console.log(`[recover] 超时回收 running=${n1} 认领回流=${n2} 自动确认=${n3}`);
+        if (scan.scanned + scan.skipped + scan.infected > 0) {
+          console.log(`[scan] 附件扫描 干净=${scan.scanned} 降级跳过=${scan.skipped} 感染=${scan.infected}`);
+        }
       })
       .catch((err) => console.error('[recover] 失败:', err));
   }, RECOVER_INTERVAL_MS);
   // 启动时先跑一次
-  void recoverStaleRunningTasks(2).catch(() => {});
+  void Promise.all([
+    recoverStaleRunningTasks(2),
+    recoverStaleClaimedTasks(2),
+    autoConfirmPendingConfirm(7),
+    scanPendingAttachments(),
+  ]).catch(() => {});
+
+  // LLM 审核/验收（§3.4 异步）：每分钟扫 pending_audit / submitted 两个队列；未配置时降级直通
+  const LLM_SCAN_MS = 60 * 1000;
+  setInterval(() => {
+    Promise.all([scanPendingAudits(), scanPendingVerifications()])
+      .then(([a, v]) => {
+        if (a.audited + v.verified > 0) {
+          console.log(`[llm] 审核=${a.audited}(拒${a.rejected}/降级${a.degraded}) 验收=${v.verified}(过${v.passed}/拒${v.failed}/降级${v.degraded})`);
+        }
+      })
+      .catch((err) => console.error('[llm] 扫描失败:', err));
+  }, LLM_SCAN_MS);
 }
 
 main().catch((err) => {

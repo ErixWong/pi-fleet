@@ -11,6 +11,8 @@ export interface AgentIdentity {
   hostname: string;
   tags: string;
   systemPrompt: string | null;
+  /** 接单开关（§五 内外分离）：是否允许认领公共池外单 */
+  acceptExternal: boolean;
 }
 
 export const agentContext = new AsyncLocalStorage<AgentIdentity>();
@@ -51,7 +53,7 @@ export function verifyPassword(password: string, stored: string): boolean {
 export async function findAgentByKey(key: string): Promise<AgentIdentity | null> {
   const hash = hashApiKey(key);
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, tags, system_prompt
+    `SELECT id, agent_id, name, hostname, tags, system_prompt, accept_external
        FROM agents WHERE key_hash = ? AND status = 'active' LIMIT 1`,
     [hash],
   );
@@ -64,6 +66,7 @@ export async function findAgentByKey(key: string): Promise<AgentIdentity | null>
     hostname: String(r.hostname ?? ''),
     tags: String(r.tags ?? ''),
     systemPrompt: (r.system_prompt as string | null) ?? null,
+    acceptExternal: Number(r.accept_external) === 1,
   };
 }
 

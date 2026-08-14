@@ -19,6 +19,7 @@ async function logout() {
         <router-link to="/" class="nav-link" exact-active-class="active"><i class="bi bi-grid-1x2 me-1"></i>仪表盘</router-link>
         <router-link to="/tasks" class="nav-link" active-class="active"><i class="bi bi-list-check me-1"></i>任务</router-link>
         <router-link to="/agents" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
+        <router-link to="/settings" class="nav-link" active-class="active"><i class="bi bi-gear me-1"></i>设置</router-link>
       </div>
       <div class="ms-auto">
         <button class="btn btn-sm btn-outline-secondary" @click="logout"><i class="bi bi-box-arrow-right me-1"></i>退出</button>
