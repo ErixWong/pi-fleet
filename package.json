@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/mcp-acceptance.mjs && node scripts/rest-acceptance.mjs",
+    "test": "node scripts/mcp-acceptance.mjs && node scripts/rest-acceptance.mjs && node scripts/web-acceptance.mjs",
     "init-admin": "tsx scripts/init-admin.ts"
   },
   "dependencies": {

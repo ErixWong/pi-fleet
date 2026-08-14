@@ -9,7 +9,7 @@ npm run dev          # 开发：tsx 直接跑 src/index.ts（注意 Windows 端�
 npm run build        # 构建到 dist（tsc）
 npm start            # 生产：node dist/src/index.js（前端已 build 到 web/dist 时自动托管）
 npm run typecheck    # 类型检查
-npm test             # 验收：MCP 全流程 + REST 端点（需服务运行 + 管理员 admin123）
+npm test             # 验收：MCP 全流程 + REST 端点 + Web UI（playwright；需服务运行 + 管理员 admin123 + web/dist 已构建）
 npm run init-admin   # 设置管理员密码
 ```
 
@@ -77,7 +77,7 @@ docs/agent-onboarding.md  # agent 接入指南（通用契约 + pi 参考实现�
 - **BIGINT 是字符串**：连接池配置了 bigNumberStrings，id 字段是字符串类型
 - **Windows 端口残留**：`npm run dev`（tsx）停止时子进程可能残留占 3000 端口，
   重启前先 `Get-NetTCPConnection -LocalPort 3000 | 杀进程`；生产用 `node dist` 无此问题
-- **测试数据**：验收脚本会创建 test-agent-* 与 T-* 任务，属正常现象；`npm test` 当前 135 用例（MCP 102 + REST 33），第 9 节覆盖编排全链路（含周期克隆闭环/首实例身份/闸门/plan 上下文分级）
+- **测试数据**：验收脚本会创建 test-agent-* 与 T-* 任务，属正常现象；`npm test` 当前 158 用例（MCP 104 + REST 33 + Web UI 21，Web UI 走 playwright chromium，覆盖编排树表单/树视图/可见性改档/failed 处置/设置页），第 9 节覆盖编排全链路（含周期克隆闭环/首实例身份/闸门/plan 上下文分级）
 - **legacy scheduled 并存**：旧入口 `POST /api/tasks kind='scheduled'`（tasks.ts 原地推进 next_due_at，无 plan）与新周期 plan（克隆）**双机制并存**，旧入口已标废弃、后续移除（见 orchestration.md §九迁移口径）
 
 ## 配置（.env）
