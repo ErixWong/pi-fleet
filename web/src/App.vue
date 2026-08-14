@@ -1,8 +1,12 @@
 <script setup>
 import { ref } from 'vue';
+// 引入 Dropdown 模块以注册 bootstrap data-api（data-bs-toggle="dropdown" 依赖它；各视图只 import 了 Modal，不含 dropdown）
+import { Dropdown } from 'bootstrap';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from './api';
 import { THEMES, applyTheme, currentTheme } from './theme';
+
+void Dropdown;
 
 const route = useRoute();
 const router = useRouter();
