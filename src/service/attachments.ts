@@ -152,13 +152,30 @@ export async function attachmentAbsPath(attachmentId: string): Promise<string | 
 }
 
 /**
- * 下载权限：owner 或 参与该附件被引用的任一任务（引用即授权）。
+ * 下载权限（§3.7 + §编排八 交付物可见性三档）：
+ * - participants（默认）：owner 或 参与被引用任务者（引用即授权）
+ * - public：任意已认证 agent
+ * - account：阶段①账号系统落地后=同账号；当前与 participants 一致（占位）
  */
 export async function canDownload(agentId: number, attachmentId: string): Promise<boolean> {
   const att = await attachmentViewById(attachmentId);
   if (!att) return false;
   if (att.owner_agent_id === agentId) return true;
-  const rows = await query(
+  // 收集全部引用任务的交付物可见性（P2-4：多引用时档位不确定 → union 语义）
+  const refs = await query(
+    `SELECT t.deliverable_visibility FROM deliverables d
+       JOIN tasks t ON t.id = d.task_id
+      WHERE d.attachment_id = (SELECT id FROM attachments WHERE attachment_id = ?)`,
+    [attachmentId],
+  );
+  if (refs.length === 0) return false;
+  // 任一引用任务为 public → public（放行）；否则按 participants 判定
+  if (refs.some((r) => String((r as Record<string, unknown>).deliverable_visibility ?? 'participants') === 'public')) {
+    return true;
+  }
+  // account：阶段①账号系统落地后=同账号；当前无账号概念，降级为 participants（参与者可下载）
+  // participants：参与被引用任务
+  const part = await query(
     `SELECT t.id FROM deliverables d
        JOIN tasks t ON t.id = d.task_id
       WHERE d.attachment_id = (SELECT id FROM attachments WHERE attachment_id = ?)
@@ -166,7 +183,7 @@ export async function canDownload(agentId: number, attachmentId: string): Promis
       LIMIT 1`,
     [attachmentId, agentId, agentId],
   );
-  return rows.length > 0;
+  return part.length > 0;
 }
 
 /** 管理端直接取附件（已登录管理员） */

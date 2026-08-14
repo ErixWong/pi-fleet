@@ -1,26 +1,44 @@
 import { readFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { query } from '../db.js';
 import { getSetting, getSettingInt } from './settings.js';
 
 /**
  * LLM 审核/验收（§3.4 平台接 LLM）：
- * - 多模型（llm_models 表）：每个模型有 base_url/model/key、多模态能力（vision，可识图）、价格标记、启用开关
+ * - 提供商（llm_providers）：base_url / api_key / 启用开关 在 provider 级共享，**一个 provider 对应多个 model**
+ * - 模型（llm_models）：挂在 provider 下，model 即请求体 model 字段；含多模态（vision，可识图）、价格标记、启用开关
  * - 用途绑定（settings：llm_audit_model / llm_verify_model，'auto' = 有图片自动选多模态模型）
- * - 调用日志（llm_calls）：模型/用途/任务/tokens/价格，成本归平台
+ * - 调用日志（llm_calls）：provider/模型/用途/任务/tokens/价格，成本归平台
  * - 故障降级：未配置 / 调用失败重试后仍失败 → 降级为仅程序校验放行并标记"未经 LLM 审核/验收"
  */
 
-export interface LlmModel {
+export interface LlmProvider {
   id: string;
   name: string;
   base_url: string;
-  model: string;
   api_key: string;
+  note: string;
+  enabled: boolean;
+}
+
+export interface LlmModel {
+  id: string;
+  provider_id: string;
+  model: string; // 请求体 model 字段
+  name: string;
   vision: boolean;
   price: string;
   note: string;
   enabled: boolean;
+}
+
+/** 模型视图：JOIN provider 后的调用/展示信息（base_url/api_key 继承自 provider） */
+export interface LlmModelView extends LlmModel {
+  base_url: string;
+  api_key: string;
+  provider_name: string;
+  provider_enabled: boolean;
 }
 
 export interface LlmVerdict {
@@ -36,39 +54,109 @@ export type ChatMessage =
 interface TextPart { type: 'text'; text: string }
 interface ImagePart { type: 'image_url'; image_url: { url: string } }
 
-// ─────────────────────────── 模型管理 ───────────────────────────
+// ─────────────────────────── Provider 管理 ───────────────────────────
 
-/** 全部模型（含禁用） */
-export async function listModels(): Promise<LlmModel[]> {
-  const rows = (await query(`SELECT * FROM llm_models ORDER BY enabled DESC, name`)) as Array<Record<string, unknown>>;
-  return rows.map(toModel);
+/** 全部 provider（api_key 掩码回显，仅展示用） */
+export async function listProviders(): Promise<LlmProvider[]> {
+  const rows = (await query(`SELECT * FROM llm_providers ORDER BY enabled DESC, name`)) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    const p = toProvider(r);
+    if (p.api_key) p.api_key = '******';
+    return p;
+  });
 }
 
-/** 启用模型；空表 → 回退旧单模型配置（llm_base_url/llm_model）作为 default */
-export async function enabledModels(): Promise<LlmModel[]> {
+export async function getProviderById(id: string): Promise<LlmProvider | null> {
+  const rows = (await query(`SELECT * FROM llm_providers WHERE id = ? LIMIT 1`, [id])) as Array<Record<string, unknown>>;
+  return rows.length > 0 ? toProvider(rows[0]) : null;
+}
+
+function toProvider(r: Record<string, unknown>): LlmProvider {
+  return {
+    id: String(r.id),
+    name: String(r.name),
+    base_url: String(r.base_url),
+    api_key: String(r.api_key ?? ''),
+    note: String(r.note ?? ''),
+    enabled: Number(r.enabled) !== 0,
+  };
+}
+
+/** 新增/更新 provider（api_key 空串或 '******' = 不改，保留原值） */
+export async function upsertProvider(p: Omit<LlmProvider, 'enabled'> & { enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+  let id = (p.id ?? '').trim();
+  if (!id) id = `p-${randomBytes(4).toString('hex')}`;
+  else if (!/^[a-zA-Z0-9_-]{1,32}$/.test(id)) return { ok: false, error: 'provider id 须为字母数字下划线（≤32）' };
+  if (!p.name?.trim()) return { ok: false, error: '缺少 provider 名称' };
+  if (!p.base_url?.trim()) return { ok: false, error: '缺少 Base URL' };
+  const key = (p.api_key ?? '').trim();
+  await query(
+    `INSERT INTO llm_providers (id, name, base_url, api_key, note, enabled)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE name=VALUES(name), base_url=VALUES(base_url),
+       api_key=IF(VALUES(api_key)='' OR VALUES(api_key)='******', api_key, VALUES(api_key)),
+       note=VALUES(note), enabled=VALUES(enabled)`,
+    [id, p.name.trim(), p.base_url.trim(), key, (p.note ?? '').trim(), p.enabled === false ? 0 : 1],
+  );
+  return { ok: true };
+}
+
+/** 删除 provider（其下仍有模型时拒绝，避免孤儿模型） */
+export async function deleteProvider(id: string): Promise<{ ok: boolean; error?: string }> {
+  const cnt = (await query(`SELECT COUNT(*) AS c FROM llm_models WHERE provider_id = ?`, [id])) as Array<Record<string, unknown>>;
+  const n = Number(cnt[0]?.c ?? 0);
+  if (n > 0) return { ok: false, error: `provider「${id}」下仍有 ${n} 个模型，请先删除这些模型` };
+  await query(`DELETE FROM llm_providers WHERE id = ?`, [id]);
+  return { ok: true };
+}
+
+// ─────────────────────────── 模型管理 ───────────────────────────
+
+const MODEL_JOIN = `
+  SELECT m.id, m.provider_id, m.name, m.model, m.vision, m.price, m.note, m.enabled,
+         p.base_url, p.api_key, p.name AS provider_name, p.enabled AS provider_enabled
+    FROM llm_models m
+    LEFT JOIN llm_providers p ON p.id = m.provider_id`;
+
+/** 全部模型（api_key 掩码回显，仅展示用） */
+export async function listModels(): Promise<LlmModelView[]> {
+  const rows = (await query(`${MODEL_JOIN} ORDER BY m.enabled DESC, p.name, m.name`)) as Array<Record<string, unknown>>;
+  return rows.map((r) => {
+    const v = toModelView(r);
+    if (v.api_key) v.api_key = '******';
+    return v;
+  });
+}
+
+/** 可用模型 = 模型启用 且 所属 provider 启用 */
+export async function enabledModels(): Promise<LlmModelView[]> {
   const rows = (await query(
-    `SELECT * FROM llm_models WHERE enabled = 1 ORDER BY name`,
+    `${MODEL_JOIN} WHERE m.enabled = 1 AND p.enabled = 1 ORDER BY p.name, m.name`,
   )) as Array<Record<string, unknown>>;
-  if (rows.length > 0) return rows.map(toModel);
-  const base = getSetting('llm_base_url');
-  const model = getSetting('llm_model');
-  if (base && model) {
-    return [{
-      id: 'default', name: '默认模型', base_url: base, model,
-      api_key: getSetting('llm_api_key'), vision: false,
-      price: '', note: '兼容旧配置', enabled: true,
-    }];
-  }
-  return [];
+  return rows.map(toModelView);
+}
+
+/** 按 id 取模型视图（含 provider 连接，调用用真实 key） */
+export async function getModelById(id: string): Promise<LlmModelView | null> {
+  const rows = (await query(`${MODEL_JOIN} WHERE m.id = ? LIMIT 1`, [id])) as Array<Record<string, unknown>>;
+  return rows.length > 0 ? toModelView(rows[0]) : null;
+}
+
+/** 某 provider 下的第一个模型（测试连接用；先启用后任意） */
+export async function firstModelOfProvider(providerId: string): Promise<LlmModelView | null> {
+  const rows = (await query(
+    `${MODEL_JOIN} WHERE m.provider_id = ? ORDER BY m.enabled DESC, m.name LIMIT 1`,
+    [providerId],
+  )) as Array<Record<string, unknown>>;
+  return rows.length > 0 ? toModelView(rows[0]) : null;
 }
 
 function toModel(r: Record<string, unknown>): LlmModel {
   return {
     id: String(r.id),
-    name: String(r.name),
-    base_url: String(r.base_url),
+    provider_id: String(r.provider_id),
     model: String(r.model),
-    api_key: String(r.api_key ?? ''),
+    name: String(r.name),
     vision: Number(r.vision) === 1,
     price: String(r.price ?? ''),
     note: String(r.note ?? ''),
@@ -76,18 +164,19 @@ function toModel(r: Record<string, unknown>): LlmModel {
   };
 }
 
-/** LLM 是否已配置（任一启用模型或旧配置） */
-export async function llmConfigured(): Promise<boolean> {
-  return (await enabledModels()).length > 0;
+function toModelView(r: Record<string, unknown>): LlmModelView {
+  return {
+    ...toModel(r),
+    base_url: String(r.base_url ?? ''),
+    api_key: String(r.api_key ?? ''),
+    provider_name: String(r.provider_name ?? ''),
+    provider_enabled: Number(r.provider_enabled) === 1,
+  };
 }
 
-/** 按 id 取模型（不校验启用） */
-export async function getModelById(id: string): Promise<LlmModel | null> {
-  const rows = (await query(`SELECT * FROM llm_models WHERE id = ? LIMIT 1`, [id])) as Array<Record<string, unknown>>;
-  if (rows.length > 0) return toModel(rows[0]);
-  // 兼容旧配置 default
-  const models = await enabledModels();
-  return models.find((m) => m.id === id) ?? null;
+/** LLM 是否已配置（存在 模型+provider 均启用的组合） */
+export async function llmConfigured(): Promise<boolean> {
+  return (await enabledModels()).length > 0;
 }
 
 /**
@@ -95,7 +184,7 @@ export async function getModelById(id: string): Promise<LlmModel | null> {
  * - 'auto'：需要识图（hasImages）→ 优先 vision 模型；否则第一个启用模型
  * - 指定 id：取该模型（fallback auto）
  */
-export async function pickModel(purpose: 'audit' | 'verify', hasImages: boolean): Promise<LlmModel | null> {
+export async function pickModel(purpose: 'audit' | 'verify', hasImages: boolean): Promise<LlmModelView | null> {
   const models = await enabledModels();
   if (models.length === 0) return null;
   const settingKey = purpose === 'audit' ? 'llm_audit_model' : 'llm_verify_model';
@@ -118,27 +207,31 @@ export async function pickModel(purpose: 'audit' | 'verify', hasImages: boolean)
   return models[0];
 }
 
-// ─────────────────────────── 模型 CRUD（设置页） ───────────────────────────
+// ─────────────────────────── Provider / 模型 CRUD ───────────────────────────
 
 export async function upsertModel(m: Omit<LlmModel, 'enabled'> & { enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
-  const id = (m.id ?? '').trim();
-  if (!id || !/^[a-zA-Z0-9_-]{1,32}$/.test(id)) return { ok: false, error: '模型 id 须为字母数字下划线（≤32）' };
+  // id 是内部主键：新增时留空 → 自动生成随机串；显式传入（编辑路径）才校验格式
+  let id = (m.id ?? '').trim();
+  if (!id) id = `m-${randomBytes(4).toString('hex')}`;
+  else if (!/^[a-zA-Z0-9_-]{1,32}$/.test(id)) return { ok: false, error: '模型 id 须为字母数字下划线（≤32）' };
   if (!m.name?.trim()) return { ok: false, error: '缺少模型名称' };
-  if (!m.base_url?.trim() || !m.model?.trim()) return { ok: false, error: '缺少 base_url 或 model' };
+  if (!m.model?.trim()) return { ok: false, error: '缺少模型 ID（请求体 model 字段，如 gpt-4o）' };
+  const pid = (m.provider_id ?? '').trim();
+  if (!pid) return { ok: false, error: '请选择所属 provider' };
+  const prov = await getProviderById(pid);
+  if (!prov) return { ok: false, error: `provider「${pid}」不存在` };
   await query(
-    `INSERT INTO llm_models (id, name, base_url, model, api_key, vision, price, note, enabled)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE name=VALUES(name), base_url=VALUES(base_url), model=VALUES(model),
-       api_key=IF(VALUES(api_key)='', api_key, VALUES(api_key)), vision=VALUES(vision),
-       price=VALUES(price), note=VALUES(note), enabled=VALUES(enabled)`,
-    [id, m.name.trim(), m.base_url.trim(), m.model.trim(), (m.api_key ?? '').trim(),
-     m.vision ? 1 : 0, (m.price ?? '').trim(), (m.note ?? '').trim(), m.enabled === false ? 0 : 1],
+    `INSERT INTO llm_models (id, provider_id, name, model, vision, price, note, enabled)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE provider_id=VALUES(provider_id), name=VALUES(name), model=VALUES(model),
+       vision=VALUES(vision), price=VALUES(price), note=VALUES(note), enabled=VALUES(enabled)`,
+    [id, pid, m.name.trim(), m.model.trim(), m.vision ? 1 : 0, (m.price ?? '').trim(), (m.note ?? '').trim(),
+     m.enabled === false ? 0 : 1],
   );
   return { ok: true };
 }
 
 export async function deleteModel(id: string): Promise<{ ok: boolean; error?: string }> {
-  if (id === 'default') return { ok: false, error: '默认模型不可删除（可禁用）' };
   await query(`DELETE FROM llm_models WHERE id = ?`, [id]);
   return { ok: true };
 }
@@ -147,6 +240,7 @@ export async function deleteModel(id: string): Promise<{ ok: boolean; error?: st
 
 interface CallRecord {
   modelId: string;
+  providerId: string;
   purpose: 'audit' | 'verify' | 'test';
   taskId: number | null;
   vision: boolean;
@@ -160,9 +254,9 @@ interface CallRecord {
 async function recordCall(rec: CallRecord): Promise<void> {
   try {
     await query(
-      `INSERT INTO llm_calls (model_id, purpose, task_id, vision, prompt_tokens, completion_tokens, price, ok, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [rec.modelId, rec.purpose, rec.taskId, rec.vision ? 1 : 0, rec.promptTokens, rec.completionTokens,
+      `INSERT INTO llm_calls (model_id, provider_id, purpose, task_id, vision, prompt_tokens, completion_tokens, price, ok, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [rec.modelId, rec.providerId, rec.purpose, rec.taskId, rec.vision ? 1 : 0, rec.promptTokens, rec.completionTokens,
        rec.price.slice(0, 64), rec.ok ? 1 : 0, rec.error.slice(0, 255)],
     );
   } catch {
@@ -172,7 +266,7 @@ async function recordCall(rec: CallRecord): Promise<void> {
 
 /** 调用模型（OpenAI 兼容，支持多模态 content 数组）；失败抛错（由调用方降级） */
 export async function chatCompletion(
-  model: LlmModel,
+  model: LlmModelView,
   messages: ChatMessage[],
   opts: { json?: boolean; purpose?: 'audit' | 'verify' | 'test'; taskId?: number | null } = {},
 ): Promise<string> {
@@ -189,7 +283,7 @@ export async function chatCompletion(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let record: CallRecord = {
-    modelId: model.id, purpose: opts.purpose ?? 'test', taskId: opts.taskId ?? null,
+    modelId: model.id, providerId: model.provider_id, purpose: opts.purpose ?? 'test', taskId: opts.taskId ?? null,
     vision: model.vision, price: model.price, ok: false, error: '', promptTokens: 0, completionTokens: 0,
   };
   try {
@@ -244,7 +338,7 @@ function extractJson(raw: string): Record<string, unknown> {
 
 /** 调用 LLM 并解析 {passed, reason}；失败抛错 */
 export async function llmVerdict(
-  model: LlmModel,
+  model: LlmModelView,
   systemPrompt: string,
   userContent: string | ChatMessage['content'],
   opts: { purpose?: 'audit' | 'verify'; taskId?: number | null } = {},
@@ -261,7 +355,7 @@ export async function llmVerdict(
 
 /** 带重试的判决（2 次自动重试，§3.4 故障降级哲学） */
 export async function llmVerdictWithRetry(
-  model: LlmModel,
+  model: LlmModelView,
   systemPrompt: string,
   userContent: string | ChatMessage['content'],
   opts: { purpose?: 'audit' | 'verify'; taskId?: number | null } = {},
@@ -495,19 +589,52 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
   }
 }
 
-/** 测试模型连接（设置页"测试连接"按钮） */
-export async function testLlmConnection(modelId?: string): Promise<{ ok: boolean; detail: string }> {
-  const model = modelId ? await getModelById(modelId) : (await enabledModels())[0];
-  if (!model) return { ok: false, detail: '未配置可用模型（模型管理里添加，或填 base_url/model）' };
+/**
+ * 测试 LLM 连接（不落库配置）：
+ * - model_id：测试指定模型（含 provider 连接）
+ * - provider_id + model：临时测试该 provider 下一个未保存的模型串（新增模型表单用）
+ * - provider_id：测试该 provider 下第一个模型
+ * - 都不传：测试第一个可用模型
+ */
+export async function testLlmConnection(
+  opts: { model_id?: string; provider_id?: string; model?: string } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  let view: LlmModelView | null = null;
+  if (opts.model_id) {
+    view = await getModelById(opts.model_id);
+    if (!view) return { ok: false, detail: `模型「${opts.model_id}」不存在` };
+  } else if (opts.provider_id) {
+    const prov = await getProviderById(opts.provider_id);
+    if (!prov) return { ok: false, detail: `provider「${opts.provider_id}」不存在` };
+    if (opts.model?.trim()) {
+      view = {
+        id: '(adhoc)', provider_id: prov.id, model: opts.model.trim(), name: prov.name,
+        vision: false, price: '', note: '', enabled: true,
+        base_url: prov.base_url, api_key: prov.api_key, provider_name: prov.name, provider_enabled: prov.enabled,
+      };
+    } else {
+      view = await firstModelOfProvider(prov.id);
+      if (!view) return { ok: false, detail: `provider「${prov.name}」下还没有模型，请先添加模型再测试` };
+    }
+  } else {
+    view = (await enabledModels())[0] ?? null;
+  }
+  if (!view) return { ok: false, detail: '未配置可用模型：请先在 LLM 设置里添加 provider 与模型' };
   try {
-    const reply = await chatCompletion(model, [{ role: 'user', content: '只回复两个字：正常' }], { purpose: 'test' });
-    return { ok: true, detail: `模型「${model.name}」连接成功：${reply.slice(0, 80)}` };
+    const reply = await chatCompletion(view, [{ role: 'user', content: '只回复两个字：正常' }], { purpose: 'test' });
+    return { ok: true, detail: `「${view.provider_name}/${view.name}」连接成功：${reply.slice(0, 80)}` };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   }
 }
 
-/** 调用日志（最近 N 条） */
+/** 调用日志（最近 N 条，JOIN provider 名） */
 export async function listLlmCalls(limit = 50): Promise<Array<Record<string, unknown>>> {
-  return query(`SELECT * FROM llm_calls ORDER BY id DESC LIMIT ?`, [limit]);
+  return query(
+    `SELECT c.*, p.name AS provider_name
+       FROM llm_calls c
+       LEFT JOIN llm_providers p ON p.id = c.provider_id
+      ORDER BY c.id DESC LIMIT ?`,
+    [limit],
+  );
 }

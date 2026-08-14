@@ -83,7 +83,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   visibility ENUM('private','public') NOT NULL DEFAULT 'private' COMMENT 'private=仅发起人+指派主机可见可接；public=入公共池可被认领',
   creator_id BIGINT NULL,
   assignee_id BIGINT NULL,
-  status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved') NOT NULL DEFAULT 'pending',
+  status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved','blocked') NOT NULL DEFAULT 'pending',
+  origin ENUM('manual','periodic') NOT NULL DEFAULT 'manual' COMMENT '来源（§编排四：kind 退役，行为由 visibility×origin 推导）',
+  stage_id BIGINT NULL COMMENT '所属 stage（可选；无=独立任务）',
+  series_id BIGINT NULL COMMENT '周期序列首实例 id（§编排三：序列克隆归拢）',
+  content_hash CHAR(64) NULL COMMENT '定义字段 hash（周期审核继承）',
+  deliverable_visibility ENUM('participants','account','public') NOT NULL DEFAULT 'participants' COMMENT '交付物可见性三档（§编排八）',
   deliver_attempts INT NOT NULL DEFAULT 0 COMMENT '交付尝试次数（打回/预检不合格累计）',
   max_attempts INT NOT NULL DEFAULT 3 COMMENT '交付尝试上限（任务级覆盖平台默认）',
   schedule_cron VARCHAR(100) NULL,
@@ -196,8 +201,33 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','repor
 ALTER TABLE messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
 -- 附件系统：交付物引用附件（引用即授权；同名交付物版本自增）
 ALTER TABLE deliverables ADD COLUMN IF NOT EXISTS attachment_id BIGINT NULL AFTER agent_id;
--- 状态枚举扩展（旧表迁移）：加入公共池/认领/验收状态 active / claimed / submitted / pending_confirm
-ALTER TABLE tasks MODIFY COLUMN status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved') NOT NULL DEFAULT 'pending';
+-- 编排（orchestration.md）tasks 结构迁移（status 枚举加 blocked、origin/stage_id/series_id/content_hash/
+-- deliverable_visibility 列、旧 scheduled 回填）已移入 initDb 的 migrateTasksV2：
+-- 带 information_schema 版本门，不在此无条件执行（本环境 ALTER 重建必失败 errno 194）。
+
+-- 编排：plan（三层容器，命名弃用 project 避免与 workdir 项目模式撞车）
+CREATE TABLE IF NOT EXISTS plans (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  plan_id VARCHAR(32) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  recurrence VARCHAR(20) NOT NULL DEFAULT 'none' COMMENT 'none | daily | weekly:<0-6> | hourly；非空 ⇒ 单 stage',
+  window_start TIME NULL,
+  window_end TIME NULL,
+  next_due_at DATETIME NULL COMMENT '周期 plan 下一次克隆时刻',
+  status ENUM('active','paused','archived','done') NOT NULL DEFAULT 'active',
+  creator_agent_id BIGINT NULL COMMENT '谁创建归谁（阶段①账号派生归属）',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS plan_stages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  plan_id BIGINT NOT NULL,
+  seq INT NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  UNIQUE KEY uq_plan_seq (plan_id, seq),
+  CONSTRAINT fk_stage_plan FOREIGN KEY (plan_id) REFERENCES plans(id)
+) ENGINE=InnoDB;
+CREATE INDEX IF NOT EXISTS idx_stage_plan ON plan_stages(plan_id, seq);
 
 -- 提示词/设置修改留痕（§3.4：提示词即审核口径，修改需留痕：改人、改时、前值）
 CREATE TABLE IF NOT EXISTS settings_history (
@@ -210,13 +240,24 @@ CREATE TABLE IF NOT EXISTS settings_history (
 ) ENGINE=InnoDB;
 CREATE INDEX IF NOT EXISTS idx_settings_hist_k ON settings_history(k, created_at);
 
--- LLM 多模型（§3.4 扩展：区分能力/多模态、支持多模型、价格标记）
-CREATE TABLE IF NOT EXISTS llm_models (
-  id VARCHAR(32) PRIMARY KEY COMMENT '内部引用名，如 default / vision / cheap',
+-- LLM 提供商（§3.4 重构：一个 provider 对应多个 model；base_url/api_key 在 provider 级共享，不再逐模型重复）
+CREATE TABLE IF NOT EXISTS llm_providers (
+  id VARCHAR(32) PRIMARY KEY COMMENT '内部引用名，如 openai / deepseek / local',
   name VARCHAR(128) NOT NULL,
   base_url VARCHAR(255) NOT NULL,
-  model VARCHAR(128) NOT NULL,
   api_key VARCHAR(255) NOT NULL DEFAULT '',
+  note VARCHAR(255) NOT NULL DEFAULT '',
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- LLM 模型（挂在 provider 下；base_url/api_key 继承 provider，行内不再冗余）
+CREATE TABLE IF NOT EXISTS llm_models (
+  id VARCHAR(32) PRIMARY KEY COMMENT '内部引用名，如 gpt-4o-mini',
+  provider_id VARCHAR(32) NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  model VARCHAR(128) NOT NULL COMMENT '请求体 model 字段（如 gpt-4o）',
   vision TINYINT(1) NOT NULL DEFAULT 0 COMMENT '多模态（可识图）',
   price VARCHAR(64) NOT NULL DEFAULT '' COMMENT '价格标记（自由文本，如 ¥1.2/1M tokens），留痕性质',
   note VARCHAR(255) NOT NULL DEFAULT '',
@@ -225,10 +266,15 @@ CREATE TABLE IF NOT EXISTS llm_models (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- LLM 调用日志（成本归平台：模型/用途/tokens/价格）
+-- 旧库升级：llm_models 补 provider_id 列（数据迁移在 initDb 内 JS 完成，成功后删 base_url/api_key 列）
+ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER id;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER model_id;
+
+-- LLM 调用日志（成本归平台：provider/模型/用途/tokens/价格）
 CREATE TABLE IF NOT EXISTS llm_calls (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   model_id VARCHAR(32) NOT NULL,
+  provider_id VARCHAR(32) NULL COMMENT '冗余记录：删除 provider 后日志仍可归因',
   purpose ENUM('audit','verify','test') NOT NULL,
   task_id BIGINT NULL,
   vision TINYINT(1) NOT NULL DEFAULT 0,
@@ -249,7 +295,103 @@ export async function initDb(): Promise<void> {
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }
+    await migrateTasksV2(conn);
+    await migrateLlmProviders(conn);
   } finally {
     conn.release();
+  }
+}
+
+/**
+ * 编排（orchestration.md）tasks 结构迁移，带版本门：
+ * - 先用 information_schema 探测，缺列才执行 ALTER；已迁移的库每次启动零 DDL
+ * - 本环境对 tasks 做 ALTER 重建必失败（errno 194）：失败时给出明确指引而不是裸崩
+ * - 旧 scheduled 回填只在存在未迁移行时执行（不每次启动全表扫）
+ */
+async function migrateTasksV2(conn: { query(sql: string, params?: unknown[]): Promise<unknown> }): Promise<void> {
+  const cols = (await conn.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tasks'
+        AND COLUMN_NAME IN ('origin','stage_id','series_id','content_hash','deliverable_visibility')`,
+  )) as Array<Record<string, unknown>>;
+  const statusCol = (await conn.query(`SHOW COLUMNS FROM tasks LIKE 'status'`)) as Array<Record<string, unknown>>;
+  const statusType = String(statusCol[0]?.Type ?? '');
+  const needAlter = cols.length < 5 || !statusType.includes('blocked');
+  if (needAlter) {
+    try {
+      if (!statusType.includes('blocked')) {
+        await conn.query(`ALTER TABLE tasks MODIFY COLUMN status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved','blocked') NOT NULL DEFAULT 'pending'`);
+      }
+      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS origin ENUM('manual','periodic') NOT NULL DEFAULT 'manual' AFTER kind`);
+      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS stage_id BIGINT NULL AFTER origin`);
+      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS series_id BIGINT NULL AFTER stage_id`);
+      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS content_hash CHAR(64) NULL AFTER series_id`);
+      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliverable_visibility ENUM('participants','account','public') NOT NULL DEFAULT 'participants' AFTER status`);
+    } catch (e) {
+      throw new Error(
+        `tasks 表结构迁移失败（本环境 ALTER 重建受限 errno 194）：请先停服运行 node scripts/rebuild-tasks.mjs 完成复制换表，再启动。原始错误：${(e as Error).message}`,
+      );
+    }
+  }
+  await conn.query(`CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage_id)`);
+  // 旧 scheduled 数据迁移：kind='scheduled' → origin='periodic' + series_id=id（每任务一条序列）；无待迁移行则跳过
+  const pending = (await conn.query(
+    `SELECT 1 FROM tasks WHERE kind = 'scheduled' AND origin = 'manual' LIMIT 1`,
+  )) as unknown[];
+  if (pending.length > 0) {
+    await conn.query(`UPDATE tasks SET origin='periodic', series_id=id WHERE kind='scheduled' AND origin='manual'`);
+  }
+}
+
+/**
+ * LLM provider→model 重构迁移：旧 llm_models 行（base_url/api_key 在行内）
+ * 按 (base_url, api_key) 归并为 provider，回填 provider_id 后删行内冗余列。
+ * 幂等：已迁移（无 base_url 列）时直接跳过；空表/新库无副作用。
+ */
+async function migrateLlmProviders(conn: { query(sql: string, params?: unknown[]): Promise<unknown> }): Promise<void> {
+  const cols = (await conn.query(`SHOW COLUMNS FROM llm_models`)) as Array<{ Field: string }>;
+  const hasLegacyCols = cols.some((c) => c.Field === 'base_url');
+  if (hasLegacyCols) {
+    const pending = (await conn.query(
+      `SELECT id, name, base_url, api_key, note FROM llm_models WHERE provider_id IS NULL`,
+    )) as Array<Record<string, unknown>>;
+    if (pending.length > 0) {
+      // 按 (base_url, api_key) 分组归并
+      const groups = new Map<string, { base_url: string; api_key: string; names: string[]; notes: string[] }>();
+      for (const r of pending) {
+        const key = `${String(r.base_url ?? '')}|${String(r.api_key ?? '')}`;
+        if (!groups.has(key)) groups.set(key, { base_url: String(r.base_url ?? ''), api_key: String(r.api_key ?? ''), names: [], notes: [] });
+        groups.get(key)!.names.push(String(r.name));
+        if (r.note) groups.get(key)!.notes.push(String(r.note));
+      }
+      let i = 0;
+      for (const g of groups.values()) {
+        i++;
+        const pid = `legacy-${i}`;
+        const host = safeHost(g.base_url);
+        await conn.query(
+          `INSERT INTO llm_providers (id, name, base_url, api_key, note) VALUES (?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE name=VALUES(name), base_url=VALUES(base_url), api_key=VALUES(api_key)`, 
+          [pid, host ? `旧配置-${host}` : `旧配置${i}`, g.base_url, g.api_key,
+           `由旧模型行自动迁移（原名称：${[...new Set(g.names)].join('、').slice(0, 120)}${g.notes.length ? `；原备注：${[...new Set(g.notes)].join('、').slice(0, 80)}` : ''}）`],
+        );
+        await conn.query(
+          `UPDATE llm_models SET provider_id = ? WHERE provider_id IS NULL AND base_url = ? AND api_key = ?`,
+          [pid, g.base_url, g.api_key],
+        );
+      }
+    }
+    // 数据迁移完成后删除行内冗余列（新库/已迁移库无此列，DROP IF EXISTS 无副作用）
+    await conn.query(`ALTER TABLE llm_models DROP COLUMN IF EXISTS base_url`);
+    await conn.query(`ALTER TABLE llm_models DROP COLUMN IF EXISTS api_key`);
+  }
+}
+
+/** 从 base_url 提取主机名做 provider 命名（失败返回空串） */
+function safeHost(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname.replace(/[^a-zA-Z0-9.-]/g, '_');
+  } catch {
+    return '';
   }
 }

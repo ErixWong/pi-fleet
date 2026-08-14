@@ -3,18 +3,22 @@ import express from 'express';
 import { randomBytes } from 'node:crypto';
 import { query, withTransaction } from '../db.js';
 import { generateApiKey, hashApiKey, requireAdmin, verifyPassword } from '../auth.js';
-import { computeNextDue, toLocalString } from '../scheduler.js';
+import { computeNextDue, nowString, toLocalString } from '../scheduler.js';
 import { attachmentAbsPath, attachmentViewById, cleanupOrphanAttachments } from '../service/attachments.js';
 import { getSettingsHistory, settingsView, updateSettings } from '../service/settings.js';
 import {
   deleteModel,
+  deleteProvider,
   listLlmCalls,
   listModels,
+  listProviders,
   scanPendingAudits,
   scanPendingVerifications,
   testLlmConnection,
   upsertModel,
+  upsertProvider,
 } from '../service/llm.js';
+import { createPlan, listPlans, planTree, runPeriodicClones, runStageGates } from '../service/plans.js';
 import { sendAttachmentFile } from './attach-shared.js';
 
 export const apiRouter = Router();
@@ -285,9 +289,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         }
         const nextDue = computeNextDue(cron, ws, we, new Date());
         await conn.query(
-          `INSERT INTO tasks (task_id, title, instruction, kind, visibility, assignee_id, status,
+          `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, assignee_id, status,
                               schedule_cron, window_start, window_end, next_due_at, workdir, deliverable_spec)
-           VALUES (?, ?, ?, 'scheduled', ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, 'scheduled', 'periodic', ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
           [taskId, title, instruction, visibility, assigneeId, cron, ws, we, toLocalString(nextDue), workdir, deliverableSpec],
         );
       } else {
@@ -379,7 +383,7 @@ apiRouter.post('/tasks/:taskId/reply', requireAdminJson, async (req, res) => {
     task[0].id,
     body.content,
   ]);
-  await query(`UPDATE tasks SET last_activity_at = NOW() WHERE id = ?`, [task[0].id]);
+  await query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), task[0].id]);
   res.json({ ok: true });
 });
 
@@ -400,9 +404,9 @@ apiRouter.post('/tasks/:taskId/resolve', requireAdminJson, async (req, res) => {
   }
   const terminal = ['submitted', 'pending_confirm'].includes(status) ? 'done' : 'resolved';
   const result = await query(
-    `UPDATE tasks SET status=?, result=?, result_status='success', result_at=NOW(), resolved_by_id=NULL
+    `UPDATE tasks SET status=?, result=?, result_status='success', result_at=?, resolved_by_id=NULL
       WHERE task_id = ? AND status = ?`,
-    [terminal, body.final_result ?? null, req.params.taskId, status],
+    [terminal, body.final_result ?? null, nowString(), req.params.taskId, status],
   );
   const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
   if (info === 0) {
@@ -462,8 +466,9 @@ apiRouter.post('/tasks/:taskId/reject', requireAdminJson, async (req, res) => {
 });
 
 apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
+  // failed 可取消 = 跳过（不阻塞闸门，§编排五）；blocked 可取消为闸门死锁兜底
   const result = await query(
-    `UPDATE tasks SET status = 'cancelled' WHERE task_id = ? AND status IN ('pending','active','claimed','submitted','pending_confirm','assigned','running','open')`,
+    `UPDATE tasks SET status = 'cancelled' WHERE task_id = ? AND status IN ('pending','active','claimed','submitted','pending_confirm','assigned','running','open','failed','blocked')`,
     [req.params.taskId],
   );
   const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
@@ -472,6 +477,146 @@ apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
     return;
   }
   res.json({ ok: true });
+});
+
+// ─────────────────────────── 编排：plan（§编排：人建 / 树视图 / failed 处置 / 交付物可见性） ───────────────────────────
+/** plan 列表 */
+apiRouter.get('/plans', requireAdminJson, async (_req, res) => {
+  const plans = await listPlans();
+  res.json({ plans });
+});
+
+/** 创建 plan（stages + tasks 一次性定义；仅人建） */
+apiRouter.post('/plans', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as {
+    name?: string; recurrence?: string; window_start?: string; window_end?: string;
+    stages?: { name?: string; tasks?: { title?: string; instruction?: string; deliverable_spec?: unknown; visibility?: string; assignee?: string }[] }[];
+  };
+  try {
+    const r = await createPlan(
+      null, // 管理员创建（creator_agent_id=null）
+      {
+        name: body.name ?? '',
+        recurrence: body.recurrence,
+        window_start: body.window_start,
+        window_end: body.window_end,
+        stages: (body.stages ?? []).map((s) => ({
+          name: s.name ?? '',
+          tasks: (s.tasks ?? []).map((t) => ({
+            title: t.title ?? '',
+            instruction: t.instruction ?? '',
+            deliverable_spec: t.deliverable_spec,
+            visibility: t.visibility as 'private' | 'public' | undefined,
+            assignee: t.assignee,
+          })),
+        })),
+      },
+    );
+    if (!r.ok) {
+      res.status(400).json({ error: r.error });
+      return;
+    }
+    res.status(201).json({ ok: true, plan_id: r.plan_id });
+  } catch (err) {
+    // createPlan 内部校验错误（如私有任务缺执行方）经事务回滚后抛出——必须转 400，否则未捕获异常会崩掉整个进程
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** plan 树视图（当前 stage 高亮、后续置灰、stalled 可见） */
+apiRouter.get('/plans/:planId', requireAdminJson, async (req, res) => {
+  const r = await planTree(req.params.planId);
+  if (!r.ok) {
+    res.status(404).json({ error: r.error });
+    return;
+  }
+  res.json({ plan: r.plan });
+});
+
+/** failed 处置共用：落点 SQL（reopen 与 reassign 仅在有指派兜底上不同）+ 留痕回帖 */
+const REOPEN_LANDING = `IF(visibility='public' OR assignee_id IS NULL, 'active', 'open')`;
+const REASSIGN_LANDING = `IF(visibility='public', 'active', 'open')`;
+
+/** 处置后读回落点并写 verdict 回帖（message 中 {s} 占位落点状态） */
+async function reportFailedDisposition(taskId: string, landingExpr: string, message: string): Promise<string> {
+  const st = await query(`SELECT ${landingExpr} AS s FROM tasks WHERE task_id = ?`, [taskId]);
+  const s = String((st[0] as Record<string, unknown> | undefined)?.s ?? 'open');
+  await query(
+    `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES ((SELECT id FROM tasks WHERE task_id = ?), NULL, 'admin', 'verdict', ?)`,
+    [taskId, message.replace('{s}', s)],
+  );
+  return s;
+}
+
+/** failed 处置（§编排五，先仅 Web）：重开 = attempts 清零，按落点回 open（private+assignee）/ active（public） */
+apiRouter.post('/tasks/:taskId/reopen', requireAdminJson, async (req, res) => {
+  // 落点（P1-3）：private+assignee → open（manual 拾取分支可达）；public / 无指派 → active 入池
+  const result = await query(
+    `UPDATE tasks SET status = ${REOPEN_LANDING},
+            deliver_attempts=0, result=NULL, result_status=NULL, result_at=NULL, last_activity_at=?
+      WHERE task_id = ? AND status = 'failed'`,
+    [nowString(), req.params.taskId],
+  );
+  const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
+  if (info === 0) {
+    res.status(400).json({ error: '任务不存在或不是 failed 状态' });
+    return;
+  }
+  const s = await reportFailedDisposition(req.params.taskId, REOPEN_LANDING, '[处置] 发起人重开：尝试次数清零，任务回到 {s}');
+  res.json({ ok: true, status: s });
+});
+
+/** failed 处置：改派 assignee（留痕回帖）。改派后直接落 open/active（P3-2：不再需要 reopen 两步） */
+apiRouter.post('/tasks/:taskId/reassign', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as { assignee_agent_id?: string };
+  const target = await query(`SELECT id, name FROM agents WHERE agent_id = ? AND status='active' LIMIT 1`, [
+    body.assignee_agent_id,
+  ]);
+  if (target.length === 0) {
+    res.status(400).json({ error: '目标主机不存在或已禁用' });
+    return;
+  }
+  const result = await query(
+    `UPDATE tasks SET assignee_id = ?, status = ${REASSIGN_LANDING},
+            deliver_attempts = 0, last_activity_at = ?
+      WHERE task_id = ? AND status = 'failed'`,
+    [target[0].id, nowString(), req.params.taskId],
+  );
+  const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
+  if (info === 0) {
+    res.status(400).json({ error: '任务不存在或不是 failed 状态' });
+    return;
+  }
+  const s = await reportFailedDisposition(
+    req.params.taskId,
+    REASSIGN_LANDING,
+    `[处置] 发起人改派执行方为 ${target[0].name}（${body.assignee_agent_id}），尝试次数清零，任务回到 {s}`,
+  );
+  res.json({ ok: true, status: s });
+});
+
+/** 交付物可见性改档（§编排八：可改，改档留痕回帖；回溯改变存量交付物暴露面） */
+apiRouter.post('/tasks/:taskId/deliverable-visibility', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as { value?: string };
+  const value = body.value;
+  if (!['participants', 'account', 'public'].includes(String(value))) {
+    res.status(400).json({ error: 'value 须为 participants / account / public' });
+    return;
+  }
+  const rows = await query(`SELECT id, deliverable_visibility FROM tasks WHERE task_id = ? LIMIT 1`, [
+    req.params.taskId,
+  ]);
+  if (rows.length === 0) {
+    res.status(404).json({ error: '任务不存在' });
+    return;
+  }
+  const old = String((rows[0] as Record<string, unknown>).deliverable_visibility);
+  await query(`UPDATE tasks SET deliverable_visibility = ? WHERE task_id = ?`, [value, req.params.taskId]);
+  await query(
+    `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
+    [rows[0].id, `[交付物可见性] ${old} → ${value}（改档回溯改变存量交付物暴露面）`],
+  );
+  res.json({ ok: true, value });
 });
 
 // ─────────────────────────── 系统设置（§3.4/§3.7）：附件 / LLM / 提示词 panel ───────────────────────────
@@ -491,11 +636,48 @@ apiRouter.put('/settings', requireAdminJson, async (req, res) => {
   res.json({ ok: true, settings: settingsView() });
 });
 
-/** 测试 LLM 连接（可选指定模型 id；不落库配置） */
+/** 测试 LLM 连接（可选：指定模型 / provider+模型串 / provider / 默认第一个可用模型；不落库配置） */
 apiRouter.post('/settings/llm-test', requireAdminJson, async (req, res) => {
-  const body = (req.body ?? {}) as { model_id?: string };
-  const r = await testLlmConnection(body.model_id);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const r = await testLlmConnection({
+    model_id: typeof body.model_id === 'string' ? body.model_id : undefined,
+    provider_id: typeof body.provider_id === 'string' ? body.provider_id : undefined,
+    model: typeof body.model === 'string' ? body.model : undefined,
+  });
   res.json(r);
+});
+
+/** Provider 列表（api_key 掩码回显） */
+apiRouter.get('/settings/llm-providers', requireAdminJson, async (_req, res) => {
+  res.json({ providers: await listProviders() });
+});
+
+/** 新增/更新 provider（api_key 空串或 ****** = 不改，保留原值） */
+apiRouter.put('/settings/llm-providers', requireAdminJson, async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const r = await upsertProvider({
+    id: String(body.id ?? ''),
+    name: String(body.name ?? ''),
+    base_url: String(body.base_url ?? ''),
+    api_key: String(body.api_key ?? ''),
+    note: String(body.note ?? ''),
+    enabled: body.enabled !== false,
+  });
+  if (!r.ok) {
+    res.status(400).json({ error: r.error });
+    return;
+  }
+  res.json({ ok: true, providers: await listProviders() });
+});
+
+/** 删除 provider（其下仍有模型时拒绝） */
+apiRouter.delete('/settings/llm-providers/:id', requireAdminJson, async (req, res) => {
+  const r = await deleteProvider(req.params.id);
+  if (!r.ok) {
+    res.status(400).json({ error: r.error });
+    return;
+  }
+  res.json({ ok: true, providers: await listProviders() });
 });
 
 /** 模型列表 */
@@ -504,15 +686,14 @@ apiRouter.get('/settings/llm-models', requireAdminJson, async (_req, res) => {
   res.json({ models });
 });
 
-/** 新增/更新模型（api_key 空串 = 不改，保留原值） */
+/** 新增/更新模型（挂在 provider 下；api_key 由 provider 继承，模型行不再持有） */
 apiRouter.put('/settings/llm-models', requireAdminJson, async (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   const r = await upsertModel({
     id: String(body.id ?? ''),
+    provider_id: String(body.provider_id ?? ''),
     name: String(body.name ?? ''),
-    base_url: String(body.base_url ?? ''),
     model: String(body.model ?? ''),
-    api_key: String(body.api_key ?? ''),
     vision: body.vision === true || body.vision === 1,
     price: String(body.price ?? ''),
     note: String(body.note ?? ''),
@@ -541,13 +722,19 @@ apiRouter.get('/settings/llm-calls', requireAdminJson, async (_req, res) => {
   res.json({ calls });
 });
 
-/** 立即扫描审核/验收队列（pending_audit + submitted；LLM 未配置时降级处理） */
+/** 立即扫描队列（审核/验收 + 编排闸门/周期克隆；LLM 未配置时降级处理） */
 apiRouter.post('/settings/llm-scan', requireAdminJson, async (_req, res) => {
-  const [audit, verify] = await Promise.all([scanPendingAudits(), scanPendingVerifications()]);
+  const [audit, verify, gates, clones] = await Promise.all([
+    scanPendingAudits(),
+    scanPendingVerifications(),
+    runStageGates(),
+    runPeriodicClones(),
+  ]);
   res.json({
     ok: true,
     audit: { processed: audit.audited, rejected: audit.rejected, degraded: audit.degraded },
     verify: { processed: verify.verified, passed: verify.passed, failed: verify.failed, degraded: verify.degraded },
+    plan: { gates_released: gates, clones: clones },
   });
 });
 

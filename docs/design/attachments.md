@@ -134,10 +134,11 @@ agent 提交的 markdown 内引用**平台已上传附件**有两种写法，渲
 - 管理端上传入口：阶段③（人侧同权）再做；本次人侧只读（下载/预览）
 - LLM 语义验收（读 64KB）：阶段③设置体系接入后启用；当前仍降级标记
 
-## 附：LLM 多模型与多模态（§3.4 扩展，2026-08 落地）
+## 附：LLM 多模型与多模态（§3.4 扩展，2026-08 落地；provider → 多 model 重构）
 
-- **llm_models 表**：多模型配置，每模型含 base_url / model / api_key / `vision`（多模态，可识图）/ `price`（价格标记，留痕性质）/ enabled
-- **用途绑定**（settings：`llm_audit_model` / `llm_verify_model`）：审核/验收可分别指定模型；`auto` = 有图片交付物时自动选 vision 模型，否则第一个启用模型
+- **llm_providers 表**：provider 级共享 base_url / api_key / 启用开关；一个 provider 对应多个 model（如 OpenAI 下挂 gpt-4o、gpt-4o-mini）
+- **llm_models 表**：挂在 provider 下（provider_id），行内只存 model（请求体字段）/ 名称 / `vision`（多模态，可识图）/ `price`（价格标记，留痕性质）/ enabled，不再重复 base_url/api_key
+- **旧库迁移**：旧 llm_models 行按 (base_url, api_key) 归并为 provider（legacy-N）后回填 provider_id，再删行内 base_url/api_key 列；旧单模型配置（llm_base_url/llm_model）已移除
+- **用途绑定**（settings：`llm_audit_model` / `llm_verify_model`）：审核/验收可分别指定模型；`auto` = 有图片交付物时自动选 vision 模型，否则第一个启用模型；模型可用 = 模型启用 且 所属 provider 启用
 - **识图边界**（§3.7 验收读取边界扩展）：图片附件（≤5 张、单张 ≤2MB）base64 走 OpenAI 兼容 `image_url` 多模态；文本类读前 `llm_verifier_read_bytes`（默认 64KB）；其他二进制只列存在性与类型
-- **调用日志 llm_calls**：模型 / 用途 / 任务 / tokens / 价格 / 成败，成本归平台；设置页可查
-- **旧配置兼容**：llm_models 为空时回退 `llm_base_url`+`llm_model` 单模型（id=default）
+- **调用日志 llm_calls**：provider / 模型 / 用途 / 任务 / tokens / 价格 / 成败，成本归平台；设置页可查（provider_id 冗余记录，删 provider 后日志仍可归因）

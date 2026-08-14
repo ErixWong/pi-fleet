@@ -310,11 +310,12 @@ try {
   } catch { oldRejected = true; }
   check('旧 key 被拒', oldRejected);
 
-  // 7. 设置体系 + LLM 门禁（§3.4）：配置假 LLM → 发布进 pending_audit → 扫描故障降级放行
+  // 7. 设置体系 + LLM 门禁（§3.4）：配置假 provider+模型 → 发布进 pending_audit → 扫描故障降级放行
   console.log('== 7. 设置体系 + LLM 审核门禁（降级路径） ==');
-  await api('PUT', '/api/settings', { llm_base_url: 'http://127.0.0.1:1/v1', llm_model: 'fake-model', llm_api_key: 'sk-test' });
-  const s = await api('GET', '/api/settings');
-  check('设置可读写（api_key 掩码回显）', s.settings.llm_base_url === 'http://127.0.0.1:1/v1' && s.settings.llm_api_key === '******', JSON.stringify(s.settings));
+  await api('PUT', '/api/settings/llm-providers', { id: 'fake', name: '假 provider', base_url: 'http://127.0.0.1:1/v1', api_key: 'sk-test' });
+  await api('PUT', '/api/settings/llm-models', { id: 'fake-model', provider_id: 'fake', name: '假模型', model: 'fake-model' });
+  const s = await api('GET', '/api/settings/llm-providers');
+  check('provider 可读写（api_key 掩码回显）', s.providers.some((p) => p.id === 'fake' && p.base_url === 'http://127.0.0.1:1/v1' && p.api_key === '******'), JSON.stringify(s.providers));
   const pendingTask = await task(clientB, 'create', {
     title: '审核队列测试', instruction: '需要一份 md 报告', visibility: 'public',
     deliverable_spec: [{ name: 'a', type: '.md' }],
@@ -330,18 +331,16 @@ try {
   await api('PUT', '/api/settings', { prompt_audit: '自定义审核提示词测试' });
   const hist = await api('GET', '/api/settings/history');
   check('提示词修改留痕（改人/前值/新值）', hist.history.some((h) => h.k === 'prompt_audit' && h.changed_by === 'admin' && h.old_v && h.new_v === '自定义审核提示词测试'), JSON.stringify(hist.history));
-  // 还原（未配置环境，后续用例不受影响）
-  await api('PUT', '/api/settings', { llm_base_url: '', llm_model: '' });
 
-  // 8. 多模型 / 多模态 / 价格标记 / 调用日志（§3.4 扩展）
-  console.log('== 8. 多模型 + 多模态 + 价格 ==');
-  // 8.1 模型 CRUD：cheap（非多模态）+ vision（多模态，带价格）
-  await api('PUT', '/api/settings/llm-models', { id: 'cheap', name: '快速便宜模型', base_url: 'http://127.0.0.1:1/v1', model: 'fake-cheap', price: '¥0.5/1M tokens' });
-  await api('PUT', '/api/settings/llm-models', { id: 'vision', name: '多模态模型', base_url: 'http://127.0.0.1:1/v1', model: 'fake-vision', vision: true, price: '¥5/1M tokens', note: '识图' });
+  // 8. provider → 多 model / 多模态 / 价格标记 / 调用日志（§3.4 扩展）
+  console.log('== 8. provider 对应多模型 + 多模态 + 价格 ==');
+  // 8.1 同一 provider（fake）下挂 cheap（非多模态）+ vision（多模态，带价格），共享 base_url/api_key
+  await api('PUT', '/api/settings/llm-models', { id: 'cheap', provider_id: 'fake', name: '快速便宜模型', model: 'fake-cheap', price: '¥0.5/1M tokens' });
+  await api('PUT', '/api/settings/llm-models', { id: 'vision', provider_id: 'fake', name: '多模态模型', model: 'fake-vision', vision: true, price: '¥5/1M tokens', note: '识图' });
   const ms = await api('GET', '/api/settings/llm-models');
   const visionM = ms.models.find((m) => m.id === 'vision');
   const cheapM = ms.models.find((m) => m.id === 'cheap');
-  check('多模型列表（vision 标记 + 价格标记）', ms.models.length >= 2 && visionM?.vision === true && visionM?.price.includes('5') && cheapM?.price.includes('0.5'), JSON.stringify(ms.models));
+  check('provider 对应多模型（vision 标记 + 价格标记）', ms.models.length >= 2 && visionM?.provider_id === 'fake' && visionM?.vision === true && visionM?.price.includes('5') && cheapM?.price.includes('0.5'), JSON.stringify(ms.models));
   await api('PUT', '/api/settings', { llm_audit_model: 'cheap', llm_verify_model: 'auto' });
 
   // 8.2 含图片任务：发布 → 审核降级 → 认领 → 上传 png → submit → submitted → 验收（按图自动选 vision）→ 故障降级
@@ -370,12 +369,176 @@ try {
   const visionCall = calls.calls.find((c) => c.model_id === 'vision' && c.purpose === 'verify');
   check('调用日志：识图验收走 vision 模型（含价格标记）', !!visionCall && visionCall.price.includes('5'), JSON.stringify(calls.calls.slice(0, 3)));
   check('调用日志：识图标记', visionCall?.vision === 1, JSON.stringify(visionCall));
+  check('调用日志：provider 归因（冗余记录）', visionCall?.provider_id === 'fake', JSON.stringify(visionCall));
 
-  // 8.3 清理模型，还原环境
+  // 8.3 清理模型 + provider，还原环境（未配置环境，后续用例不受影响）
   await api('DELETE', '/api/settings/llm-models/cheap', {}, undefined);
   await api('DELETE', '/api/settings/llm-models/vision', {}, undefined);
+  await api('DELETE', '/api/settings/llm-models/fake-model', {}, undefined);
+  await api('DELETE', '/api/settings/llm-providers/fake', {}, undefined);
   const after = await api('GET', '/api/settings/llm-models');
   check('模型删除后列表为空', after.models.length === 0, JSON.stringify(after.models));
+  const afterP = await api('GET', '/api/settings/llm-providers');
+  check('provider 删除后列表为空', afterP.providers.length === 0, JSON.stringify(afterP.providers));
+
+  // 9. 编排：plan / stage / task 三层 + 闸门 + 周期克隆（orchestration.md）
+  console.log('== 9. 编排（plan / stage / 闸门 / 周期克隆） ==');
+  // 管理员建的 plan：任务 creator=null，验收走管理端 resolve（§编排：plan 人建，验收权随发起人）
+  const agentE = await api('POST', '/api/agents', { name: 'sess-E', hostname: '10.0.0.5', accept_external: true });
+  const clientE = await mcpClient(agentE.key);
+  // 9.1 创建 plan：stage1 两任务（当前）+ stage2 一任务（blocked）
+  const pl = await api('POST', '/api/plans', {
+    name: '测试流水线',
+    stages: [
+      { name: '准备', tasks: [
+        { title: '准备数据', instruction: '整理输入数据', assignee: agentE.agent.agent_id, deliverable_spec: [{ name: '数据', type: '.csv' }] },
+        { title: '生成清单', instruction: '输出清单', visibility: 'public' },
+      ]},
+      { name: '执行', tasks: [
+        { title: '执行分析', instruction: '基于清单分析', assignee: agentE.agent.agent_id, deliverable_spec: [{ name: '报告', type: '.md' }] },
+      ]},
+    ],
+  });
+  check('创建 plan（人建）', pl.ok === true && !!pl.plan_id, JSON.stringify(pl));
+  const tree = await api('GET', `/api/plans/${pl.plan_id}`);
+  const s1 = tree.plan.stages[0];
+  const s2 = tree.plan.stages[1];
+  check('stage1 为当前 stage', s1.current === true, JSON.stringify(tree.plan.stages.map((st) => ({ seq: st.seq, current: st.current }))));
+  check('stage1 任务已发布（未配 LLM 直通 open/active）',
+    s1.tasks.some((t) => t.status === 'open') && s1.tasks.some((t) => t.status === 'active'), JSON.stringify(s1.tasks.map((t) => t.status)));
+  check('stage2 任务 blocked（闸门）', s2.tasks.every((t) => t.status === 'blocked'), JSON.stringify(s2.tasks));
+  const stage2Task = s2.tasks[0];
+  const claimBlocked = await task(clientE, 'claim', { task_id: stage2Task.task_id });
+  check('blocked 任务不可认领', !!claimBlocked.error?.includes('不可认领'), JSON.stringify(claimBlocked));
+  const poolNoBlocked = await task(clientC, 'list', { scope: 'pool' });
+  check('blocked 任务不在公共池', !poolNoBlocked.pool.some((t) => t.task_id === stage2Task.task_id), JSON.stringify(poolNoBlocked.pool));
+
+  // 9.2 己方视角：agentE 往当前 stage(stage1) 追加任务（agent 可 task(create, stage_id)）→ creator=E → 己方全量
+  const added = await task(clientE, 'create', {
+    title: '追加任务', instruction: '补充校验', visibility: 'public', stage_id: Number(s1.id),
+  });
+  check('当前 stage 追加任务成功（己方视角）', added.ok === true, JSON.stringify(added));
+  // 非 plan 参与人追加被拒（§编排五 内外分离：防借 creator 身份读取全量 plan 上下文）
+  const strangerAdd = await task(clientC, 'create', {
+    title: '越权追加', instruction: 'x', visibility: 'public', stage_id: Number(s1.id),
+  });
+  check('非参与人追加 stage 被拒', !strangerAdd.ok && String(strangerAdd.error).includes('参与人'), JSON.stringify(strangerAdd));
+  // blocked 取消兜底：E 往未来 stage 追加（落 blocked）→ 管理端可取消（此前白名单缺 blocked 必报错）
+  const futAdd = await task(clientE, 'create', {
+    title: '未来追加', instruction: 'x', visibility: 'public', stage_id: Number(s2.id),
+  });
+  check('未来 stage 追加落 blocked', futAdd.ok === true, JSON.stringify(futAdd));
+  const cancelBlocked = await api('POST', `/api/tasks/${futAdd.task_id}/cancel`, {});
+  check('blocked 任务可取消（管理端兜底）', cancelBlocked.ok === true, JSON.stringify(cancelBlocked));
+  const addedDetail = await task(clientE, 'detail', { task_id: added.task_id });
+  check('plan 上下文（己方全量：stage_name/siblings/前序摘要）',
+    addedDetail.plan_context?.stage === '1/2' && !!addedDetail.plan_context?.stage_name && Array.isArray(addedDetail.plan_context?.siblings),
+    JSON.stringify(addedDetail.plan_context));
+  // 完成 stage1 全部任务（含追加；管理端验收）→ 闸门放行 stage2
+  const stage1Open = s1.tasks.find((t) => t.status === 'open');
+  const stage1Active = s1.tasks.find((t) => t.status === 'active');
+  // 外部认领者视角（P2-1/P2-2）：public 任务未认领时，第三方 agent 只见最小事实（无 plan_name / 无兄弟状态）
+  const extView = await task(clientC, 'detail', { task_id: stage1Active.task_id });
+  check('plan 上下文（外部最小事实：无 plan_name/无兄弟/位置+跳过数）',
+    extView.plan_context?.stage === '1/2' && extView.plan_context?.plan_name === undefined && extView.plan_context?.siblings === undefined && extView.plan_context?.prev_skipped === 0,
+    JSON.stringify(extView.plan_context));
+  await task(clientE, 'claim', { task_id: stage1Open.task_id });
+  const csvUp = await call(clientE, 'upload_attachment', { filename: 'data.csv', mime: 'text/csv', data_base64: b64('a,b\n1,2') });
+  await task(clientE, 'submit', { task_id: stage1Open.task_id, result: '数据齐', deliverables: [{ name: '数据', attachment_id: csvUp.attachment_id }] });
+  await api('POST', `/api/tasks/${stage1Open.task_id}/resolve`, { final_result: 'ok' });
+  await task(clientE, 'claim', { task_id: stage1Active.task_id });
+  await task(clientE, 'submit', { task_id: stage1Active.task_id, result: '清单出' });
+  await api('POST', `/api/tasks/${stage1Active.task_id}/resolve`, { final_result: 'ok' });
+  await task(clientE, 'claim', { task_id: added.task_id });
+  await task(clientE, 'submit', { task_id: added.task_id, result: '校验过' });
+  await api('POST', `/api/tasks/${added.task_id}/resolve`, { final_result: 'ok' });
+  await api('POST', '/api/settings/llm-scan', {}, undefined);
+  const tree2 = await api('GET', `/api/plans/${pl.plan_id}`);
+  check('stage1 完成后闸门放行 stage2（blocked → open）',
+    tree2.plan.stages[1].tasks.some((t) => t.status === 'open' && t.task_id === stage2Task.task_id), JSON.stringify(tree2.plan.stages[1].tasks));
+  const stage2Detail = await task(clientE, 'detail', { task_id: stage2Task.task_id });
+  check('闸门放行回帖进消息流', stage2Detail.messages?.some((m) => m.type === 'system' && m.content.includes('闸门放行')), JSON.stringify(stage2Detail.messages));
+  // assignee = 执行方 = 己方（P2-2 口径）：全量视角（前序摘要 + 兄弟状态）
+  check('plan 上下文（assignee=执行方 → 己方全量：前序摘要/兄弟）',
+    stage2Detail.plan_context?.stage === '2/2' && Array.isArray(stage2Detail.plan_context?.prev_stages) && stage2Detail.plan_context?.prev_stages?.[0]?.all_done === true && stage2Detail.plan_context?.prev_skipped === 0,
+    JSON.stringify(stage2Detail.plan_context));
+  // 9.3 完成 stage2 → plan done
+  await task(clientE, 'claim', { task_id: stage2Task.task_id });
+  const mdUp = await call(clientE, 'upload_attachment', { filename: 'report.md', mime: 'text/markdown', data_base64: b64('# 报告') });
+  await task(clientE, 'submit', { task_id: stage2Task.task_id, result: '完成', deliverables: [{ name: '报告', attachment_id: mdUp.attachment_id }] });
+  await api('POST', `/api/tasks/${stage2Task.task_id}/resolve`, { final_result: 'ok' });
+  await api('POST', '/api/settings/llm-scan', {}, undefined);
+  const tree3 = await api('GET', `/api/plans/${pl.plan_id}`);
+  check('全 stage 完成 → plan done', tree3.plan.status === 'done', JSON.stringify(tree3.plan));
+  const denied = await task(clientE, 'create', {
+    title: '晚到的追加', instruction: 'x', visibility: 'public', stage_id: Number(s1.id),
+  });
+  check('已完成 stage 追加被拒', !denied.ok && String(denied.error).includes('已完成'), JSON.stringify(denied));
+
+  // 9.4 周期 plan：克隆 + series_id + 重叠跳过
+  const per = await api('POST', '/api/plans', {
+    name: '每日健康检查', recurrence: 'daily', window_start: '00:00', window_end: '23:59',
+    stages: [{ name: '例行', tasks: [
+      { title: '磁盘检查', instruction: '检查磁盘健康', assignee: agentE.agent.agent_id },
+    ]}],
+  });
+  const perTree = await api('GET', `/api/plans/${per.plan_id}`);
+  const firstInst = perTree.plan.stages[0].tasks[0];
+  check('周期首实例发布（未配 LLM 直通 open）', firstInst.status === 'open', JSON.stringify(firstInst));
+  // P1-1：首实例身份（origin=periodic / series_id=自身 id / 不经 pending_audit）
+  const firstDetail0 = await task(clientE, 'detail', { task_id: firstInst.task_id });
+  check('周期首实例 origin=periodic + series_id=自身 id（不经审核）',
+    firstDetail0.task.origin === 'periodic' && String(firstDetail0.task.series_id) === String(firstDetail0.task.id),
+    JSON.stringify({ origin: firstDetail0.task.origin, series_id: firstDetail0.task.series_id, id: firstDetail0.task.id }));
+  // P1-2：周期 plan stage 禁止追加任务（防污染克隆源）
+  const perAppend = await task(clientE, 'create', { title: '劫持序列', instruction: 'x', visibility: 'public', stage_id: Number(perTree.plan.stages[0].id) });
+  check('周期 plan stage 追加被拒（防污染克隆源）', !perAppend.ok && String(perAppend.error).includes('周期'), JSON.stringify(perAppend));
+  // 重叠：首实例未终结 → 到点扫描 → 跳过本轮 + 回帖
+  await pool.query(`UPDATE plans SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = ?`, [per.plan_id]);
+  await api('POST', '/api/settings/llm-scan', {}, undefined);
+  const perTree2 = await api('GET', `/api/plans/${per.plan_id}`);
+  check('上一实例未终结 → 跳过本轮（不克隆）', perTree2.plan.stages[0].tasks.length === 1, JSON.stringify(perTree2.plan.stages[0].tasks.length));
+  const firstDetail = await task(clientE, 'detail', { task_id: firstInst.task_id });
+  check('重叠跳过回帖', firstDetail.messages?.some((m) => m.type === 'system' && m.content.includes('跳过本轮')), JSON.stringify(firstDetail.messages));
+  // 完成首实例（private periodic：claim → submit 直接记录 done，P0-1）→ 再次到点 → 克隆
+  await task(clientE, 'claim', { task_id: firstInst.task_id });
+  const firstSubmit = await task(clientE, 'submit', { task_id: firstInst.task_id, result: '磁盘正常' });
+  check('周期首实例 claim → submit 直接记录 → done', firstSubmit.ok === true && firstSubmit.status === 'done', JSON.stringify(firstSubmit));
+  await pool.query(`UPDATE plans SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = ?`, [per.plan_id]);
+  await api('POST', '/api/settings/llm-scan', {}, undefined);
+  const perTree3 = await api('GET', `/api/plans/${per.plan_id}`);
+  const insts = perTree3.plan.stages[0].tasks;
+  check('到点克隆出新实例（2 条）', insts.length === 2, JSON.stringify(insts.map((t) => ({ id: t.task_id, status: t.status }))));
+  const clonedTask = insts.find((t) => t.task_id !== firstInst.task_id);
+  const firstIdRow = await pool.query(`SELECT id FROM tasks WHERE task_id = ?`, [firstInst.task_id]);
+  const clonedDetail = await task(clientE, 'detail', { task_id: clonedTask.task_id });
+  check('克隆实例 series_id = 首实例 id（同系列串接）',
+    String(clonedDetail.task.series_id) === String(firstIdRow[0].id), JSON.stringify({ series_id: clonedDetail.task.series_id, first_id: String(firstIdRow[0].id) }));
+  // P0-1：克隆实例执行闭环（claim → submit → done），不再是死信；首条请求消息进消息流
+  const clonedClaim = await task(clientE, 'claim', { task_id: clonedTask.task_id });
+  check('克隆实例可认领（kind=manual + open → assigned）', clonedClaim.ok === true && clonedClaim.mode === 'assigned', JSON.stringify(clonedClaim));
+  const clonedSubmit = await task(clientE, 'submit', { task_id: clonedTask.task_id, result: '例行完成' });
+  check('克隆实例 claim → submit → done 闭环', clonedSubmit.ok === true && clonedSubmit.status === 'done', JSON.stringify(clonedSubmit));
+  check('克隆实例首条请求消息进消息流', clonedDetail.messages?.some((m) => m.type === 'chat' && m.content.includes('检查磁盘健康')), JSON.stringify(clonedDetail.messages));
+
+  // 9.5 交付物可见性改档 + failed 处置（API 级）
+  await api('POST', `/api/tasks/${clonedTask.task_id}/deliverable-visibility`, { value: 'public' }, undefined);
+  const dvDetail = await api('GET', `/api/tasks/${clonedTask.task_id}`);
+  check('交付物可见性改档 public + 留痕回帖',
+    dvDetail.task.deliverable_visibility === 'public' && dvDetail.messages.some((m) => m.type === 'verdict' && m.content.includes('交付物可见性')), JSON.stringify(dvDetail.messages));
+  await pool.query(`UPDATE tasks SET status='failed', result='[test]' WHERE task_id = ?`, [clonedTask.task_id]);
+  const reopenRes = await api('POST', `/api/tasks/${clonedTask.task_id}/reopen`, {}, undefined);
+  const reopened = await api('GET', `/api/tasks/${clonedTask.task_id}`);
+  check('failed 重开 → 按落点回 open（private+assignee）+ attempts 清零', reopenRes.status === 'open' && reopened.task.status === 'open' && reopened.task.deliver_attempts === 0, JSON.stringify(reopened.task));
+  // P1-3：重开后闭环（open → claim → submit → done）
+  await task(clientE, 'claim', { task_id: clonedTask.task_id });
+  const reopenedSubmit = await task(clientE, 'submit', { task_id: clonedTask.task_id, result: '再完成' });
+  check('重开后 claim → submit 闭环', reopenedSubmit.ok === true && reopenedSubmit.status === 'done', JSON.stringify(reopenedSubmit));
+  // failed 取消 = 跳过（§编排五：不阻塞闸门；此前管理端白名单缺 failed 必报错）
+  await pool.query(`UPDATE tasks SET status='failed' WHERE task_id = ?`, [clonedTask.task_id]);
+  const cancelFailed = await api('POST', `/api/tasks/${clonedTask.task_id}/cancel`, {}, undefined);
+  check('failed 任务可取消（取消=跳过）', cancelFailed.ok === true, JSON.stringify(cancelFailed));
+  await clientE.close();
 
   await pool.end();
   await clientA.close();

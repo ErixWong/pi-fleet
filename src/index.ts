@@ -13,6 +13,7 @@ import { recoverStaleRunningTasks, recoverStaleClaimedTasks, autoConfirmPendingC
 import { initSettings } from './service/settings.js';
 import { scanPendingAttachments } from './service/attachments.js';
 import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
+import { runPeriodicClones, runStageGates } from './service/plans.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +97,15 @@ async function main(): Promise<void> {
         }
       })
       .catch((err) => console.error('[llm] 扫描失败:', err));
+  }, LLM_SCAN_MS);
+
+  // 编排（orchestration.md）：闸门放行 + 周期序列克隆（与 LLM 扫描同节奏）
+  setInterval(() => {
+    Promise.all([runStageGates(), runPeriodicClones()])
+      .then(([g, c]) => {
+        if (g + c > 0) console.log(`[plan] 闸门放行=${g} 周期克隆=${c}`);
+      })
+      .catch((err) => console.error('[plan] 编排扫描失败:', err));
   }, LLM_SCAN_MS);
 }
 

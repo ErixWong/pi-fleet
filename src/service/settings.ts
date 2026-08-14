@@ -20,10 +20,8 @@ const DEFAULTS: Record<string, string> = {
   max_attachment_bytes: String(50 * 1024 * 1024), // 单文件 50MB
   clamd_host: '',
   clamd_port: '3310',
-  // LLM 审核/验收（§3.4）：OpenAI 兼容 chat 接口；base_url 为空 = 未配置（降级仅程序校验）
-  llm_base_url: '',
-  llm_model: '',
-  llm_api_key: '',
+  // LLM 审核/验收（§3.4）：base_url/api_key 已提升到 llm_providers（一个 provider 对应多个 model）；
+  // 这里只留读取边界/超时与用途绑定（llm_audit_model / llm_verify_model，默认 auto）
   llm_verifier_read_bytes: String(64 * 1024), // LLM 验收文本读取上限（§3.7 验收读取边界）
   llm_timeout_ms: String(60_000),
   // 提示词模板（§3.4：提示词即平台审核口径，内置默认值，管理员可改；修改留痕）
@@ -86,14 +84,13 @@ export async function setSetting(key: string, value: string, changedBy = 'admin'
   cache.set(key, value);
 }
 
-/** 批量更新设置（设置页保存用；api_key 空值跳过，避免清空） */
+/** 批量更新设置（设置页保存用） */
 export async function updateSettings(
   entries: Record<string, string>,
   changedBy = 'admin',
 ): Promise<void> {
   for (const [k, v] of Object.entries(entries)) {
     if (typeof v !== 'string') continue;
-    if (k === 'llm_api_key' && v.trim() === '') continue; // 掩码回显，空表示不改
     await setSetting(k, v, changedBy);
   }
 }
@@ -105,13 +102,12 @@ export async function getSettingsHistory(limit = 20): Promise<Array<Record<strin
 
 /** LLM 是否已配置（任一启用模型或旧配置）——见 src/service/llm.ts 的异步实现 */
 
-/** 返回给管理端展示的设置（api_key 掩码） */
+/** 返回给管理端展示的设置 */
 export function settingsView(): Record<string, string> {
   const keys = [...Object.keys(DEFAULTS), ...cache.keys()];
   const out: Record<string, string> = {};
   for (const k of new Set(keys)) {
     out[k] = getSetting(k);
   }
-  if (out.llm_api_key) out.llm_api_key = '******';
   return out;
 }

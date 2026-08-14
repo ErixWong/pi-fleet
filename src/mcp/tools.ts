@@ -117,6 +117,7 @@ function registerTools(server: McpServer): void {
       visibility: z.enum(['private', 'public']).optional().describe('create/revise：默认 private'),
       assignee: z.string().optional().describe('create：指派执行方 agent_id（private 必填）'),
       workdir: z.string().optional().describe('create：可选工作目录'),
+      stage_id: z.number().int().optional().describe('create：所属 plan 阶段 id（agent 追加任务到现有 stage；未来 stage 落 blocked，已完成 stage 拒绝）'),
       result: z.string().optional().describe('submit：完成说明/结果'),
       deliverables: z
         .array(z.object({
@@ -169,7 +170,7 @@ function registerTools(server: McpServer): void {
             if (!args.task_id) return text({ error: '缺少 task_id' });
             const r = await taskDetail(agent, args.task_id);
             if (!r.ok) return text({ error: r.error });
-            return text({ task_id: args.task_id, task: r.task, messages: r.messages, deliverables: r.deliverables, reports: r.reports });
+            return text({ task_id: args.task_id, task: r.task, messages: r.messages, deliverables: r.deliverables, reports: r.reports, plan_context: r.plan_context ?? null });
           }
           case 'create': {
             const r = await createTask(agent, {
@@ -179,6 +180,7 @@ function registerTools(server: McpServer): void {
               assignee: args.assignee,
               workdir: args.workdir,
               deliverable_spec: args.deliverable_spec,
+              stage_id: args.stage_id === undefined || args.stage_id === null ? undefined : Number(args.stage_id),
             });
             if (!r.ok) return text({ error: r.error });
             return text({ ok: true, task_id: r.task_id, status: r.status, message: '任务已发布' });

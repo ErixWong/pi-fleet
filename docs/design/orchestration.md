@@ -1,6 +1,7 @@
-# 编排体系（plan / stage / task 三层，[DRAFT]）
+# 编排体系（plan / stage / task 三层，[已落地]）
 
-> 状态：方向已定、待实施；2026-08-14 经三轮讨论修订。
+> 状态：已实施（2026-08-14）；实现参照 `src/service/plans.ts`（闸门/克隆）+ `market.ts`（stage_id 落点/plan 上下文分级）+ `api.ts`（plans 路由/处置端点）+ `web/src/views/Plans.vue`/`PlanDetail.vue`。
+> 验收覆盖：`scripts/mcp-acceptance.mjs` 第 9 节（闸门/blocked 排除/追加/周期克隆+重叠跳过+series 串接/plan 上下文分级/交付物可见性/failed 处置）。
 > 与 `open-ecosystem.md` 配合使用：任务状态机、visibility、验收、工具收敛原则以该文为准（引用写作「生态 §x.x」），本文只定义其上的编排结构。
 
 **命名**：编排容器定名 **plan**（弃用 project——生态 §9.4 已用"项目模式"指 workdir 工程，撞车会在 AGENTS.md 简报 / MCP 工具 / Web UI 三处制造歧义）。三层即 **plan（计划）→ stage（阶段）→ task（任务）**。
@@ -63,9 +64,10 @@
 
 ## 五、plan 的创建与工具面
 
-- **plan 由人创建**（Web / REST）：stages + tasks 在 Web 表单一次性定义。**agent 明确不能创建 plan**（不放开：防 plan / task 无限创建），只能 `task(create, stage_id?)` 往已有 stage 加任务。
-- **MCP 不新增工具**（维持生态 §3.6 三把收敛）：plan 上下文经 `task(detail)` 暴露，且**按认领者身份分级**——己方玩家见全量（plan 名称、stage 位置（第几 / 共几）、兄弟任务状态、前序 stage 终态摘要（含跳过清单））；外部认领者只见最小事实（前序 stage 已完成、含 N 个跳过），对齐内外分离哲学（生态 §五）。
-- **failed 处置操作**（先仅 Web，agent 侧后议）：重开 = attempts 清零回 active；改派 assignee（留痕回帖）；取消 = 跳过（§一）。
+- **plan 由人创建**（Web / REST）：stages + tasks 在 Web 表单一次性定义。**agent 明确不能创建 plan**（不放开：防 plan / task 无限创建），只能 `task(create, stage_id?)` 往已有 stage 加任务，且**限 plan 参与人**（在该 plan 任一 stage 发起或执行过任务；2026-08-14 审查后补充——否则任何 agent 可借追加成为 creator 拿到全量 plan 上下文，绕过下方内外分离分级）。空 stage 与已完成 stage 同口径拒绝追加（空=完成，与闸门一致，防 blocked 死锁）。
+- **MCP 不新增工具**（维持生态 §3.6 三把收敛）：plan 上下文经 `task(detail)` 暴露，且**按参与者身份分级**——己方（发起人 creator **或执行方 assignee**，含公共池认领后的执行方）见全量（plan 名称、stage 位置（第几 / 共几）、兄弟任务状态、前序 stage 终态摘要（含跳过清单））；其余外部浏览者（未认领的池中浏览）只见最小事实（前序 stage 已完成、含 N 个跳过），对齐内外分离哲学（生态 §五）。
+  > 口径说明（2026-08-14 审计后确认）：管理员建的 plan（creator_id=NULL）无「发起人」视角，执行方（assignee=me）是唯一需要完整上下文的参与者，故 assignee 视同己方；外部最小事实同时**不含 plan 名称**（元信息不泄露）。
+- **failed 处置操作**（先仅 Web，agent 侧后议）：重开 = attempts 清零，按落点回 open（private+assignee）/ active（public）；改派 assignee 后**直接落 open/active**（attempts 清零，留痕回帖，无需 reopen 两步）；取消 = 跳过（§一）。取消白名单含 `failed` 与 `blocked`（管理端与 MCP `task(cancel)` 一致；blocked 取消为闸门死锁兜底，2026-08-14 审查后补齐）。
 - Web：plan 树视图，当前 stage 高亮、后续 stage 置灰；stalled（failed 卡住）在视图中可见。
 - 结构修订（add_stage / 调序 / 中途插入）后议；周期 plan 禁止追加 stage（创建校验保证）。
 
@@ -89,10 +91,12 @@ plan 是可选的上层组织方式，不是准入门槛：独立 task（无 `st
 
 | 现状 | 编排模型 |
 |------|----------|
-| `kind='scheduled'` + schedule_cron/window/next_due_at | 周期 plan（单 stage，每任务一条 series），schedule 字段上移 plan |
+| `kind='scheduled'` + schedule_cron/window/next_due_at | 周期 plan（单 stage，每任务一条 series），schedule 字段上移 plan；旧入口 `POST /api/tasks kind='scheduled'` 为 **legacy 并存**（见下方迁移口径） |
 | `kind='manual'` | origin=manual；独立 task 或一次性 plan 内任务 |
 | 生态 §3.4 "scheduled 不经门禁" | 语义迁移：private 周期实例不经门禁（§四矩阵） |
 | 超时回收 / 生命周期策略（生态 §10.2） | 不变，作用于实例 task；plan/stage 无自动回收（failed 谁发布谁处理） |
+
+> **迁移口径（2026-08-14 审计后确认）**：legacy `kind='scheduled'` 旧入口（tasks.ts 原地推进 next_due_at、无 plan 归属）与新周期 plan（克隆）**双机制并存**——旧入口短期保留并**标废弃**（后续移除），新周期性需求一律走周期 plan；两种入口数据互不干扰（legacy 行 origin='periodic' 但无 plan/stage 归属，克隆扫描只认 `plans` 表）。克隆实例统一 `kind='manual'`（origin='periodic' 留痕），走 manual 拾取/提交链路，不再依赖 scheduled 分支。
 
 ## 十、决策记录
 

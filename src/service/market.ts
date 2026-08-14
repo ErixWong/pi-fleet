@@ -2,6 +2,7 @@ import { query, withTransaction } from '../db.js';
 import type { AgentIdentity } from '../auth.js';
 import { nowString } from '../scheduler.js';
 import { llmConfigured } from './llm.js';
+import { taskContentHash, nextTaskId, resolvePublishStatus } from './plans.js';
 import {
   getTaskMessages,
   listDeliverables,
@@ -131,17 +132,10 @@ export interface CreateTaskOptions {
   workdir?: string | null;
   /** 验收方案（§3.3 发布必填、可操作性 schema 校验硬阻断） */
   deliverable_spec?: unknown;
-}
-
-function yymmdd(): string {
-  const now = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${String(now.getFullYear()).slice(2)}${p(now.getMonth() + 1)}${p(now.getDate())}`;
-}
-
-import { randomBytes } from 'node:crypto';
-function randomHex(): string {
-  return randomBytes(4).toString('hex');
+  /** 编排（orchestration.md）：往已有 stage 加任务（agent 不能创建 plan，只能加任务）；缺省独立任务 */
+  stage_id?: number;
+  /** 交付物可见性（§编排八）：participants 默认 */
+  deliverable_visibility?: 'participants' | 'account' | 'public';
 }
 
 /**
@@ -181,24 +175,50 @@ export async function createTask(
     return { ok: false, error: '私有任务必须指派执行方；如需入公共池请设 visibility=public' };
   }
 
-  const taskId = `T-${yymmdd()}-${randomHex()}`;
+  const taskId = nextTaskId();
   return withTransaction(async (conn) => {
     const llmOn = await llmConfigured();
-    // 有指派 → 协作会话；无指派（public）→ 公共池；配置 LLM → 先过 pending_audit 审核
-    const status = llmOn ? 'pending_audit' : assigneeId ? 'open' : 'active';
+    // 编排落点（§编排二）：有 stage_id → 当前 stage 过门禁 / 未来 stage → blocked / 已完成 → 拒绝
+    let stageId: number | null = null;
+    let statusBase: 'open' | 'active' | 'pending_audit' | 'blocked' = resolvePublishStatus(llmOn, assigneeId !== null);
+    if (opts.stage_id) {
+      const { stagePlacement } = await import('./plans.js');
+      const place = await stagePlacement(Number(opts.stage_id));
+      if (!place.ok) return { ok: false, error: place.error };
+      if (place.stageDone) return { ok: false, error: '该 stage 已完成（或为空 stage 已被跳过），不允许追加任务（§编排二）' };
+      // 参与者校验（§编排五 内外分离）：非 plan 参与人追加会借 creator 身份拿到全量 plan 上下文（含他人私有任务）
+      const participant = (await conn.query(
+        `SELECT 1 FROM tasks t JOIN plan_stages s ON s.id = t.stage_id
+          WHERE s.plan_id = ? AND (t.creator_id = ? OR t.assignee_id = ?) LIMIT 1`,
+        [place.planId, agent.id, agent.id],
+      )) as unknown[];
+      if (participant.length === 0) {
+        return { ok: false, error: '仅 plan 参与人（发起或执行过该 plan 任务）可追加任务' };
+      }
+      stageId = Number(opts.stage_id);
+      if (!place.current) statusBase = 'blocked'; // 未来 stage 落 blocked
+    }
+    const status = statusBase;
+    const contentHash = taskContentHash({ title, instruction, deliverable_spec: specJson, visibility });
     const ins = await conn.query(
-      `INSERT INTO tasks (task_id, title, instruction, kind, visibility, creator_id, assignee_id, status, workdir, deliverable_spec)
-       VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?)`,
-      [taskId, title, instruction, visibility, agent.id, assigneeId, status, workdir, specJson],
+      `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, stage_id, status, creator_id, assignee_id, workdir, deliverable_spec, content_hash, deliverable_visibility)
+       VALUES (?, ?, ?, 'manual', 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [taskId, title, instruction, visibility, stageId, status, agent.id, assigneeId, workdir, specJson, contentHash, opts.deliverable_visibility ?? 'participants'],
     );
     await conn.query(
       `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'chat', ?)`,
       [Number((ins as unknown as { insertId: unknown }).insertId), agent.id, instruction],
     );
-    if (!llmOn) {
+    if (!llmOn && status !== 'blocked') {
       await conn.query(
         `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [Number((ins as unknown as { insertId: unknown }).insertId), '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
+      );
+    }
+    if (status === 'blocked') {
+      await conn.query(
+        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
+        [Number((ins as unknown as { insertId: unknown }).insertId), '[闸门] 任务在非当前 stage，已置 blocked（前序 stage 完成后放行）'],
       );
     }
     return { ok: true, task_id: taskId, status };
@@ -206,7 +226,6 @@ export async function createTask(
 }
 
 // ─────────────────────────── 修订 ───────────────────────────
-
 /** 修订任务（§3.6 revise）：发起人（creator）在未被认领/进行前可改标题/指令/验收方案/可见性。 */
 export async function reviseTask(
   agent: AgentIdentity,
@@ -269,7 +288,7 @@ export async function reviseTask(
     // 修订后重新提交审核（rejected → pending_audit 或降级直通）
     if (status === 'rejected') {
       const llmOn = await llmConfigured();
-      const nextStatus = llmOn ? 'pending_audit' : rows[0].assignee_id !== null ? 'open' : 'active';
+      const nextStatus = resolvePublishStatus(llmOn, rows[0].assignee_id !== null);
       await conn.query(`UPDATE tasks SET status = ? WHERE id = ?`, [nextStatus, rows[0].id]);
       await conn.query(
         `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'verdict', ?)`,
@@ -289,6 +308,8 @@ export interface TaskDetailView {
   messages?: MessageView[];
   deliverables?: { spec: DeliverableSpecItem[]; versions: DeliverableView[] };
   reports?: Array<Record<string, unknown>>;
+  /** 编排 plan 上下文（§编排五，按身份分级） */
+  plan_context?: Record<string, unknown> | null;
 }
 
 /** 任务完整详情（§3.6 detail：吸收 fetch_task/get_messages/list_deliverables，放开发布者视角与公共池浏览） */
@@ -316,7 +337,84 @@ export async function taskDetail(agent: AgentIdentity, taskId: string): Promise<
      WHERE r.task_id = ? ORDER BY r.created_at ASC LIMIT 20`,
     [task.id],
   );
-  return { ok: true, task, messages, deliverables: dl, reports };
+  // 编排：plan 上下文（§编排五，按认领者身份分级——己方玩家全量 / 外部认领者最小事实）
+  const plan_context = await buildPlanContext(agent, task);
+  return { ok: true, task, messages, deliverables: dl, reports, plan_context };
+}
+
+/**
+ * plan 上下文分级（§编排五）：
+ * - 己方玩家（creator）：plan 名称、stage 位置、兄弟任务状态、前序 stage 终态摘要（含跳过清单）
+ * - 外部认领者（public 任务被陌生人认领）：最小事实（前序 stage 已完成、含 N 跳过）
+ */
+async function buildPlanContext(
+  agent: AgentIdentity,
+  task: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
+  const stageId = task.stage_id === null ? null : Number(task.stage_id);
+  if (!stageId) return null;
+  const stages = (await query(
+    `SELECT s.id, s.seq, s.name, p.id AS plan_db_id, p.plan_id AS plan_pub_id, p.name AS plan_name
+       FROM plan_stages s JOIN plans p ON p.id = s.plan_id
+      WHERE s.id = ? LIMIT 1`,
+    [stageId],
+  )) as Array<Record<string, unknown>>;
+  if (stages.length === 0) return null;
+  const myStage = stages[0] as Record<string, unknown>;
+  const planId = Number(myStage.plan_db_id);
+  const allStages = (await query(
+    `SELECT id, seq, name FROM plan_stages WHERE plan_id = ? ORDER BY seq`,
+    [planId],
+  )) as Array<Record<string, unknown>>;
+  const mySeq = Number(myStage.seq);
+  const total = allStages.length;
+  // 己方 = 发起人（creator）或执行方（assignee）（P2-2 口径）：执行方需要兄弟任务/前序摘要上下文才能完成工作
+  const isOwner =
+    (task.creator_id !== null && Number(task.creator_id) === agent.id) ||
+    (task.assignee_id !== null && Number(task.assignee_id) === agent.id);
+
+  // 前序 stage 终态摘要（含跳过清单）
+  const prevStages = allStages.filter((s) => Number(s.seq) < mySeq);
+  const prevSummary: Array<Record<string, unknown>> = [];
+  let prevSkippedCount = 0;
+  for (const ps of prevStages) {
+    const ts = (await query(
+      `SELECT status, COUNT(*) AS n FROM tasks WHERE stage_id = ? GROUP BY status`,
+      [ps.id],
+    )) as Array<Record<string, unknown>>;
+    const skipped = ts.find((r) => String(r.status) === 'cancelled');
+    prevSkippedCount += Number(skipped?.n ?? 0);
+    // 空 stage 视为完成（与闸门 isStageComplete 同口径，否则外部看到「前序未完成」但平台早已放行）
+    const allDone = ts.every((r) => ['done', 'cancelled'].includes(String(r.status)));
+    prevSummary.push({ seq: Number(ps.seq), name: String(ps.name), all_done: allDone });
+  }
+
+  if (!isOwner) {
+    // 外部认领者：最小事实（不含 plan 名称等元信息，§编排五 内外分离；P2-1）
+    const prevAllDone = prevSummary.length > 0 && prevSummary.every((s) => s.all_done);
+    return {
+      plan_id: String(myStage.plan_pub_id),
+      stage: `${mySeq}/${total}`,
+      prev_stages_all_done: prevAllDone,
+      prev_skipped: prevSkippedCount,
+    };
+  }
+
+  // 己方玩家：全量
+  const siblings = (await query(
+    `SELECT t.task_id, t.title, t.status, t.visibility FROM tasks t
+      WHERE t.stage_id = ? AND t.task_id != ? ORDER BY t.id`,
+    [stageId, String(task.task_id)],
+  )) as Array<Record<string, unknown>>;
+  return {
+    plan_id: String(myStage.plan_pub_id),
+    plan_name: String(myStage.plan_name),
+    stage: `${mySeq}/${total}`,
+    stage_name: String(myStage.name),
+    prev_stages: prevSummary.map((s) => ({ seq: s.seq, name: s.name, all_done: s.all_done })),
+    prev_skipped: prevSkippedCount,
+    siblings,
+  };
 }
 
 // ─────────────────────────── 提交验收（预检 + 续做回路） ───────────────────────────
@@ -442,7 +540,7 @@ export async function submitForReview(
   return withTransaction(async (conn) => {
     const rows = (await conn.query(
       `SELECT t.id, t.kind, t.status, t.creator_id, t.assignee_id, t.deliverable_spec,
-              t.deliver_attempts, t.max_attempts
+              t.deliver_attempts, t.max_attempts, t.origin, t.visibility
          FROM tasks t WHERE t.task_id = ? LIMIT 1 FOR UPDATE`,
       [taskId],
     )) as Array<Record<string, unknown>>;
@@ -453,10 +551,13 @@ export async function submitForReview(
     }
     const kind = String(t.kind);
     const status = String(t.status);
+    const origin = String(t.origin ?? (kind === 'scheduled' ? 'periodic' : 'manual'));
+    const visibility = String(t.visibility ?? 'private');
 
-    // 1. scheduled：不经门禁直接记录
-    if (kind === 'scheduled') {
-      if (!['pending', 'running'].includes(status)) {
+    // 1. private + periodic：直接记录（自己给自己，验收无意义；§编排四矩阵）
+    //    状态白名单含 open/claimed（克隆实例落点，P0-1）+ pending/running（legacy scheduled 路径）
+    if (origin === 'periodic' && visibility === 'private') {
+      if (!['pending', 'running', 'open', 'claimed'].includes(status)) {
         return { ok: false, error: `任务已 ${status}，无法提交` };
       }
       await conn.query(
@@ -658,7 +759,8 @@ export async function cancelTask(
     if (rows.length === 0) return { ok: false, error: `任务 ${taskId} 不存在` };
     if (Number(rows[0].creator_id) !== agent.id) return { ok: false, error: '只有发起人可以取消任务' };
     const status = String(rows[0].status);
-    if (!['pending', 'active', 'claimed', 'open', 'submitted', 'pending_confirm', 'running'].includes(status)) {
+    // failed/blocked 可取消：failed 取消=跳过（不阻塞闸门，§编排五）；blocked 取消为闸门死锁兜底
+    if (!['pending', 'active', 'claimed', 'open', 'submitted', 'pending_confirm', 'running', 'failed', 'blocked'].includes(status)) {
       return { ok: false, error: `任务已 ${status}，无法取消` };
     }
     await conn.query(
