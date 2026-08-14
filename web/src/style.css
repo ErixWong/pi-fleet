@@ -1,34 +1,249 @@
-/* ─────────────────────────── 设计系统 ─────────────────────────── */
-:root[data-bs-theme='dark'] {
-  /* 背景：深蓝渐变（替代纯黑） */
+/* ═══════════════════════════ 主题系统 ═══════════════════════════
+   4 套主题：白天 day / 黑夜 night / 清晨 dawn / 黄昏 dusk
+   全部通过 <html data-theme="..."> 上的 CSS 变量驱动，
+   组件样式只引用变量，不写死颜色。
+   data-bs-theme 同步切换，保证 Bootstrap 组件（modal/dropdown/btn-close）适配。
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── 黑夜 night：深蓝夜幕 + 靛蓝（默认） ── */
+:root[data-theme='night'] {
+  color-scheme: dark;
   --bs-body-bg: #0b1120;
   --bs-body-color: #e2e8f0;
   --bs-secondary-color: #94a3b8;
-
-  /* 主色：靛蓝 */
   --bs-primary: #6366f1;
   --bs-primary-rgb: 99, 102, 241;
   --bs-link-color: #818cf8;
   --bs-link-hover-color: #a5b4fc;
-
-  /* 圆角 */
   --bs-border-radius: 0.75rem;
   --bs-border-radius-lg: 1rem;
 
-  /* 表面 */
+  --bg-base: #0b1120;
+  --bg-glow-1: rgba(99, 102, 241, 0.14);
+  --bg-glow-2: rgba(34, 211, 238, 0.08);
+  --nav-bg: rgba(11, 17, 32, 0.72);
+
   --surface: rgba(255, 255, 255, 0.04);
   --surface-strong: rgba(255, 255, 255, 0.07);
   --border-soft: rgba(255, 255, 255, 0.09);
+
+  --text-strong: #e2e8f0;
+  --text-body: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+
+  --accent: #6366f1;
+  --accent-2: #22d3ee;
+  --accent-text: #a5b4fc;
+  --accent-soft: rgba(99, 102, 241, 0.18);
+  --accent-hover: rgba(99, 102, 241, 0.07);
+  --accent-border-hover: rgba(99, 102, 241, 0.35);
+  --brand-grad: linear-gradient(120deg, #818cf8, #22d3ee);
+  --btn-grad: linear-gradient(120deg, #6366f1, #8b5cf6);
+  --btn-shadow: rgba(99, 102, 241, 0.6);
+
+  --code-bg: rgba(2, 6, 23, 0.6);
+  --code-text: #f472b6;
+  --code-inline-bg: rgba(255, 255, 255, 0.08);
+
+  --badge-success-bg: rgba(16, 185, 129, 0.16); --badge-success-color: #34d399;
+  --badge-danger-bg: rgba(244, 63, 94, 0.16);  --badge-danger-color: #fb7185;
+  --badge-warning-bg: rgba(245, 158, 11, 0.16); --badge-warning-color: #fbbf24;
+  --badge-info-bg: rgba(56, 189, 248, 0.16);   --badge-info-color: #7dd3fc;
+  --badge-primary-bg: rgba(99, 102, 241, 0.18); --badge-primary-color: #a5b4fc;
+  --badge-secondary-bg: rgba(148, 163, 184, 0.14); --badge-secondary-color: #94a3b8;
+
+  --alert-warning-bg: rgba(245, 158, 11, 0.1); --alert-warning-color: #fcd34d;
+  --alert-danger-bg: rgba(244, 63, 94, 0.1);   --alert-danger-color: #fda4af;
+  --key-box-border: rgba(245, 158, 11, 0.6);   --key-box-color: #fbbf24;
+
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px -12px rgba(0, 0, 0, 0.4);
+  --table-head-bg: rgba(255, 255, 255, 0.02);
+  --table-stripe-bg: rgba(255, 255, 255, 0.02);
 }
 
+/* ── 白天 day：浅灰蓝底 + 靛蓝 ── */
+:root[data-theme='day'] {
+  color-scheme: light;
+  --bs-body-bg: #f1f5f9;
+  --bs-body-color: #1e293b;
+  --bs-secondary-color: #64748b;
+  --bs-primary: #4f46e5;
+  --bs-primary-rgb: 79, 70, 229;
+  --bs-link-color: #4f46e5;
+  --bs-link-hover-color: #3730a3;
+  --bs-border-radius: 0.75rem;
+  --bs-border-radius-lg: 1rem;
+
+  --bg-base: #eef2f7;
+  --bg-glow-1: rgba(99, 102, 241, 0.12);
+  --bg-glow-2: rgba(34, 211, 238, 0.10);
+  --nav-bg: rgba(255, 255, 255, 0.78);
+
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-strong: rgba(255, 255, 255, 0.92);
+  --border-soft: rgba(15, 23, 42, 0.09);
+
+  --text-strong: #0f172a;
+  --text-body: #334155;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+
+  --accent: #4f46e5;
+  --accent-2: #0891b2;
+  --accent-text: #4f46e5;
+  --accent-soft: rgba(79, 70, 229, 0.10);
+  --accent-hover: rgba(79, 70, 229, 0.05);
+  --accent-border-hover: rgba(79, 70, 229, 0.4);
+  --brand-grad: linear-gradient(120deg, #4f46e5, #0891b2);
+  --btn-grad: linear-gradient(120deg, #4f46e5, #7c3aed);
+  --btn-shadow: rgba(79, 70, 229, 0.4);
+
+  --code-bg: #f1f5f9;
+  --code-text: #be185d;
+  --code-inline-bg: rgba(15, 23, 42, 0.06);
+
+  --badge-success-bg: rgba(5, 150, 105, 0.12);  --badge-success-color: #047857;
+  --badge-danger-bg: rgba(225, 29, 72, 0.10);   --badge-danger-color: #be123c;
+  --badge-warning-bg: rgba(217, 119, 6, 0.12);  --badge-warning-color: #b45309;
+  --badge-info-bg: rgba(2, 132, 199, 0.12);     --badge-info-color: #0369a1;
+  --badge-primary-bg: rgba(79, 70, 229, 0.10);  --badge-primary-color: #4338ca;
+  --badge-secondary-bg: rgba(100, 116, 139, 0.12); --badge-secondary-color: #64748b;
+
+  --alert-warning-bg: rgba(217, 119, 6, 0.10); --alert-warning-color: #92400e;
+  --alert-danger-bg: rgba(225, 29, 72, 0.08);  --alert-danger-color: #9f1239;
+  --key-box-border: rgba(217, 119, 6, 0.55);   --key-box-color: #b45309;
+
+  --card-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px -12px rgba(15, 23, 42, 0.12);
+  --table-head-bg: rgba(15, 23, 42, 0.03);
+  --table-stripe-bg: rgba(15, 23, 42, 0.02);
+}
+
+/* ── 清晨 dawn：浅绿薄荷 + 翠绿 ── */
+:root[data-theme='dawn'] {
+  color-scheme: light;
+  --bs-body-bg: #eef6f0;
+  --bs-body-color: #1f2f26;
+  --bs-secondary-color: #5f7a6a;
+  --bs-primary: #15803d;
+  --bs-primary-rgb: 21, 128, 61;
+  --bs-link-color: #15803d;
+  --bs-link-hover-color: #166534;
+  --bs-border-radius: 0.75rem;
+  --bs-border-radius-lg: 1rem;
+
+  --bg-base: #edf6ef;
+  --bg-glow-1: rgba(34, 197, 94, 0.14);
+  --bg-glow-2: rgba(45, 212, 191, 0.12);
+  --nav-bg: rgba(247, 252, 248, 0.82);
+
+  --surface: rgba(255, 255, 255, 0.70);
+  --surface-strong: rgba(255, 255, 255, 0.92);
+  --border-soft: rgba(22, 60, 40, 0.10);
+
+  --text-strong: #14241b;
+  --text-body: #2f4638;
+  --text-muted: #5f7a6a;
+  --text-faint: #8aa695;
+
+  --accent: #16a34a;
+  --accent-2: #0d9488;
+  --accent-text: #15803d;
+  --accent-soft: rgba(22, 163, 74, 0.10);
+  --accent-hover: rgba(22, 163, 74, 0.06);
+  --accent-border-hover: rgba(22, 163, 74, 0.4);
+  --brand-grad: linear-gradient(120deg, #16a34a, #0d9488);
+  --btn-grad: linear-gradient(120deg, #16a34a, #0d9488);
+  --btn-shadow: rgba(22, 163, 74, 0.4);
+
+  --code-bg: #eef5ef;
+  --code-text: #0f766e;
+  --code-inline-bg: rgba(22, 60, 40, 0.07);
+
+  --badge-success-bg: rgba(22, 163, 74, 0.12);   --badge-success-color: #15803d;
+  --badge-danger-bg: rgba(220, 38, 38, 0.10);    --badge-danger-color: #b91c1c;
+  --badge-warning-bg: rgba(202, 138, 4, 0.12);   --badge-warning-color: #a16207;
+  --badge-info-bg: rgba(13, 148, 136, 0.12);     --badge-info-color: #0f766e;
+  --badge-primary-bg: rgba(22, 163, 74, 0.12);   --badge-primary-color: #15803d;
+  --badge-secondary-bg: rgba(95, 122, 106, 0.14); --badge-secondary-color: #5f7a6a;
+
+  --alert-warning-bg: rgba(202, 138, 4, 0.10); --alert-warning-color: #854d0e;
+  --alert-danger-bg: rgba(220, 38, 38, 0.08);  --alert-danger-color: #991b1b;
+  --key-box-border: rgba(202, 138, 4, 0.55);   --key-box-color: #a16207;
+
+  --card-shadow: 0 1px 2px rgba(22, 60, 40, 0.06), 0 8px 24px -12px rgba(22, 60, 40, 0.12);
+  --table-head-bg: rgba(22, 60, 40, 0.03);
+  --table-stripe-bg: rgba(22, 60, 40, 0.02);
+}
+
+/* ── 黄昏 dusk：暖棕夜幕 + 金红 ── */
+:root[data-theme='dusk'] {
+  color-scheme: dark;
+  --bs-body-bg: #1c1310;
+  --bs-body-color: #f0e2d6;
+  --bs-secondary-color: #bda693;
+  --bs-primary: #f59e0b;
+  --bs-primary-rgb: 245, 158, 11;
+  --bs-link-color: #fbbf24;
+  --bs-link-hover-color: #fcd34d;
+  --bs-border-radius: 0.75rem;
+  --bs-border-radius-lg: 1rem;
+
+  --bg-base: #1c1310;
+  --bg-glow-1: rgba(245, 158, 11, 0.14);
+  --bg-glow-2: rgba(239, 68, 68, 0.10);
+  --nav-bg: rgba(28, 19, 16, 0.74);
+
+  --surface: rgba(255, 214, 170, 0.05);
+  --surface-strong: rgba(255, 214, 170, 0.09);
+  --border-soft: rgba(255, 214, 170, 0.12);
+
+  --text-strong: #f8ece0;
+  --text-body: #e6d3c2;
+  --text-muted: #bda693;
+  --text-faint: #8f7a68;
+
+  --accent: #f59e0b;
+  --accent-2: #ef4444;
+  --accent-text: #fcd34d;
+  --accent-soft: rgba(245, 158, 11, 0.16);
+  --accent-hover: rgba(245, 158, 11, 0.08);
+  --accent-border-hover: rgba(245, 158, 11, 0.4);
+  --brand-grad: linear-gradient(120deg, #fbbf24, #f87171);
+  --btn-grad: linear-gradient(120deg, #f59e0b, #ef4444);
+  --btn-shadow: rgba(245, 158, 11, 0.5);
+
+  --code-bg: rgba(20, 12, 9, 0.65);
+  --code-text: #fda4af;
+  --code-inline-bg: rgba(255, 214, 170, 0.10);
+
+  --badge-success-bg: rgba(52, 211, 153, 0.15); --badge-success-color: #6ee7b7;
+  --badge-danger-bg: rgba(248, 113, 113, 0.16); --badge-danger-color: #fca5a5;
+  --badge-warning-bg: rgba(251, 191, 36, 0.16); --badge-warning-color: #fcd34d;
+  --badge-info-bg: rgba(251, 146, 60, 0.16);   --badge-info-color: #fdba74;
+  --badge-primary-bg: rgba(245, 158, 11, 0.18); --badge-primary-color: #fcd34d;
+  --badge-secondary-bg: rgba(189, 166, 147, 0.16); --badge-secondary-color: #bda693;
+
+  --alert-warning-bg: rgba(251, 191, 36, 0.10); --alert-warning-color: #fcd34d;
+  --alert-danger-bg: rgba(248, 113, 113, 0.10); --alert-danger-color: #fca5a5;
+  --key-box-border: rgba(251, 191, 36, 0.6);    --key-box-color: #fcd34d;
+
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  --table-head-bg: rgba(255, 214, 170, 0.03);
+  --table-stripe-bg: rgba(255, 214, 170, 0.02);
+}
+
+/* ─────────────────────────── 基础 ─────────────────────────── */
 body {
   font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
   background:
-    radial-gradient(1200px 500px at 20% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
-    radial-gradient(900px 400px at 90% 0%, rgba(34, 211, 238, 0.08), transparent 55%),
-    #0b1120;
+    radial-gradient(1200px 500px at 20% -10%, var(--bg-glow-1), transparent 60%),
+    radial-gradient(900px 400px at 90% 0%, var(--bg-glow-2), transparent 55%),
+    var(--bg-base);
   background-attachment: fixed;
   letter-spacing: 0.01em;
+  color: var(--text-strong);
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 /* ─────────────────────────── 卡片：玻璃拟态 ─────────────────────────── */
@@ -37,19 +252,20 @@ body {
   border: 1px solid var(--border-soft);
   border-radius: 1rem;
   backdrop-filter: blur(12px);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px -12px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--card-shadow);
+  color: var(--text-strong);
 }
 .card-header {
   background: var(--surface-strong);
   border-bottom: 1px solid var(--border-soft);
 }
 .card:hover {
-  border-color: rgba(99, 102, 241, 0.35);
+  border-color: var(--accent-border-hover);
 }
 
 /* ─────────────────────────── 导航：玻璃拟态 ─────────────────────────── */
 .navbar {
-  background: rgba(11, 17, 32, 0.72) !important;
+  background: var(--nav-bg) !important;
   backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border-soft);
   position: sticky;
@@ -57,7 +273,7 @@ body {
   z-index: 1030;
 }
 .navbar-brand {
-  background: linear-gradient(120deg, #818cf8, #22d3ee);
+  background: var(--brand-grad);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -66,11 +282,22 @@ body {
 .nav-link {
   border-radius: 0.6rem;
   padding: 0.4rem 0.85rem !important;
-  color: #94a3b8 !important;
+  color: var(--text-muted) !important;
   font-weight: 500;
 }
-.nav-link:hover { color: #e2e8f0 !important; background: var(--surface-strong); }
-.nav-link.active { color: #c7d2fe !important; background: rgba(99, 102, 241, 0.18); }
+.nav-link:hover { color: var(--text-strong) !important; background: var(--surface-strong); }
+.nav-link.active { color: var(--accent-text) !important; background: var(--accent-soft); }
+
+/* 主题切换下拉 */
+.dropdown-menu {
+  background: var(--surface-strong);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--card-shadow);
+}
+.dropdown-item { color: var(--text-body); font-weight: 500; }
+.dropdown-item:hover, .dropdown-item:focus { background: var(--accent-soft); color: var(--accent-text); }
+.dropdown-item.active { background: var(--accent-soft); color: var(--accent-text); }
 
 /* ─────────────────────────── 统计卡片 ─────────────────────────── */
 .stat-card .icon {
@@ -91,14 +318,14 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .stat-card .lbl {
-  color: #94a3b8;
+  color: var(--text-muted);
   font-size: 0.8rem;
   font-weight: 500;
 }
 
 /* ─────────────────────────── 表格 ─────────────────────────── */
 .table {
-  --bs-table-color: #e2e8f0;
+  --bs-table-color: var(--text-strong);
   --bs-table-bg: transparent;
   --bs-table-border-color: var(--border-soft);
 }
@@ -107,102 +334,138 @@ body {
   padding: 0.7rem 0.9rem;
 }
 .table thead th {
-  color: #94a3b8;
+  color: var(--text-muted);
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   border-bottom: 1px solid var(--border-soft);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--table-head-bg);
 }
 .table tbody tr {
   transition: background 0.15s ease;
 }
 .table tbody tr:hover {
-  background: rgba(99, 102, 241, 0.07);
+  background: var(--accent-hover);
+}
+.table-secondary {
+  --bs-table-bg: var(--badge-secondary-bg);
+  --bs-table-color: var(--text-muted);
 }
 
 /* ─────────────────────────── 徽章：柔和彩色 ─────────────────────────── */
 .badge-status { font-weight: 600; letter-spacing: 0.02em; }
-.text-bg-success { background: rgba(16, 185, 129, 0.16) !important; color: #34d399 !important; }
-.text-bg-danger { background: rgba(244, 63, 94, 0.16) !important; color: #fb7185 !important; }
-.text-bg-warning { background: rgba(245, 158, 11, 0.16) !important; color: #fbbf24 !important; }
-.text-bg-info { background: rgba(56, 189, 248, 0.16) !important; color: #7dd3fc !important; }
-.text-bg-primary { background: rgba(99, 102, 241, 0.18) !important; color: #a5b4fc !important; }
-.text-bg-secondary { background: rgba(148, 163, 184, 0.14) !important; color: #94a3b8 !important; }
+.text-bg-success { background: var(--badge-success-bg) !important; color: var(--badge-success-color) !important; }
+.text-bg-danger { background: var(--badge-danger-bg) !important; color: var(--badge-danger-color) !important; }
+.text-bg-warning { background: var(--badge-warning-bg) !important; color: var(--badge-warning-color) !important; }
+.text-bg-info { background: var(--badge-info-bg) !important; color: var(--badge-info-color) !important; }
+.text-bg-primary { background: var(--badge-primary-bg) !important; color: var(--badge-primary-color) !important; }
+.text-bg-secondary { background: var(--badge-secondary-bg) !important; color: var(--badge-secondary-color) !important; }
 
 /* ─────────────────────────── 按钮 ─────────────────────────── */
 .btn { border-radius: 0.6rem; font-weight: 600; }
 .btn-primary {
-  background: linear-gradient(120deg, #6366f1, #8b5cf6);
+  background: var(--btn-grad);
   border: none;
-  box-shadow: 0 4px 14px -4px rgba(99, 102, 241, 0.6);
+  color: #fff;
+  box-shadow: 0 4px 14px -4px var(--btn-shadow);
 }
-.btn-primary:hover { filter: brightness(1.1); }
-.btn-outline-secondary { color: #94a3b8; border-color: var(--border-soft); }
-.btn-outline-secondary:hover { color: #e2e8f0; background: var(--surface-strong); border-color: var(--border-soft); }
+.btn-primary:hover { filter: brightness(1.1); color: #fff; }
+.btn-outline-primary { color: var(--accent-text); border-color: var(--accent-border-hover); }
+.btn-outline-primary:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-outline-secondary { color: var(--text-muted); border-color: var(--border-soft); }
+.btn-outline-secondary:hover { color: var(--text-strong); background: var(--surface-strong); border-color: var(--border-soft); }
+.btn-outline-danger { color: var(--badge-danger-color); border-color: var(--badge-danger-bg); }
+.btn-outline-danger:hover { background: var(--badge-danger-color); color: #fff; }
+.btn-secondary { background: var(--badge-secondary-bg); border-color: var(--border-soft); color: var(--text-body); }
+.btn-secondary:hover { background: var(--surface-strong); color: var(--text-strong); border-color: var(--border-soft); }
 
 /* ─────────────────────────── 表单 ─────────────────────────── */
 .form-control, .form-select {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: 0.6rem;
-  color: #e2e8f0;
+  color: var(--text-strong);
 }
+.form-control::placeholder { color: var(--text-faint); }
 .form-control:focus, .form-select:focus {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: #6366f1;
-  box-shadow: 0 0 0 0.2rem rgba(99, 102, 241, 0.2);
-  color: #e2e8f0;
+  background: var(--surface-strong);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 0.2rem var(--accent-soft);
+  color: var(--text-strong);
 }
-.form-label { color: #94a3b8; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.form-control:disabled, .form-select:disabled {
+  background: var(--surface);
+  color: var(--text-faint);
+}
+.form-label { color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.form-check-label { color: var(--text-body); }
+.form-check-input { background-color: var(--surface-strong); border-color: var(--border-soft); }
+.form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+
+/* 面板（替代 bg-white / bg-light 硬编码） */
+.surface-panel { background: var(--surface); backdrop-filter: blur(12px); border-color: var(--border-soft) !important; }
+.surface-panel-strong { background: var(--surface-strong); border-color: var(--border-soft) !important; }
 
 /* ─────────────────────────── 通用 ─────────────────────────── */
 pre {
-  background: rgba(2, 6, 23, 0.6);
+  background: var(--code-bg);
   border: 1px solid var(--border-soft);
   border-radius: 0.75rem;
   padding: 0.8rem 1rem;
   font-size: 0.82rem;
   line-height: 1.55;
-  color: #cbd5e1;
+  color: var(--text-body);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 60vh;
   overflow: auto;
 }
+code { color: var(--code-text); }
 .key-box {
-  background: rgba(2, 6, 23, 0.6);
-  border: 1px dashed rgba(245, 158, 11, 0.6);
+  background: var(--code-bg);
+  border: 1px dashed var(--key-box-border);
   border-radius: 0.75rem;
   padding: 0.7rem 1rem;
   font-family: ui-monospace, Consolas, monospace;
   word-break: break-all;
-  color: #fbbf24;
+  color: var(--key-box-color);
   font-size: 0.9rem;
 }
 .alert { border-radius: 0.85rem; border: 1px solid var(--border-soft); }
-.alert-warning { background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
-.alert-danger { background: rgba(244, 63, 94, 0.1); color: #fda4af; }
+.alert-warning { background: var(--alert-warning-bg); color: var(--alert-warning-color); }
+.alert-danger { background: var(--alert-danger-bg); color: var(--alert-danger-color); }
+.text-secondary { color: var(--text-muted) !important; }
+.text-muted { color: var(--text-muted) !important; }
+.border { border-color: var(--border-soft) !important; }
+.border-bottom { border-color: var(--border-soft) !important; }
+.border-top { border-color: var(--border-soft) !important; }
 
 /* 会话消息气泡 */
 .thread-msg {
   border-left: 3px solid transparent;
   transition: border-color 0.15s;
 }
-.thread-msg:hover { border-left-color: #6366f1; }
+.thread-msg:hover { border-left-color: var(--accent); }
 .thread-msg .sender { font-size: 0.75rem; font-weight: 700; }
-.thread-msg .time { font-size: 0.7rem; color: #64748b; }
+.thread-msg .time { font-size: 0.7rem; color: var(--text-faint); }
+.sender-brief { color: var(--accent-text); }
+.sender-report { color: var(--badge-success-color); }
+.sender-note { color: var(--badge-info-color); }
+.post-ic { width: 26px; height: 26px; border-radius: 0.5rem; }
+.sender-brief-bg { background: var(--badge-primary-bg); color: var(--badge-primary-color); }
+.sender-report-bg { background: var(--badge-success-bg); color: var(--badge-success-color); }
+.sender-note-bg { background: var(--badge-info-bg); color: var(--badge-info-color); }
 
 /* 空态 */
-.empty-state { color: #64748b; text-align: center; padding: 2.5rem 1rem; }
+.empty-state { color: var(--text-faint); text-align: center; padding: 2.5rem 1rem; }
 .empty-state i { font-size: 2rem; opacity: 0.5; display: block; margin-bottom: 0.5rem; }
 
 /* ─────────────────────────── Markdown 内容渲染 ─────────────────────────── */
-.md-content { font-size: 0.87rem; line-height: 1.7; color: #cbd5e1; }
+.md-content { font-size: 0.87rem; line-height: 1.7; color: var(--text-body); }
 .md-content > :first-child { margin-top: 0; }
 .md-content > :last-child { margin-bottom: 0; }
 .md-content h1, .md-content h2, .md-content h3, .md-content h4 {
-  color: #e2e8f0;
+  color: var(--text-strong);
   font-weight: 700;
   margin: 1.2em 0 0.5em;
   line-height: 1.3;
@@ -214,19 +477,19 @@ pre {
 .md-content p { margin: 0.5em 0; }
 .md-content ul, .md-content ol { margin: 0.5em 0; padding-left: 1.5em; }
 .md-content li { margin: 0.2em 0; }
-.md-content a { color: #818cf8; text-decoration: none; }
-.md-content a:hover { color: #a5b4fc; text-decoration: underline; }
-.md-content strong { color: #e2e8f0; font-weight: 700; }
+.md-content a { color: var(--bs-link-color); text-decoration: none; }
+.md-content a:hover { color: var(--bs-link-hover-color); text-decoration: underline; }
+.md-content strong { color: var(--text-strong); font-weight: 700; }
 .md-content code {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--code-inline-bg);
   border-radius: 0.35rem;
   padding: 0.1em 0.4em;
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.85em;
-  color: #f472b6;
+  color: var(--code-text);
 }
 .md-content pre {
-  background: #0b1020;
+  background: var(--code-bg);
   border: 1px solid var(--border-soft);
   border-radius: 0.6rem;
   padding: 0.75rem 1rem;
@@ -236,16 +499,16 @@ pre {
 .md-content pre code {
   background: transparent;
   padding: 0;
-  color: #cbd5e1;
+  color: var(--text-body);
   font-size: 0.82rem;
   line-height: 1.55;
 }
 .md-content blockquote {
-  border-left: 3px solid #6366f1;
+  border-left: 3px solid var(--accent);
   margin: 0.6em 0;
   padding: 0.2em 1em;
-  color: #94a3b8;
-  background: rgba(99, 102, 241, 0.06);
+  color: var(--text-muted);
+  background: var(--accent-soft);
   border-radius: 0 0.5rem 0.5rem 0;
 }
 .md-content table {
@@ -259,7 +522,7 @@ pre {
   padding: 0.45em 0.8em;
   text-align: left;
 }
-.md-content th { background: rgba(255, 255, 255, 0.05); color: #94a3b8; font-weight: 600; }
-.md-content tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+.md-content th { background: var(--table-head-bg); color: var(--text-muted); font-weight: 600; }
+.md-content tr:nth-child(even) td { background: var(--table-stripe-bg); }
 .md-content hr { border-color: var(--border-soft); margin: 1em 0; }
 .md-content img { max-width: 100%; border-radius: 0.5rem; }

@@ -1,11 +1,12 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { api } from '../api';
 
 const tab = ref('attachments'); // attachments | llm | prompts
 const settings = ref({});
 const history = ref([]);
 const models = ref([]);
+const providers = ref([]);
 const calls = ref([]);
 const saveMsg = ref('');
 const err = ref('');
@@ -13,18 +14,32 @@ const llmTest = ref(null);
 const llmScanning = ref(false);
 const scanResult = ref(null);
 
-// 模型编辑表单
-const editing = ref(null); // null=不编辑；'__new__' 新增；id 编辑既有
+// Provider 编辑表单（base_url / api_key 在 provider 级共享，一个 provider 挂多个 model）
+const provEditing = ref(null); // null=不编辑；'__new__' 新增；id 编辑既有
+const providerForm = ref(blankProvider());
+const provTest = ref(null);
+
+function blankProvider() {
+  return { id: '', name: '', base_url: '', api_key: '', note: '', enabled: true };
+}
+
+// 模型编辑表单（挂在 provider 下，行内不再持有 base_url/api_key）
+const modelEditing = ref(null); // null=不编辑；'__new__' 新增；id 编辑既有
 const modelForm = ref(blankModel());
+const modelTest = ref(null);
 
 function blankModel() {
-  return { id: '', name: '', base_url: '', model: '', api_key: '', vision: false, price: '', note: '', enabled: true };
+  return { id: '', provider_id: '', name: '', model: '', vision: false, price: '', note: '', enabled: true };
 }
+
+/** 可用模型 = 模型启用 且 所属 provider 启用（用途映射下拉用） */
+const usableModels = computed(() => models.value.filter((m) => m.enabled && m.provider_enabled));
 
 async function load() {
   const data = await api.settings();
   settings.value = { ...data.settings };
   history.value = (await api.settingsHistory()).history || [];
+  providers.value = (await api.llmProviders()).providers || [];
   models.value = (await api.llmModels()).models || [];
   calls.value = (await api.llmCalls()).calls || [];
 }
@@ -58,31 +73,73 @@ async function saveAttachments() {
   } catch (e) { err.value = e.message; }
 }
 
-async function saveModel() {
+// ── Provider CRUD ──
+async function saveProvider() {
+  err.value = ''; saveMsg.value = '';
+  try {
+    const payload = { ...providerForm.value };
+    if (payload.api_key === '******') delete payload.api_key;
+    await api.saveLlmProvider(payload);
+    provEditing.value = null;
+    providerForm.value = blankProvider();
+    providers.value = (await api.llmProviders()).providers || [];
+    saveMsg.value = 'Provider 已保存';
+  } catch (e) { err.value = e.message; }
+}
+
+function addProvider() {
+  modelEditing.value = null;
+  provEditing.value = '__new__';
+  providerForm.value = blankProvider();
+}
+
+function editProvider(p) {
+  modelEditing.value = null;
+  provEditing.value = p.id;
+  providerForm.value = { ...p, api_key: '' };
+}
+
+function cancelProvEdit() {
+  provEditing.value = null;
+  providerForm.value = blankProvider();
+}
+
+async function removeProvider(id) {
+  if (!confirm(`删除 Provider ${id}（其下模型需先清空）？`)) return;
   err.value = '';
   try {
-    const payload = { ...modelForm.value };
-    if (payload.api_key === '******' || !payload.api_key) delete payload.api_key;
-    await api.saveLlmModel(payload);
-    editing.value = null;
+    await api.deleteLlmProvider(id);
+    providers.value = (await api.llmProviders()).providers || [];
+  } catch (e) { err.value = e.message; }
+}
+
+// ── 模型 CRUD（挂在 provider 下） ──
+async function saveModel() {
+  err.value = ''; saveMsg.value = '';
+  try {
+    await api.saveLlmModel({ ...modelForm.value });
+    modelEditing.value = null;
     modelForm.value = blankModel();
     models.value = (await api.llmModels()).models || [];
     saveMsg.value = '模型已保存';
   } catch (e) { err.value = e.message; }
 }
 
-function editModel(m) {
-  editing.value = m.id;
-  modelForm.value = { ...m, api_key: '' };
-}
-
-function addModel() {
-  editing.value = '__new__';
+function addModel(providerId) {
+  provEditing.value = null;
+  modelEditing.value = '__new__';
   modelForm.value = blankModel();
+  modelForm.value.provider_id = providerId || providers.value[0]?.id || '';
 }
 
-function cancelEdit() {
-  editing.value = null;
+function editModel(m) {
+  provEditing.value = null;
+  modelEditing.value = m.id;
+  modelForm.value = { ...m };
+}
+
+function cancelModelEdit() {
+  modelEditing.value = null;
   modelForm.value = blankModel();
 }
 
@@ -119,10 +176,35 @@ async function savePrompts() {
   } catch (e) { err.value = e.message; }
 }
 
-async function testLlm(modelId) {
+// 测试模型连接：既有模型按 id；新增模型按 provider + 模型串（临时，不落库）
+async function testModel() {
+  modelTest.value = null;
+  try {
+    if (modelEditing.value && modelEditing.value !== '__new__') {
+      modelTest.value = await api.testLlm({ model_id: modelEditing.value });
+    } else {
+      modelTest.value = await api.testLlm({ provider_id: modelForm.value.provider_id, model: modelForm.value.model });
+    }
+  } catch (e) {
+    modelTest.value = { ok: false, detail: e.message };
+  }
+}
+
+// 测试 provider 连接（用其下第一个模型；新建时无 id → 测默认）
+async function testProvider() {
+  provTest.value = null;
+  try {
+    provTest.value = await api.testLlm({ provider_id: provEditing.value && provEditing.value !== '__new__' ? provEditing.value : undefined });
+  } catch (e) {
+    provTest.value = { ok: false, detail: e.message };
+  }
+}
+
+// 测试第一个可用模型（用途映射区按钮）
+async function testDefault() {
   llmTest.value = null;
   try {
-    llmTest.value = await api.testLlm(modelId || undefined);
+    llmTest.value = await api.testLlm({});
   } catch (e) {
     llmTest.value = { ok: false, detail: e.message };
   }
@@ -146,7 +228,7 @@ async function scanQueues() {
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
       <h4 class="mb-0 fw-bold">系统设置</h4>
-      <div class="text-secondary small">附件 · LLM 模型（多模型/多模态/价格）· 提示词（存库而非 .env，修改即时生效）</div>
+      <div class="text-secondary small">附件 · LLM（provider → 多模型 / 多模态 / 价格）· 提示词（存库而非 .env，修改即时生效）</div>
     </div>
     <button class="btn btn-outline-primary" @click="scanQueues" :disabled="llmScanning">
       <i class="bi bi-play-circle me-1"></i>{{ llmScanning ? '扫描中…' : '立即扫描审核/验收队列' }}
@@ -169,8 +251,8 @@ async function scanQueues() {
     </li>
     <li class="nav-item">
       <button class="nav-link" :class="{ active: tab === 'llm' }" @click="tab = 'llm'">
-        <i class="bi bi-cpu me-1"></i>LLM 模型
-        <span v-if="models.some(m => m.enabled)" class="badge text-bg-success ms-1" style="font-size:0.6rem">{{ models.filter(m => m.enabled).length }}</span>
+        <i class="bi bi-cpu me-1"></i>LLM Provider / 模型
+        <span v-if="usableModels.length" class="badge text-bg-success ms-1" style="font-size:0.6rem">{{ usableModels.length }}</span>
       </button>
     </li>
     <li class="nav-item">
@@ -180,7 +262,7 @@ async function scanQueues() {
     </li>
   </ul>
 
-  <div class="tab-content border border-top-0 rounded-bottom p-3 bg-white" style="min-height:60vh">
+  <div class="tab-content border border-top-0 rounded-bottom p-3 surface-panel" style="min-height:60vh">
 
     <!-- ═══════ Tab：附件 ═══════ -->
     <div v-if="tab === 'attachments'" class="tab-pane active" style="max-width:760px">
@@ -213,62 +295,128 @@ async function scanQueues() {
       </div>
     </div>
 
-    <!-- ═══════ Tab：LLM 模型 ═══════ -->
+    <!-- ═══════ Tab：LLM（provider → 多 model） ═══════ -->
     <div v-if="tab === 'llm'" class="tab-pane active">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h6 class="mb-0 fw-semibold"><i class="bi bi-collection me-1"></i>模型列表（多模型 / 多模态 / 价格标记）</h6>
-        <button class="btn btn-sm btn-outline-primary" @click="addModel"><i class="bi bi-plus me-1"></i>新增模型</button>
-      </div>
 
+      <!-- Provider 列表：base_url / API Key 在此级共享 -->
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0 fw-semibold"><i class="bi bi-hdd-network me-1"></i>Provider 列表（一个 provider 对应多个 model，Base URL / API Key 在 provider 级共享）</h6>
+        <button class="btn btn-sm btn-outline-primary" @click="addProvider"><i class="bi bi-plus me-1"></i>新增 Provider</button>
+      </div>
       <div class="table-responsive">
         <table class="table table-sm table-hover align-middle">
-          <thead><tr><th>ID</th><th>名称</th><th>Base URL</th><th>模型</th><th>能力</th><th>价格</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>名称</th><th>Base URL</th><th>API Key</th><th>模型数</th><th>状态</th><th class="text-end">操作</th></tr></thead>
           <tbody>
-            <tr v-for="m in models" :key="m.id" :class="{ 'table-secondary': !m.enabled }">
+            <tr v-for="p in providers" :key="p.id" :class="{ 'table-secondary': !p.enabled }">
+              <td><code>{{ p.id }}</code></td>
+              <td>{{ p.name }} <span v-if="p.note" class="text-secondary small">({{ p.note }})</span></td>
+              <td class="small text-secondary">{{ p.base_url }}</td>
+              <td class="small">{{ p.api_key || '—' }}</td>
+              <td><span class="badge text-bg-secondary">{{ models.filter(m => m.provider_id === p.id).length }}</span></td>
+              <td>{{ p.enabled ? '✓ 启用' : '✗ 禁用' }}</td>
+              <td class="text-end">
+                <button class="btn btn-sm btn-outline-secondary me-1" @click="editProvider(p)">编辑</button>
+                <button class="btn btn-sm btn-outline-primary me-1" @click="addModel(p.id)"><i class="bi bi-plus me-1"></i>模型</button>
+                <button class="btn btn-sm btn-outline-danger" @click="removeProvider(p.id)">删除</button>
+              </td>
+            </tr>
+            <tr v-if="providers.length === 0">
+              <td colspan="7" class="text-secondary small p-3">未配置 LLM provider。先添加 provider（如 OpenAI / DeepSeek / 本地 vLLM），再在其下挂多个模型。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Provider 编辑表单 -->
+      <div v-if="provEditing !== null" class="border rounded p-3 mb-3 surface-panel-strong">
+        <h6 class="fw-semibold mb-2">{{ provEditing === '__new__' ? '新增 Provider' : `编辑 Provider：${provEditing}` }}</h6>
+        <div class="row g-2">
+          <div class="col-md-3" v-if="provEditing !== '__new__'">
+            <label class="form-label small">ID（主键，自动生成）</label>
+            <input v-model="providerForm.id" class="form-control form-control-sm" disabled>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">名称 *</label>
+            <input v-model="providerForm.name" class="form-control form-control-sm" placeholder="OpenAI">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Base URL *（其下所有模型共用）</label>
+            <input v-model="providerForm.base_url" class="form-control form-control-sm" placeholder="https://api.openai.com/v1">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">API Key（空 = 保留原值）</label>
+            <input v-model="providerForm.api_key" type="password" class="form-control form-control-sm" placeholder="sk-...">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">备注</label>
+            <input v-model="providerForm.note" class="form-control form-control-sm" placeholder="官方 / 中转 / 本地">
+          </div>
+          <div class="col-md-3 d-flex align-items-end gap-3">
+            <div class="form-check form-switch">
+              <input v-model="providerForm.enabled" type="checkbox" class="form-check-input" id="pEnable">
+              <label class="form-check-label small" for="pEnable">启用</label>
+            </div>
+          </div>
+        </div>
+        <div class="mt-2 d-flex gap-2">
+          <button class="btn btn-sm btn-primary" @click="saveProvider">保存</button>
+          <button class="btn btn-sm btn-outline-secondary" @click="cancelProvEdit">取消</button>
+          <button class="btn btn-sm btn-outline-info ms-auto" @click="testProvider"><i class="bi bi-plug me-1"></i>测试此 Provider</button>
+        </div>
+        <div v-if="provTest" class="mt-2 small alert py-2 mb-0" :class="provTest.ok ? 'alert-success' : 'alert-danger'">{{ provTest.ok ? '✓ ' : '✗ ' }}{{ provTest.detail }}</div>
+      </div>
+
+      <!-- 模型列表：挂在 provider 下 -->
+      <div class="d-flex justify-content-between align-items-center mt-4 mb-2">
+        <h6 class="mb-0 fw-semibold"><i class="bi bi-collection me-1"></i>模型列表（挂在 provider 下；多模态 / 价格标记 / 启用）</h6>
+        <button class="btn btn-sm btn-outline-primary" @click="addModel()"><i class="bi bi-plus me-1"></i>新增模型</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+          <thead><tr><th>Provider</th><th>ID</th><th>名称</th><th>模型 ID（请求体）</th><th>能力</th><th>价格</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+          <tbody>
+            <tr v-for="m in models" :key="m.id" :class="{ 'table-secondary': !m.enabled || !m.provider_enabled }">
+              <td><span class="badge text-bg-light border">{{ m.provider_name || m.provider_id }}</span></td>
               <td><code>{{ m.id }}</code></td>
               <td>{{ m.name }} <span v-if="m.note" class="text-secondary small">({{ m.note }})</span></td>
-              <td class="small text-secondary">{{ m.base_url }}</td>
               <td class="small">{{ m.model }}</td>
               <td><span v-if="m.vision" class="badge text-bg-primary" title="多模态，可识图">🖼 多模态</span><span v-else class="text-secondary small">文本</span></td>
               <td class="small">{{ m.price || '—' }}</td>
-              <td>{{ m.enabled ? '✓ 启用' : '✗ 禁用' }}</td>
+              <td>{{ m.enabled && m.provider_enabled ? '✓ 启用' : '✗ 禁用' }}</td>
               <td class="text-end">
                 <button class="btn btn-sm btn-outline-secondary me-1" @click="editModel(m)">编辑</button>
                 <button class="btn btn-sm btn-outline-danger" @click="removeModel(m.id)">删除</button>
               </td>
             </tr>
             <tr v-if="models.length === 0">
-              <td colspan="8" class="text-secondary small p-3">
-                未配置模型。可点击「新增模型」添加，或沿用旧的 base_url/model 单模型配置（显示为 default）。
-              </td>
+              <td colspan="8" class="text-secondary small p-3">暂无模型。先在上方添加 Provider，再在 provider 下新增模型（如 gpt-4o / deepseek-chat / qwen2.5）。</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <!-- 模型编辑表单 -->
-      <div v-if="editing !== null" class="border rounded p-3 mb-3 bg-light">
-        <h6 class="fw-semibold mb-2">{{ editing === '__new__' ? '新增模型' : `编辑模型：${editing}` }}</h6>
+      <div v-if="modelEditing !== null" class="border rounded p-3 mb-3 surface-panel-strong">
+        <h6 class="fw-semibold mb-2">{{ modelEditing === '__new__' ? '新增模型' : `编辑模型：${modelEditing}` }}</h6>
         <div class="row g-2">
+          <div class="col-md-3" v-if="modelEditing !== '__new__'">
+            <label class="form-label small">ID（主键，自动生成）</label>
+            <input v-model="modelForm.id" class="form-control form-control-sm" disabled>
+          </div>
           <div class="col-md-3">
-            <label class="form-label small">ID（字母数字下划线）</label>
-            <input v-model="modelForm.id" class="form-control form-control-sm" :disabled="editing !== '__new__'" placeholder="default/vision/cheap">
+            <label class="form-label small">所属 Provider *</label>
+            <select v-model="modelForm.provider_id" class="form-select form-select-sm">
+              <option value="" disabled>选择 provider…</option>
+              <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}（{{ p.id }}）</option>
+            </select>
           </div>
           <div class="col-md-3">
             <label class="form-label small">名称 *</label>
-            <input v-model="modelForm.name" class="form-control form-control-sm" placeholder="GPT-4o-mini">
+            <input v-model="modelForm.name" class="form-control form-control-sm" placeholder="GPT-4o mini">
           </div>
           <div class="col-md-3">
-            <label class="form-label small">Base URL *</label>
-            <input v-model="modelForm.base_url" class="form-control form-control-sm" placeholder="https://api.openai.com/v1">
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small">模型 ID *</label>
+            <label class="form-label small">模型 ID *（请求体 model 字段）</label>
             <input v-model="modelForm.model" class="form-control form-control-sm" placeholder="gpt-4o-mini">
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small">API Key（空 = 保留原值）</label>
-            <input v-model="modelForm.api_key" type="password" class="form-control form-control-sm" placeholder="sk-...">
           </div>
           <div class="col-md-3">
             <label class="form-label small">价格标记（留痕）</label>
@@ -291,10 +439,10 @@ async function scanQueues() {
         </div>
         <div class="mt-2 d-flex gap-2">
           <button class="btn btn-sm btn-primary" @click="saveModel">保存</button>
-          <button class="btn btn-sm btn-outline-secondary" @click="cancelEdit">取消</button>
-          <button class="btn btn-sm btn-outline-info ms-auto" @click="testLlm(modelForm.id || undefined)"><i class="bi bi-plug me-1"></i>测试此配置</button>
+          <button class="btn btn-sm btn-outline-secondary" @click="cancelModelEdit">取消</button>
+          <button class="btn btn-sm btn-outline-info ms-auto" @click="testModel"><i class="bi bi-plug me-1"></i>测试此配置</button>
         </div>
-        <div v-if="llmTest" class="mt-2 small alert py-2 mb-0" :class="llmTest.ok ? 'alert-success' : 'alert-danger'">{{ llmTest.ok ? '✓ ' : '✗ ' }}{{ llmTest.detail }}</div>
+        <div v-if="modelTest" class="mt-2 small alert py-2 mb-0" :class="modelTest.ok ? 'alert-success' : 'alert-danger'">{{ modelTest.ok ? '✓ ' : '✗ ' }}{{ modelTest.detail }}</div>
       </div>
 
       <!-- 用途映射 -->
@@ -305,14 +453,14 @@ async function scanQueues() {
             <label class="form-label small">审核用模型</label>
             <select v-model="settings.llm_audit_model" class="form-select form-select-sm">
               <option value="auto">auto（自动）</option>
-              <option v-for="m in models.filter(x => x.enabled)" :key="m.id" :value="m.id">{{ m.id }}（{{ m.name }}）</option>
+              <option v-for="m in usableModels" :key="m.id" :value="m.id">{{ m.provider_name }} / {{ m.name }}（{{ m.id }}）</option>
             </select>
           </div>
           <div class="col-md-3">
             <label class="form-label small">验收用模型（有图自动多模态）</label>
             <select v-model="settings.llm_verify_model" class="form-select form-select-sm">
               <option value="auto">auto（有图自动多模态）</option>
-              <option v-for="m in models.filter(x => x.enabled)" :key="m.id" :value="m.id">{{ m.id }}（{{ m.name }}）</option>
+              <option v-for="m in usableModels" :key="m.id" :value="m.id">{{ m.provider_name }} / {{ m.name }}（{{ m.id }}）</option>
             </select>
           </div>
           <div class="col-md-2">
@@ -325,21 +473,22 @@ async function scanQueues() {
           </div>
           <div class="col-md-2 d-flex gap-2">
             <button class="btn btn-sm btn-primary" @click="saveLlmBinding">保存</button>
-            <button class="btn btn-sm btn-outline-secondary" @click="testLlm()">测试默认</button>
+            <button class="btn btn-sm btn-outline-secondary" @click="testDefault">测试默认</button>
           </div>
         </div>
-        <div v-if="llmTest && editing === null" class="mt-2 small alert py-2 mb-0" :class="llmTest.ok ? 'alert-success' : 'alert-danger'">{{ llmTest.ok ? '✓ ' : '✗ ' }}{{ llmTest.detail }}</div>
+        <div v-if="llmTest" class="mt-2 small alert py-2 mb-0" :class="llmTest.ok ? 'alert-success' : 'alert-danger'">{{ llmTest.ok ? '✓ ' : '✗ ' }}{{ llmTest.detail }}</div>
       </div>
 
       <!-- 调用日志 -->
       <div>
-        <h6 class="fw-semibold mb-2"><i class="bi bi-receipt me-1"></i>调用日志（成本归平台：模型 / 用途 / tokens / 价格）</h6>
+        <h6 class="fw-semibold mb-2"><i class="bi bi-receipt me-1"></i>调用日志（成本归平台：provider / 模型 / 用途 / tokens / 价格）</h6>
         <div class="table-responsive">
           <table class="table table-sm table-hover">
-            <thead><tr><th>时间</th><th>模型</th><th>用途</th><th>任务</th><th>识图</th><th>tokens(入/出)</th><th>价格</th><th>结果</th></tr></thead>
+            <thead><tr><th>时间</th><th>Provider</th><th>模型</th><th>用途</th><th>任务</th><th>识图</th><th>tokens(入/出)</th><th>价格</th><th>结果</th></tr></thead>
             <tbody>
               <tr v-for="c in calls" :key="c.id">
                 <td class="text-secondary small">{{ c.created_at }}</td>
+                <td class="small">{{ c.provider_name || c.provider_id || '—' }}</td>
                 <td><code>{{ c.model_id }}</code></td>
                 <td>{{ c.purpose }}</td>
                 <td class="small">{{ c.task_id || '—' }}</td>
@@ -348,7 +497,7 @@ async function scanQueues() {
                 <td class="small">{{ c.price || '—' }}</td>
                 <td><span v-if="c.ok" class="text-success">✓</span><span v-else class="text-danger small" :title="c.error">✗ {{ c.error }}</span></td>
               </tr>
-              <tr v-if="calls.length === 0"><td colspan="8" class="text-secondary small p-3">暂无调用记录。</td></tr>
+              <tr v-if="calls.length === 0"><td colspan="9" class="text-secondary small p-3">暂无调用记录。</td></tr>
             </tbody>
           </table>
         </div>

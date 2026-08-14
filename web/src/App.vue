@@ -1,9 +1,18 @@
 <script setup>
+import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from './api';
+import { THEMES, applyTheme, currentTheme } from './theme';
 
 const route = useRoute();
 const router = useRouter();
+
+const theme = ref(currentTheme());
+function switchTheme(id) {
+  theme.value = id;
+  applyTheme(id);
+}
+const themeIcon = () => THEMES.find(t => t.id === theme.value)?.icon || 'bi-moon-stars';
 
 async function logout() {
   await api.logout();
@@ -13,15 +22,28 @@ async function logout() {
 
 <template>
   <div class="min-vh-100 d-flex flex-column">
-    <nav v-if="route.path !== '/login'" class="navbar navbar-expand navbar-dark px-3">
+    <nav v-if="route.path !== '/login'" class="navbar navbar-expand px-3">
       <span class="navbar-brand me-3"><i class="bi bi-hdd-network me-1"></i>任务分发平台</span>
       <div class="navbar-nav d-flex gap-1">
         <router-link to="/" class="nav-link" exact-active-class="active"><i class="bi bi-grid-1x2 me-1"></i>仪表盘</router-link>
         <router-link to="/tasks" class="nav-link" active-class="active"><i class="bi bi-list-check me-1"></i>任务</router-link>
+        <router-link to="/plans" class="nav-link" active-class="active"><i class="bi bi-diagram-3 me-1"></i>计划</router-link>
         <router-link to="/agents" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
         <router-link to="/settings" class="nav-link" active-class="active"><i class="bi bi-gear me-1"></i>设置</router-link>
       </div>
-      <div class="ms-auto">
+      <div class="ms-auto d-flex align-items-center gap-2">
+        <div class="dropdown">
+          <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi me-1" :class="themeIcon()"></i>主题
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li v-for="t in THEMES" :key="t.id">
+              <button class="dropdown-item" :class="{ active: theme === t.id }" @click="switchTheme(t.id)">
+                <i class="bi me-2" :class="t.icon"></i>{{ t.name }}
+              </button>
+            </li>
+          </ul>
+        </div>
         <button class="btn btn-sm btn-outline-secondary" @click="logout"><i class="bi bi-box-arrow-right me-1"></i>退出</button>
       </div>
     </nav>

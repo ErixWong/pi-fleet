@@ -24,11 +24,10 @@ async function submit() {
 
 <template>
   <div class="d-flex justify-content-center align-items-center" style="min-height:80vh">
-    <div class="card border-0 p-2" style="width:400px; background:linear-gradient(160deg, rgba(99,102,241,0.15), rgba(34,211,238,0.08));">
+    <div class="card border-0 p-2 login-card" style="width:400px">
       <div class="card-body p-4">
         <div class="text-center mb-4">
-          <div class="mx-auto mb-3 d-flex align-items-center justify-content-center"
-            style="width:64px;height:64px;border-radius:1.2rem;background:linear-gradient(135deg,#6366f1,#22d3ee);box-shadow:0 10px 30px -8px rgba(99,102,241,0.7)">
+          <div class="mx-auto mb-3 d-flex align-items-center justify-content-center login-logo">
             <i class="bi bi-hdd-network-fill" style="font-size:1.8rem;color:#fff"></i>
           </div>
           <h4 class="mb-1 fw-bold">任务分发平台</h4>
@@ -51,4 +50,12 @@ async function submit() {
 <style scoped>
 .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.login-card { background: linear-gradient(160deg, var(--accent-soft), var(--surface)); }
+.login-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 1.2rem;
+  background: var(--btn-grad);
+  box-shadow: 0 10px 30px -8px var(--btn-shadow);
+}
 </style>

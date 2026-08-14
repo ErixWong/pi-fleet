@@ -183,14 +183,6 @@ function postIcon(type) {
   return { brief: 'bi-pin-angle-fill', message: 'bi-chat-left-text', report: 'bi-journal-check' }[type];
 }
 
-function postColor(type) {
-  return {
-    brief: 'rgba(99,102,241,0.18)',
-    message: 'rgba(56,189,248,0.14)',
-    report: 'rgba(16,185,129,0.14)',
-  }[type];
-}
-
 function fmtSize(bytes) {
   if (!bytes) return '0 B';
   const u = ['B', 'KB', 'MB', 'GB'];
@@ -251,11 +243,11 @@ function scanBadge(s) {
       <div v-for="p in posts" :key="p.id" class="card mb-2">
         <div class="card-body py-2">
           <div class="d-flex align-items-center gap-2 mb-1">
-            <span class="d-inline-flex align-items-center justify-content-center"
-              :style="{ width: '26px', height: '26px', borderRadius: '0.5rem', background: postColor(p.type), color: '#c7d2fe' }">
+            <span class="d-inline-flex align-items-center justify-content-center post-ic"
+              :class="p.type === 'brief' ? 'sender-brief-bg' : p.type === 'report' ? 'sender-report-bg' : 'sender-note-bg'">
               <i class="bi" :class="postIcon(p.type)" style="font-size:0.85rem"></i>
             </span>
-            <span class="sender" :style="{ color: p.type === 'brief' ? '#a5b4fc' : p.type === 'report' ? '#34d399' : '#7dd3fc' }">
+            <span class="sender" :class="p.type === 'brief' ? 'sender-brief' : p.type === 'report' ? 'sender-report' : 'sender-note'">
               {{ p.sender }}
             </span>
             <span class="badge" :class="p.type === 'brief' ? 'text-bg-primary' : p.type === 'report' ? 'text-bg-success' : 'text-bg-info'" style="font-size:0.65rem">
