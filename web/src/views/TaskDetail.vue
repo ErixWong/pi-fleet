@@ -22,6 +22,12 @@ const chatOpen = ref(false);
 // 左侧计划结构面板（plan → stage → task 树，可收起，吸附左侧）
 const planTree = ref(null);
 const planCollapsed = ref(false);
+const collapsedStages = ref(new Set());
+function toggleStage(st) {
+  const n = new Set(collapsedStages.value);
+  if (n.has(st.id)) n.delete(st.id); else n.add(st.id);
+  collapsedStages.value = n;
+}
 async function loadPlan() {
   if (!task.value?.plan_pub_id) { planTree.value = null; return; }
   try { planTree.value = await api.plan(task.value.plan_pub_id); }
@@ -283,11 +289,14 @@ function scanBadge(s) {
     </div>
     <div v-if="!planCollapsed" class="plan-panel-body">
       <div v-for="st in planTree.plan.stages" :key="st.id" class="plan-stage mb-2">
-        <div class="d-flex align-items-center gap-1 plan-stage-head">
+        <div class="d-flex align-items-center gap-1 plan-stage-head" role="button" @click="toggleStage(st)"
+          :title="collapsedStages.has(st.id) ? '展开任务列表' : '收起任务列表'">
+          <i class="bi" :class="collapsedStages.has(st.id) ? 'bi-chevron-right' : 'bi-chevron-down'"></i>
           <i class="bi bi-layers"></i>
           <span class="fw-semibold text-truncate" :title="st.name">{{ st.name }}</span>
           <span class="ms-auto small text-secondary">S{{ st.seq }}</span>
         </div>
+        <div v-if="!collapsedStages.has(st.id)">
         <div class="plan-stage-meta mb-1">
           <span class="badge text-bg-light me-1">{{ st.wait_prev == 0 ? '并发' : '顺序' }}</span>
           <span v-if="st.recurrence && st.recurrence !== 'none'" class="badge text-bg-info me-1">{{ st.recurrence }}</span>
@@ -295,10 +304,12 @@ function scanBadge(s) {
         </div>
         <router-link v-for="t in st.tasks" :key="t.task_id" :to="`/tasks/${t.task_id}`"
           class="plan-task d-flex align-items-center gap-1 text-decoration-none"
-          :class="{ 'plan-task-active': t.task_id === task.task_id }">
+          :class="{ 'plan-task-active': t.task_id === task.task_id }"
+          :title="`查看任务：${t.title}`">
           <span class="text-truncate flex-fill">{{ t.title }}</span>
           <span class="badge badge-status" :class="badge(t.status)">{{ t.status }}</span>
         </router-link>
+        </div>
       </div>
     </div>
   </aside>

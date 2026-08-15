@@ -559,3 +559,5 @@ code { color: var(--code-text); }
 .plan-task:hover { background: var(--hover-bg, rgba(0,0,0,0.04)); }
 .plan-task-active { background: var(--accent-soft) !important; font-weight: 600; }
 .plan-task .badge { font-size: 0.68rem; }
+.plan-stage-head { cursor: pointer; border-radius: 0.3rem; padding: 0.15rem 0.25rem; }
+.plan-stage-head:hover { background: var(--hover-bg, rgba(0,0,0,0.05)); }
