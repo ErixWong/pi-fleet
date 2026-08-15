@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
@@ -71,6 +71,18 @@ async function load() {
 }
 
 onMounted(load);
+// 同路由组件复用：从左侧树切换到同 plan 的另一个任务时 URL 变但组件不重新挂载，
+// 需监听 taskId 重新加载（重置分页与对话面板）
+watch(
+  () => route.params.taskId,
+  () => {
+    task.value = null; // 清空旧任务内容，避免切换瞬间闪现
+    msgPage.value = 1;
+    chatOpen.value = false;
+    window.scrollTo({ top: 0 });
+    load();
+  },
+);
 
 /** 同任务附件映射：交付物引用的附件 filename（小写）→ attachment_id，供 md 图文混编自动解析 */
 const attMap = computed(() => {
