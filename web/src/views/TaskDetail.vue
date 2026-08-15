@@ -294,9 +294,9 @@ function scanBadge(s) {
         <i class="bi" :class="planCollapsed ? 'bi-chevron-right' : 'bi-chevron-left'"></i>
       </button>
       <template v-if="!planCollapsed">
-        <router-link :to="`/plans/${planTree.plan.plan_id}`" class="fw-semibold text-decoration-none plan-panel-title">
+        <span class="fw-semibold plan-panel-title">
           <i class="bi bi-diagram-3 me-1"></i>{{ planTree.plan.name }}
-        </router-link>
+        </span>
       </template>
     </div>
     <div v-if="!planCollapsed" class="plan-panel-body">

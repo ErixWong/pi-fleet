@@ -151,7 +151,7 @@ function tbadge(status) {
           <tr style="cursor:pointer" @click="toggle(p)">
             <td><i class="bi" :class="expanded[p.plan_id] ? 'bi-chevron-down' : 'bi-chevron-right'"></i></td>
             <td>
-              <router-link :to="`/plans/${p.plan_id}`" class="fw-semibold text-decoration-none" @click.stop>{{ p.name }}</router-link>
+              <span class="fw-semibold">{{ p.name }}</span>
               <span class="text-secondary small ms-2">{{ p.plan_id }}</span>
             </td>
             <td class="text-secondary small">{{ p.stage_count }} 阶段 / {{ p.task_count }} 任务</td>
