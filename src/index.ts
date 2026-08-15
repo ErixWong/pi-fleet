@@ -42,7 +42,12 @@ async function main(): Promise<void> {
   ];
   const webDist = webDistCandidates.find((p) => existsSync(p));
   if (webDist) {
-    app.use(express.static(webDist));
+    // 静态托管：index.html 不缓存（bundle 带 hash），避免浏览器缓存旧版前端导致 UI 显示过期
+    app.use(express.static(webDist, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+      },
+    }));
     app.use((req, res, next) => {
       if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/mcp')) {
         res.sendFile(path.join(webDist, 'index.html'));
@@ -56,11 +61,15 @@ async function main(): Promise<void> {
   app.use('/api/agent', agentRouter);
   app.use(mcpRouter);
 
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     console.log(`✓ 平台已启动: http://127.0.0.1:${config.port}`);
     console.log(`  API 端点:   http://127.0.0.1:${config.port}/api`);
     console.log(`  MCP 端点:   http://127.0.0.1:${config.port}/mcp`);
   });
+
+  // 对话实时通道（agent 桥接器 WS：/api/agent/chat-stream）
+  const { mountChatWs } = await import('./ws-server.js');
+  mountChatWs(server);
 
   // 生命周期回收（§10.2）：每小时清理——running 超时→failed；公共池 claimed 超时→回池；pending_confirm 超 7 天→自动确认
   const RECOVER_INTERVAL_MS = 60 * 60 * 1000;

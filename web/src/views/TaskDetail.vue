@@ -4,6 +4,8 @@ import { useRoute } from 'vue-router';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
 import { renderMd, renderMdWithAttachments } from '../md';
+import Pagination from '../components/Pagination.vue';
+import ChatPanel from '../components/ChatPanel.vue';
 
 const route = useRoute();
 const task = ref(null);
@@ -12,13 +14,45 @@ const messages = ref([]);
 const deliverables = ref({ spec: [], versions: [] });
 const replyText = ref('');
 const error = ref('');
+const msgPage = ref(1);
+const messagesTotal = ref(0);
+
+// 与执行 agent 对话（任务详情内嵌面板）
+const chatOpen = ref(false);
+const activeTask = computed(() =>
+  task.value
+    ? {
+        agent_id: task.value.assignee_id,
+        agent_name: task.value.assignee_name || task.value.assignee,
+        task_id: task.value.task_id,
+        task_title: task.value.title,
+      }
+    : null,
+);
+function toggleChat() {
+  chatOpen.value = !chatOpen.value;
+}
+
+/** 重开任务（终态 → open/active，恢复交流通道以便补充信息） */
+async function reopenTask() {
+  if (!confirm('重开任务将回到可交流状态（open/active），执行 agent 可继续回复补充信息。确认重开？')) return;
+  try {
+    await api.taskReopen(task.value.task_id);
+    error.value = '';
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
 
 async function load() {
-  const data = await api.task(route.params.taskId);
+  const data = await api.task(route.params.taskId, { messages_page: msgPage.value, messages_page_size: 10 });
   task.value = data.task;
   reports.value = data.reports || [];
-  messages.value = data.messages || [];
+  // 消息接口按倒序分页（最新在前），反转成正序供帖子流渲染（最新在底部）
+  messages.value = [...(data.messages || [])].reverse();
   deliverables.value = data.deliverables || { spec: [], versions: [] };
+  messagesTotal.value = data.messages_total ?? 0;
 }
 
 onMounted(load);
@@ -84,11 +118,21 @@ onBeforeUnmount(() => previewModal?.dispose());
 /** 帖子流：首帖=任务要求，随后消息+报告按时间正序合并（论坛式） */
 const posts = computed(() => {
   if (!task.value) return [];
+  /** 回帖发送者显示：区分 平台(LLM 审核/验收) / 管理员 / 系统 / 主机 agent(名 + 主机) */
+  const senderLabel = (m) => {
+    if (m.sender_role === 'platform') return '平台';
+    if (m.sender_role === 'admin') return '管理员';
+    if (m.sender_role === 'system') return '系统';
+    const name = m.sender_name || m.agent_id || 'agent';
+    return m.sender_hostname ? `${name} · ${m.sender_hostname}` : name;
+  };
+  const senderKind = (m) => (['platform', 'admin', 'system', 'agent'].includes(m.sender_role) ? m.sender_role : 'agent');
   const list = [
     {
       id: 'brief',
       type: 'brief',
       sender: task.value.creator_name || '管理员',
+      senderKind: 'admin',
       time: task.value.created_at,
       content: task.value.instruction,
     },
@@ -98,7 +142,8 @@ const posts = computed(() => {
       .map((m) => ({
         id: `m${m.id}`,
         type: 'message',
-        sender: m.sender_role === 'admin' ? '管理员' : m.sender_role === 'system' ? '系统' : m.sender_name || 'agent',
+        sender: senderLabel(m),
+        senderKind: senderKind(m),
         role: m.sender_role,
         time: m.created_at,
         content: m.content,
@@ -107,7 +152,9 @@ const posts = computed(() => {
     ...reports.value.map((r) => ({
       id: `r${r.created_at}`,
       type: 'report',
-      sender: r.agent_id || 'agent',
+      sender: senderLabel(r),
+      senderKind: 'agent',
+
       time: r.created_at,
       content: r.content,
     })),
@@ -205,8 +252,15 @@ function scanBadge(s) {
 </script>
 
 <template>
-  <router-link to="/tasks" class="btn btn-sm btn-outline-secondary mb-3"><i class="bi bi-arrow-left me-1"></i>任务列表</router-link>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <router-link to="/tasks" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>任务列表</router-link>
+    <button v-if="task?.assignee_id" class="btn btn-sm" :class="chatOpen ? 'btn-primary' : 'btn-outline-primary'" @click="toggleChat">
+      <i class="bi bi-chat-dots me-1"></i>{{ chatOpen ? '收起对话' : '与 agent 对话' }}
+    </button>
+  </div>
   <div v-if="task">
+  <div class="row g-3">
+    <div :class="chatOpen ? 'col-8' : 'col-12'">
     <!-- 任务头部：信息横排 -->
     <div class="card mb-3">
       <div class="card-body">
@@ -244,20 +298,26 @@ function scanBadge(s) {
         <div class="card-body py-2">
           <div class="d-flex align-items-center gap-2 mb-1">
             <span class="d-inline-flex align-items-center justify-content-center post-ic"
-              :class="p.type === 'brief' ? 'sender-brief-bg' : p.type === 'report' ? 'sender-report-bg' : 'sender-note-bg'">
+              :class="p.senderKind === 'platform' ? 'sender-platform-bg' : p.senderKind === 'agent' ? 'sender-agent-bg' : (p.type === 'brief' ? 'sender-brief-bg' : p.type === 'report' ? 'sender-report-bg' : 'sender-note-bg')">
               <i class="bi" :class="postIcon(p.type)" style="font-size:0.85rem"></i>
             </span>
-            <span class="sender" :class="p.type === 'brief' ? 'sender-brief' : p.type === 'report' ? 'sender-report' : 'sender-note'">
+            <span class="sender" :class="p.senderKind === 'platform' ? 'sender-platform' : p.senderKind === 'agent' ? 'sender-agent' : (p.type === 'brief' ? 'sender-brief' : p.type === 'report' ? 'sender-report' : 'sender-note')">
               {{ p.sender }}
             </span>
             <span class="badge" :class="p.type === 'brief' ? 'text-bg-primary' : p.type === 'report' ? 'text-bg-success' : 'text-bg-info'" style="font-size:0.65rem">
               {{ p.type === 'brief' ? '任务要求' : p.type === 'report' ? '报告' : '回复' }}
             </span>
+            <span v-if="p.senderKind === 'platform'" class="badge text-bg-secondary" style="font-size:0.65rem">平台</span>
+            <span v-if="p.senderKind === 'agent' && p.type !== 'report'" class="badge text-bg-success" style="font-size:0.65rem">主机 agent</span>
             <span class="time ms-auto">{{ p.time }}</span>
           </div>
           <div class="md-content mb-0" v-html="p.type === 'brief' ? renderMd(p.content) : renderMdWithAttachments(p.content, attMap)"></div>
         </div>
       </div>
+    </div>
+
+    <div class="mt-2 mb-3">
+      <Pagination :total="messagesTotal" v-model:page="msgPage" :page-size="10" @change="load" />
     </div>
 
     <!-- 交付物：约定 + 版本 -->
@@ -361,12 +421,20 @@ function scanBadge(s) {
         </div>
       </div>
     </div>
-    <div v-else class="text-secondary small mb-2">
-      任务已 {{ task.status }}，会话已关闭。
+    <div v-else class="mb-2">
+      <div class="text-secondary small mb-1">任务已 {{ task.status }}，会话已关闭。</div>
       <div v-if="task.result" class="mt-2">
         <div class="fw-semibold text-secondary mb-1">最终结论</div>
         <div class="card"><div class="card-body md-content" v-html="renderMd(task.result)"></div></div>
       </div>
+      <button v-if="['done','cancelled','failed','resolved'].includes(task.status)" class="btn btn-sm btn-outline-warning mt-2" @click="reopenTask">
+        <i class="bi bi-arrow-counterclockwise me-1"></i>重开任务（补充信息）
+      </button>
     </div>
+    </div>
+  <div v-if="chatOpen && task?.assignee_id" class="col-4">
+    <ChatPanel :task="activeTask" @close="toggleChat" />
+  </div>
+  </div>
   </div>
 </template>

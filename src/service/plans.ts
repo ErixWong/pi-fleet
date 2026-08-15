@@ -163,13 +163,13 @@ export async function createPlan(
         }
         // 首条消息 = 请求（creator 视角；管理员创建 role=admin）
         await conn.query(
-          `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, ?, 'chat', ?)`,
+          `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, ?, 'chat', ?)`,
           [taskDbId, creatorAgentId, creatorAgentId === null ? 'admin' : 'agent', t.instruction.trim()],
         );
         // 降级标记：非周期或周期 public 首实例（private 周期跳过门禁，无标记）
         if (!llmOn && status !== 'blocked' && (recurrence === 'none' || visibility === 'public')) {
           await conn.query(
-            `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+            `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
             [taskDbId, '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
           );
         }
@@ -288,12 +288,13 @@ export async function planTree(planId: string): Promise<{ ok: boolean; plan?: Pl
 }
 
 /** 全部 plan 列表（管理端） */
-export async function listPlans(): Promise<Array<Record<string, unknown>>> {
+export async function listPlans(pageSize = 100, offset = 0): Promise<Array<Record<string, unknown>>> {
   return query(
     `SELECT p.plan_id, p.name, p.recurrence, p.status, p.next_due_at, p.created_at,
             (SELECT COUNT(*) FROM plan_stages s WHERE s.plan_id = p.id) AS stage_count,
             (SELECT COUNT(*) FROM plan_stages s JOIN tasks t ON t.stage_id = s.id WHERE s.plan_id = p.id) AS task_count
-       FROM plans p ORDER BY p.id DESC LIMIT 100`,
+       FROM plans p ORDER BY p.id DESC LIMIT ? OFFSET ?`,
+    [pageSize, offset],
   );
 }
 
@@ -339,7 +340,7 @@ export async function runStageGates(): Promise<number> {
         const target = resolvePublishStatus(llmOn, bt.assignee_id !== null);
         await query(`UPDATE tasks SET status = ? WHERE id = ? AND status = 'blocked'`, [target, bt.id]);
         await query(
-          `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
+          `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
           [bt.id, `[闸门放行] 前序 stage 完成，本任务放行${skipNote}`],
         );
         released++;
@@ -399,7 +400,7 @@ export async function runPeriodicClones(): Promise<number> {
     const srcStatus = String(src.status);
     if (!['done', 'cancelled', 'failed'].includes(srcStatus)) {
       await query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
         [src.id, `[周期] 本轮 ${String(p.name)} 到点但上一实例未终结（${srcStatus}），跳过本轮（防堆积）`],
       );
       continue;
@@ -435,18 +436,18 @@ export async function runPeriodicClones(): Promise<number> {
     // 首条消息 = 请求（对齐 createTask 形态，P0-1：manual 拾取分支依赖首条消息 sender ≠ 执行方）
     const creatorId = src.creator_id === null ? null : Number(src.creator_id);
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, ?, 'chat', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, ?, 'chat', ?)`,
       [newTaskId, creatorId, creatorId === null ? 'admin' : 'agent', String(src.instruction)],
     );
     // 继承标记回帖
     if (isPublic && !needReaudit && src.content_hash) {
       await query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [newTaskId, '[周期] 定义字段未变更，继承前序实例审核结论（继承审核）'],
       );
     } else if (isPublic && status === 'active' && !llmOn) {
       await query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [newTaskId, '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）'],
       );
     }

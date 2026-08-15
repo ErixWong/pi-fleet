@@ -2,24 +2,30 @@
 import { onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '../api';
+import Pagination from '../components/Pagination.vue';
 
 const route = useRoute();
 const agent = ref(null);
 const tasks = ref([]);
 const newKey = ref(null); // 重置后的新 key（一次性展示）
 const error = ref('');
+const page = ref(1);
+const total = ref(0);
+const offlineMin = ref(30);
 
-onMounted(async () => {
-  const data = await api.agent(route.params.id);
+async function loadTasks() {
+  const data = await api.agent(route.params.id, { page: page.value, page_size: 10 });
   agent.value = data.agent;
   tasks.value = data.tasks;
-});
+  total.value = data.total ?? 0;
+  offlineMin.value = data.offline_after_min ?? 30;
+}
+
+onMounted(loadTasks);
 
 async function toggle() {
   await api.toggleAgent(agent.value.id);
-  const data = await api.agent(agent.value.id);
-  agent.value = data.agent;
-  tasks.value = data.tasks;
+  await loadTasks();
 }
 
 async function resetKey() {
@@ -84,7 +90,9 @@ function badge(status) {
                     <span class="text-secondary small ms-1">内外分离：接外单的主机应为隔离环境</span>
                   </td></tr>
                 <tr><th class="text-secondary">状态</th>
-                  <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span></td></tr>
+                  <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span>
+                    <span v-if="agent.offline" class="badge text-bg-danger ms-1" title="超过 {{ offlineMin }} 分钟无心跳（最近活跃：{{ agent.last_seen_at || '从未连接' }}）">失联</span>
+                  </td></tr>
                 <tr><th class="text-secondary">最近活跃</th><td>{{ agent.last_seen_at || '从未连接' }}</td></tr>
                 <tr><th class="text-secondary">创建时间</th><td>{{ agent.created_at }}</td></tr>
               </tbody>
@@ -120,5 +128,9 @@ function badge(status) {
         </tr>
       </tbody>
     </table>
+
+  <div class="mt-2">
+    <Pagination :total="total" v-model:page="page" :page-size="10" @change="loadTasks" />
+  </div>
   </div>
 </template>

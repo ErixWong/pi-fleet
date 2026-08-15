@@ -327,10 +327,12 @@ try {
   const auditDetail = await task(clientB, 'detail', { task_id: pendingTask.task_id });
   check('降级后任务进入公共池（active）', auditDetail.task.status === 'active', JSON.stringify(auditDetail.task));
   check('降级标记回帖（未经 LLM 审核）', auditDetail.messages?.some((m) => m.type === 'verdict' && m.content.includes('未经 LLM 审核')), JSON.stringify(auditDetail.messages));
-  // 提示词修改留痕
+  // 提示词修改留痕（记录旧值，测完还原，避免污染真实环境的审核口径）
+  const prevAudit = (await api('GET', '/api/settings')).settings.prompt_audit;
   await api('PUT', '/api/settings', { prompt_audit: '自定义审核提示词测试' });
   const hist = await api('GET', '/api/settings/history');
   check('提示词修改留痕（改人/前值/新值）', hist.history.some((h) => h.k === 'prompt_audit' && h.changed_by === 'admin' && h.old_v && h.new_v === '自定义审核提示词测试'), JSON.stringify(hist.history));
+  if (prevAudit) await api('PUT', '/api/settings', { prompt_audit: prevAudit });
 
   // 8. provider → 多 model / 多模态 / 价格标记 / 调用日志（§3.4 扩展）
   console.log('== 8. provider 对应多模型 + 多模态 + 价格 ==');
@@ -371,15 +373,15 @@ try {
   check('调用日志：识图标记', visionCall?.vision === 1, JSON.stringify(visionCall));
   check('调用日志：provider 归因（冗余记录）', visionCall?.provider_id === 'fake', JSON.stringify(visionCall));
 
-  // 8.3 清理模型 + provider，还原环境（未配置环境，后续用例不受影响）
+  // 8.3 清理模型 + provider，还原环境（真实环境可能有管理员配置的 LLM provider，只断言测试数据已清理）
   await api('DELETE', '/api/settings/llm-models/cheap', {}, undefined);
   await api('DELETE', '/api/settings/llm-models/vision', {}, undefined);
   await api('DELETE', '/api/settings/llm-models/fake-model', {}, undefined);
   await api('DELETE', '/api/settings/llm-providers/fake', {}, undefined);
   const after = await api('GET', '/api/settings/llm-models');
-  check('模型删除后列表为空', after.models.length === 0, JSON.stringify(after.models));
+  check('测试模型已清理（cheap/vision/fake-model 不存在）', !after.models.some((m) => ['cheap', 'vision', 'fake-model'].includes(m.id)), JSON.stringify(after.models.map((m) => m.id)));
   const afterP = await api('GET', '/api/settings/llm-providers');
-  check('provider 删除后列表为空', afterP.providers.length === 0, JSON.stringify(afterP.providers));
+  check('测试 provider 已清理（fake 不存在）', !afterP.providers.some((p) => p.id === 'fake'), JSON.stringify(afterP.providers.map((p) => p.id)));
 
   // 9. 编排：plan / stage / task 三层 + 闸门 + 周期克隆（orchestration.md）
   console.log('== 9. 编排（plan / stage / 闸门 / 周期克隆） ==');

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { currentAgent, mcpAuthMiddleware } from '../auth.js';
+import { query } from '../db.js';
 import {
   claimDueTasks,
   postMessageToTask,
@@ -8,6 +9,7 @@ import {
   updateTaskWorkdir,
   type SubmitStatus,
 } from '../service/tasks.js';
+import { addChatMessage, chatCheck, getConversation, getTaskContext, listChatMessages } from '../service/chat.js';
 import { claimTask, listPoolTasks } from '../service/market.js';
 import {
   attachmentAbsPath,
@@ -39,6 +41,70 @@ function getAgent() {
 agentRouter.post('/heartbeat', async (_req, res) => {
   const agent = getAgent();
   res.json({ ok: true, agent_id: agent.agentId, server_time: nowString() });
+});
+
+// ─────────────────────────── 独立对话通道（chat bridge / 兜底轮询） ───────────────────────────
+/** 对话回合检测（零副作用，供 WS 断线兜底/chat-check 轮询） */
+agentRouter.post('/chat-check', async (_req, res) => {
+  const agent = getAgent();
+  const conversations = await chatCheck(agent.id);
+  res.json({ conversations });
+});
+
+/** 拉对话历史 + 任务上下文（pi 上下文重建；归属校验） */
+agentRouter.post('/chat-messages', async (req, res) => {
+  const agent = getAgent();
+  const convId = String((req.body ?? {}).conversation_id ?? '');
+  const conv = await getConversation(convId, agent.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const r = await listChatMessages(convId, 1, 100);
+  const task = conv.task_id ? await getTaskContext(conv.task_id) : null;
+  res.json({ conversation: conv, messages: r.items, task });
+});
+
+/** agent 回复落库（非流式路径；流式走 WS conv_stream*） */
+agentRouter.post('/chat-reply', async (req, res) => {
+  const agent = getAgent();
+  const convId = String((req.body ?? {}).conversation_id ?? '');
+  const content = String((req.body ?? {}).content ?? '').trim();
+  if (!content) {
+    res.status(400).json({ error: '内容为空' });
+    return;
+  }
+  const conv = await getConversation(convId, agent.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const message = await addChatMessage(convId, 'agent', content);
+  res.json({ ok: true, message });
+});
+
+/**
+ * 对话回合检测（零副作用，供 agent 侧常驻监听器 1-2s 高频轮询，零 token）：
+ * 只读查询“我参与、未终结、最后一条消息是管理员发的”任务 → 管理员刚点名，轮到我回话。
+ * 判定用 sender_role='admin'：管理员消息 sender_id 为 NULL（不能按 sender_id 比较）；
+ * platform 回帖（审核/闸门）不触发对话。与 poll 不同：chat-check 零副作用，可高频调用。
+ */
+agentRouter.post('/chat-check', async (_req, res) => {
+  const agent = getAgent();
+  const rows = await query(
+    `SELECT t.task_id, t.title, t.status, t.workdir
+       FROM tasks t
+       LEFT JOIN (
+         SELECT task_id, sender_role FROM task_messages m1
+          WHERE m1.id = (SELECT MAX(m2.id) FROM task_messages m2 WHERE m2.task_id = m1.task_id)
+       ) lm ON lm.task_id = t.id
+      WHERE (t.assignee_id = ? OR t.creator_id = ?)
+        AND t.status NOT IN ('done','failed','cancelled','resolved','rejected')
+        AND lm.sender_role = 'admin'
+      ORDER BY t.id DESC LIMIT 5`,
+    [agent.id, agent.id],
+  );
+  res.json({ tasks: rows });
 });
 
 agentRouter.post('/info', async (_req, res) => {

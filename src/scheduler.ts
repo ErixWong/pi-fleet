@@ -132,7 +132,7 @@ export async function recoverStaleClaimedTasks(timeoutHours = 2): Promise<number
   for (const r of rows) {
     const rr = r as Record<string, unknown>;
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, NULL, 'platform', 'system', ?)`,
       [rr.id, `[平台] 认领超时无活动，任务回到公共池重新可认领（不计交付尝试次数）`],
     );
@@ -160,7 +160,7 @@ export async function autoConfirmPendingConfirm(days = 7): Promise<number> {
   );
   for (const r of rows) {
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, NULL, 'platform', 'system', ?)`,
       [(r as Record<string, unknown>).id, `[平台] 待发起人确认超过 ${days} 天，自动确认通过`],
     );

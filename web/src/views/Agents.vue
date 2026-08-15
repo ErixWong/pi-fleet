@@ -2,19 +2,27 @@
 import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
+import Pagination from '../components/Pagination.vue';
 
 const agents = ref([]);
 const error = ref('');
+const page = ref(1);
+const total = ref(0);
+const offlineMin = ref(30);
 const newKey = ref(null); // 注册成功后的 key（仅内存，刷新即失 = 只展示一次）
 const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false });
 
 let modal = null;
 const modalEl = ref(null);
 
-onMounted(async () => {
-  const data = await api.agents();
+async function load() {
+  const data = await api.agents(page.value, 10);
   agents.value = data.agents;
-});
+  total.value = data.total ?? 0;
+  offlineMin.value = data.offline_after_min ?? 30;
+}
+
+onMounted(load);
 
 function open() {
   error.value = '';
@@ -30,8 +38,7 @@ async function submit() {
     form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false };
     newKey.value = { name: data.agent.name, key: data.key };
     window.scrollTo(0, 0);
-    const refreshed = await api.agents();
-    agents.value = refreshed.agents;
+    await load();
   } catch (e) {
     error.value = e.message;
   }
@@ -39,14 +46,12 @@ async function submit() {
 
 async function toggle(a) {
   await api.toggleAgent(a.id);
-  const data = await api.agents();
-  agents.value = data.agents;
+  await load();
 }
 
 async function toggleAccept(a) {
   await api.toggleAgentAccept(a.id);
-  const data = await api.agents();
-  agents.value = data.agents;
+  await load();
 }
 
 onBeforeUnmount(() => modal?.dispose());
@@ -87,7 +92,9 @@ onBeforeUnmount(() => modal?.dispose());
             {{ a.accept_external ? '开' : '关' }}
           </span>
         </td>
-        <td><span class="badge" :class="a.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ a.status }}</span></td>
+        <td><span class="badge" :class="a.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ a.status }}</span>
+          <span v-if="a.offline" class="badge text-bg-danger ms-1" title="超过 {{ offlineMin }} 分钟无心跳（最近活跃：{{ a.last_seen_at || '从未连接' }}）">失联</span>
+        </td>
         <td class="text-secondary small">{{ a.last_seen_at || '—' }}</td>
         <td>
           <button class="btn btn-sm btn-outline-secondary" @click="toggle(a)">
@@ -97,6 +104,10 @@ onBeforeUnmount(() => modal?.dispose());
       </tr>
     </tbody>
   </table>
+
+  <div class="mt-2">
+    <Pagination :total="total" v-model:page="page" :page-size="10" @change="load" />
+  </div>
 
   <!-- 注册 modal -->
   <div ref="modalEl" class="modal fade" tabindex="-1">

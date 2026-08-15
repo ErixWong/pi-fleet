@@ -28,6 +28,7 @@ export interface LlmModel {
   model: string; // 请求体 model 字段
   name: string;
   vision: boolean;
+  temperature: number | null; // 采样温度；null = 平台默认 1
   price: string;
   note: string;
   enabled: boolean;
@@ -83,7 +84,7 @@ function toProvider(r: Record<string, unknown>): LlmProvider {
 }
 
 /** 新增/更新 provider（api_key 空串或 '******' = 不改，保留原值） */
-export async function upsertProvider(p: Omit<LlmProvider, 'enabled'> & { enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+export async function upsertProvider(p: Omit<LlmProvider, 'enabled'> & { enabled?: boolean }): Promise<{ ok: boolean; error?: string; id?: string }> {
   let id = (p.id ?? '').trim();
   if (!id) id = `p-${randomBytes(4).toString('hex')}`;
   else if (!/^[a-zA-Z0-9_-]{1,32}$/.test(id)) return { ok: false, error: 'provider id 须为字母数字下划线（≤32）' };
@@ -98,7 +99,7 @@ export async function upsertProvider(p: Omit<LlmProvider, 'enabled'> & { enabled
        note=VALUES(note), enabled=VALUES(enabled)`,
     [id, p.name.trim(), p.base_url.trim(), key, (p.note ?? '').trim(), p.enabled === false ? 0 : 1],
   );
-  return { ok: true };
+  return { ok: true, id };
 }
 
 /** 删除 provider（其下仍有模型时拒绝，避免孤儿模型） */
@@ -113,7 +114,7 @@ export async function deleteProvider(id: string): Promise<{ ok: boolean; error?:
 // ─────────────────────────── 模型管理 ───────────────────────────
 
 const MODEL_JOIN = `
-  SELECT m.id, m.provider_id, m.name, m.model, m.vision, m.price, m.note, m.enabled,
+  SELECT m.id, m.provider_id, m.name, m.model, m.vision, m.temperature, m.price, m.note, m.enabled,
          p.base_url, p.api_key, p.name AS provider_name, p.enabled AS provider_enabled
     FROM llm_models m
     LEFT JOIN llm_providers p ON p.id = m.provider_id`;
@@ -158,6 +159,7 @@ function toModel(r: Record<string, unknown>): LlmModel {
     model: String(r.model),
     name: String(r.name),
     vision: Number(r.vision) === 1,
+    temperature: r.temperature === null || r.temperature === undefined ? null : Number(r.temperature),
     price: String(r.price ?? ''),
     note: String(r.note ?? ''),
     enabled: Number(r.enabled) !== 0,
@@ -220,12 +222,15 @@ export async function upsertModel(m: Omit<LlmModel, 'enabled'> & { enabled?: boo
   if (!pid) return { ok: false, error: '请选择所属 provider' };
   const prov = await getProviderById(pid);
   if (!prov) return { ok: false, error: `provider「${pid}」不存在` };
+  // temperature：空/NaN → NULL（平台默认 1）；否则收窄到 [0,2]
+  const tempRaw = Number(m.temperature);
+  const temperature = Number.isFinite(tempRaw) && m.temperature !== null && String(m.temperature).trim() !== '' ? Math.min(2, Math.max(0, tempRaw)) : null;
   await query(
-    `INSERT INTO llm_models (id, provider_id, name, model, vision, price, note, enabled)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO llm_models (id, provider_id, name, model, vision, temperature, price, note, enabled)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE provider_id=VALUES(provider_id), name=VALUES(name), model=VALUES(model),
-       vision=VALUES(vision), price=VALUES(price), note=VALUES(note), enabled=VALUES(enabled)`,
-    [id, pid, m.name.trim(), m.model.trim(), m.vision ? 1 : 0, (m.price ?? '').trim(), (m.note ?? '').trim(),
+       vision=VALUES(vision), temperature=VALUES(temperature), price=VALUES(price), note=VALUES(note), enabled=VALUES(enabled)`,
+    [id, pid, m.name.trim(), m.model.trim(), m.vision ? 1 : 0, temperature, (m.price ?? '').trim(), (m.note ?? '').trim(),
      m.enabled === false ? 0 : 1],
   );
   return { ok: true };
@@ -275,10 +280,15 @@ export async function chatCompletion(
   const body: Record<string, unknown> = {
     model: model.model,
     messages,
-    temperature: 0.2,
+    // 温度：模型级可配（llm_models.temperature），未设用 1——部分中转/模型（如 kimi）仅允许 temperature=1
+    temperature: model.temperature ?? 1,
     max_tokens: 1024,
   };
-  if (opts.json) body.response_format = { type: 'json_object' };
+  // 不传 response_format：部分中转要求 prompt 必须含小写 "json" 字样才放行 json_object，否则 400；
+  // 平台已用提示词约束“输出 json”，extractJson 容错解析，去掉它兼容面最大
+  if (opts.json) {
+    // 依赖提示词约束输出 json（审核/验收 prompt 均含“输出 json”），extractJson 容错解析
+  }
   const timeoutMs = getSettingInt('llm_timeout_ms', 60_000);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -429,7 +439,7 @@ async function finalizeAudit(t: Record<string, unknown>, passed: boolean, reason
     await query(`UPDATE tasks SET status = 'rejected' WHERE id = ? AND status = 'pending_audit'`, [id]);
   }
   await query(
-    `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+    `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
     [id, passed ? `[LLM 审核通过] ${reason}` : `[LLM 审核未通过] ${reason}（请用 task(revise) 修订后重新提交审核）`],
   );
 }
@@ -566,7 +576,7 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
   if (passed) {
     await query(`UPDATE tasks SET status = 'pending_confirm' WHERE id = ? AND status = 'submitted'`, [id]);
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `[LLM 验收通过] ${reason}`],
     );
     return;
@@ -577,13 +587,13 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
   if (attempts >= maxAttempts) {
     await query(`UPDATE tasks SET status='failed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
     );
   } else {
     await query(`UPDATE tasks SET status='claimed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
     );
   }
@@ -609,7 +619,7 @@ export async function testLlmConnection(
     if (opts.model?.trim()) {
       view = {
         id: '(adhoc)', provider_id: prov.id, model: opts.model.trim(), name: prov.name,
-        vision: false, price: '', note: '', enabled: true,
+        vision: false, temperature: null, price: '', note: '', enabled: true,
         base_url: prov.base_url, api_key: prov.api_key, provider_name: prov.name, provider_enabled: prov.enabled,
       };
     } else {
@@ -628,13 +638,18 @@ export async function testLlmConnection(
   }
 }
 
-/** 调用日志（最近 N 条，JOIN provider 名） */
-export async function listLlmCalls(limit = 50): Promise<Array<Record<string, unknown>>> {
-  return query(
+/** 调用日志（分页，JOIN provider 名） */
+export async function listLlmCalls(page = 1, pageSize = 10): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  const pageNum = Math.max(1, Math.floor(page));
+  const size = Math.min(100, Math.max(1, Math.floor(pageSize)));
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM llm_calls`)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const items = (await query(
     `SELECT c.*, p.name AS provider_name
        FROM llm_calls c
        LEFT JOIN llm_providers p ON p.id = c.provider_id
-      ORDER BY c.id DESC LIMIT ?`,
-    [limit],
-  );
+      ORDER BY c.id DESC LIMIT ? OFFSET ?`,
+    [size, (pageNum - 1) * size],
+  )) as Array<Record<string, unknown>>;
+  return { items, total };
 }

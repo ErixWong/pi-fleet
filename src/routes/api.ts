@@ -5,7 +5,7 @@ import { query, withTransaction } from '../db.js';
 import { generateApiKey, hashApiKey, requireAdmin, verifyPassword } from '../auth.js';
 import { computeNextDue, nowString, toLocalString } from '../scheduler.js';
 import { attachmentAbsPath, attachmentViewById, cleanupOrphanAttachments } from '../service/attachments.js';
-import { getSettingsHistory, settingsView, updateSettings } from '../service/settings.js';
+import { getSettingInt, getSettingsHistory, settingsView, updateSettings } from '../service/settings.js';
 import {
   deleteModel,
   deleteProvider,
@@ -19,11 +19,37 @@ import {
   upsertProvider,
 } from '../service/llm.js';
 import { createPlan, listPlans, planTree, runPeriodicClones, runStageGates } from '../service/plans.js';
+import {
+  addChatMessage,
+  archiveConversation,
+  chatMessagesSince,
+  getConversation,
+  getOrCreateConversation,
+  getTaskContext,
+  listChatMessages,
+  listConversations,
+} from '../service/chat.js';
+import { chatHub } from '../ws-server.js';
 import { sendAttachmentFile } from './attach-shared.js';
 
 export const apiRouter = Router();
 // JSON body parser 只作用于 /api（MCP 端点不走这里，保留原始流给 transport）
 apiRouter.use(express.json());
+
+/** 解析分页参数（?page=1&page_size=20） */
+function pageParams(q: Record<string, unknown>): { page: number; pageSize: number; offset: number } {
+  const page = Math.max(1, Math.floor(Number(q.page ?? 1)) || 1);
+  const pageSize = Math.min(200, Math.max(1, Math.floor(Number(q.page_size ?? 10)) || 10));
+  return { page, pageSize, offset: (page - 1) * pageSize };
+}
+
+/** 主机失联判定：从未心跳或超过 agent_offline_after_min 分钟未心跳 → offline（只读标记，不自动禁用） */
+function agentOffline(lastSeen: unknown, offlineAfterMin: number): boolean {
+  if (!lastSeen) return true;
+  const seen = new Date(lastSeen as string | Date).getTime();
+  if (!Number.isFinite(seen)) return true;
+  return Date.now() - seen > offlineAfterMin * 60 * 1000;
+}
 
 // ─────────────────────────── 鉴权辅助 ───────────────────────────
 function isAdmin(req: Request): boolean {
@@ -65,7 +91,8 @@ apiRouter.get('/me', (req, res) => {
 
 // ─────────────────────────── 仪表盘 ───────────────────────────
 apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
-  const [agents, tasks, recentReports] = await Promise.all([
+  const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
+  const [agents, tasks, recentReports, activeAgents] = await Promise.all([
     query(`SELECT status, COUNT(*) AS cnt FROM agents GROUP BY status`),
     query(`SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status`),
     query(
@@ -75,21 +102,30 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
          LEFT JOIN tasks t ON t.id = r.task_id
         ORDER BY r.created_at DESC LIMIT 5`,
     ),
+    query(`SELECT id, last_seen_at FROM agents WHERE status = 'active'`),
   ]);
+  const offline = (activeAgents as Array<Record<string, unknown>>).filter((a) => agentOffline(a.last_seen_at, offlineAfterMin)).length;
   res.json({
-    agents: Object.fromEntries(agents.map((r) => [r.status, Number(r.cnt)])),
+    agents: { ...Object.fromEntries(agents.map((r) => [r.status, Number(r.cnt)])), offline },
     tasks: Object.fromEntries(tasks.map((r) => [r.status, Number(r.cnt)])),
     recentReports,
+    offline_after_min: offlineAfterMin,
   });
 });
 
 // ─────────────────────────── Agent ───────────────────────────
-apiRouter.get('/agents', requireAdminJson, async (_req, res) => {
-  const agents = await query(
+apiRouter.get('/agents', requireAdminJson, async (req, res) => {
+  const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
+  const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM agents`)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const agents = (await query(
     `SELECT id, agent_id, name, hostname, description, tags, accept_external, status, last_seen_at, created_at
-       FROM agents ORDER BY created_at DESC`,
-  );
-  res.json({ agents });
+       FROM agents ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [pageSize, offset],
+  )) as Array<Record<string, unknown>>;
+  const list = agents.map((a) => ({ ...a, offline: agentOffline(a.last_seen_at, offlineAfterMin) }));
+  res.json({ agents: list, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
 apiRouter.post('/agents', requireAdminJson, async (req, res) => {
@@ -152,12 +188,17 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
     return;
   }
   const agent = rows[0] as Record<string, unknown>;
+  const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
+  agent.offline = agentOffline(agent.last_seen_at, offlineAfterMin);
+  const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks WHERE assignee_id = ?`, [id])) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
   const tasks = await query(
     `SELECT task_id, title, kind, status, next_due_at, result_status
-       FROM tasks WHERE assignee_id = ? ORDER BY created_at DESC LIMIT 20`,
-    [id],
+       FROM tasks WHERE assignee_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [id, pageSize, offset],
   );
-  res.json({ agent, tasks });
+  res.json({ agent, tasks, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
 apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
@@ -212,28 +253,32 @@ function nextTaskId(): string {
 
 apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
   const { kind, status } = req.query as { kind?: string; status?: string };
+  const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const params: unknown[] = [];
-  let sql = `
-    SELECT t.task_id, t.title, t.kind, t.visibility, t.status, t.schedule_cron, t.next_due_at,
-           t.result_status, t.result_at, t.created_at, t.workdir, t.deliver_attempts, t.max_attempts,
-           a.agent_id AS assignee, a.name AS assignee_name
-      FROM tasks t
-      LEFT JOIN agents a ON a.id = t.assignee_id
-     WHERE 1=1`;
+  let where = ' WHERE 1=1';
   if (kind) {
-    sql += ' AND t.kind = ?';
+    where += ' AND t.kind = ?';
     params.push(kind);
   }
   if (status) {
-    sql += ' AND t.status = ?';
+    where += ' AND t.status = ?';
     params.push(status);
   }
-  sql += ' ORDER BY t.created_at DESC LIMIT 200';
-  const tasks = await query(sql, params);
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks t${where}`, params)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const sql = `
+    SELECT t.task_id, t.title, t.kind, t.visibility, t.status, t.schedule_cron, t.next_due_at,
+           t.result_status, t.result_at, t.created_at, t.workdir, t.deliver_attempts, t.max_attempts,
+           a.id AS assignee_id, a.agent_id AS assignee, a.name AS assignee_name
+      FROM tasks t
+      LEFT JOIN agents a ON a.id = t.assignee_id
+      ${where}
+     ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
+  const tasks = await query(sql, [...params, pageSize, offset]);
   const agents = await query(
     `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' ORDER BY name`,
   );
-  res.json({ tasks, agents });
+  res.json({ tasks, agents, total, page, page_size: pageSize });
 });
 
 apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
@@ -309,12 +354,12 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
           [taskId, title, instruction, visibility, assigneeId, status, workdir, deliverableSpec],
         );
         await conn.query(
-          `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`,
+          `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`,
           [Number((ins as unknown as { insertId: unknown }).insertId), instruction],
         );
         if (!llmOn) {
           await conn.query(
-            `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+            `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
             [Number((ins as unknown as { insertId: unknown }).insertId), '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
           );
         }
@@ -345,22 +390,26 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
   }
   const task = rows[0] as Record<string, unknown>;
   const reports = await query(
-    `SELECT r.content, r.created_at, a.agent_id
+    `SELECT r.content, r.created_at, a.agent_id, a.name AS sender_name, a.hostname AS sender_hostname
        FROM reports r LEFT JOIN agents a ON a.id = r.agent_id
       WHERE r.task_id = ? ORDER BY r.created_at DESC LIMIT 10`,
     [task.id],
   );
-  // 协作会话：返回消息流
+  // 协作会话：返回消息流（分页：倒序取最新一页，前端反转成正序渲染）
+  const mPage = Math.max(1, Math.floor(Number(req.query.messages_page ?? 1)) || 1);
+  const mPageSize = Math.min(200, Math.max(1, Math.floor(Number(req.query.messages_page_size ?? 10)) || 10));
+  const mTotalRows = (await query(`SELECT COUNT(*) AS c FROM task_messages WHERE task_id = ?`, [task.id])) as Array<Record<string, unknown>>;
+  const messagesTotal = Number(mTotalRows[0]?.c ?? 0);
   const messages = await query(
-    `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, m.content, m.created_at
-       FROM messages m LEFT JOIN agents a ON a.id = m.sender_id
-      WHERE m.task_id = ? ORDER BY m.created_at ASC, m.id ASC`,
-    [task.id],
+    `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, a.hostname AS sender_hostname, m.content, m.created_at
+       FROM task_messages m LEFT JOIN agents a ON a.id = m.sender_id
+      WHERE m.task_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`,
+    [task.id, mPageSize, (mPage - 1) * mPageSize],
   );
   // 交付物：约定（解析为数组）+ 版本记录
   const { listDeliverables } = await import('../service/tasks.js');
   const deliverables = await listDeliverables(String(task.task_id));
-  res.json({ task, reports, messages, deliverables });
+  res.json({ task, reports, messages, deliverables, messages_total: messagesTotal, messages_page: mPage, messages_page_size: mPageSize });
 });
 
 // 管理员回复协作任务
@@ -379,7 +428,7 @@ apiRouter.post('/tasks/:taskId/reply', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: `任务已 ${task[0].status}，无法回复` });
     return;
   }
-  await query(`INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`, [
+  await query(`INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`, [
     task[0].id,
     body.content,
   ]);
@@ -415,7 +464,7 @@ apiRouter.post('/tasks/:taskId/resolve', requireAdminJson, async (req, res) => {
   }
   if (body.final_result?.trim()) {
     await query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
       [tid, `[验收通过 by 管理员] ${body.final_result.trim()}`],
     );
   }
@@ -447,7 +496,7 @@ apiRouter.post('/tasks/:taskId/reject', requireAdminJson, async (req, res) => {
       const terminal = attempts >= maxAttempts ? 'failed' : 'claimed';
       await conn.query(`UPDATE tasks SET status=?, deliver_attempts=? WHERE id = ?`, [terminal, attempts, t.id]);
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
         [
           t.id,
           `[验收打回 by 管理员] ${opinion}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`,
@@ -481,9 +530,12 @@ apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
 
 // ─────────────────────────── 编排：plan（§编排：人建 / 树视图 / failed 处置 / 交付物可见性） ───────────────────────────
 /** plan 列表 */
-apiRouter.get('/plans', requireAdminJson, async (_req, res) => {
-  const plans = await listPlans();
-  res.json({ plans });
+apiRouter.get('/plans', requireAdminJson, async (req, res) => {
+  const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM plans`)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const plans = await listPlans(pageSize, offset);
+  res.json({ plans, total, page, page_size: pageSize });
 });
 
 /** 创建 plan（stages + tasks 一次性定义；仅人建） */
@@ -542,28 +594,35 @@ async function reportFailedDisposition(taskId: string, landingExpr: string, mess
   const st = await query(`SELECT ${landingExpr} AS s FROM tasks WHERE task_id = ?`, [taskId]);
   const s = String((st[0] as Record<string, unknown> | undefined)?.s ?? 'open');
   await query(
-    `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES ((SELECT id FROM tasks WHERE task_id = ?), NULL, 'admin', 'verdict', ?)`,
+    `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES ((SELECT id FROM tasks WHERE task_id = ?), NULL, 'admin', 'verdict', ?)`,
     [taskId, message.replace('{s}', s)],
   );
   return s;
 }
 
-/** failed 处置（§编排五，先仅 Web）：重开 = attempts 清零，按落点回 open（private+assignee）/ active（public） */
+/** 重开任务（failed/done/cancelled/resolved 皆可）：attempts 清零、清结果，按落点回 open（private+assignee）/ active（public）
+ *  终态重开用于补充信息——恢复 agent 回帖通道（postMessageToTask 仅限 open/claimed） */
 apiRouter.post('/tasks/:taskId/reopen', requireAdminJson, async (req, res) => {
-  // 落点（P1-3）：private+assignee → open（manual 拾取分支可达）；public / 无指派 → active 入池
-  const result = await query(
-    `UPDATE tasks SET status = ${REOPEN_LANDING},
-            deliver_attempts=0, result=NULL, result_status=NULL, result_at=NULL, last_activity_at=?
-      WHERE task_id = ? AND status = 'failed'`,
-    [nowString(), req.params.taskId],
-  );
-  const info = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
-  if (info === 0) {
-    res.status(400).json({ error: '任务不存在或不是 failed 状态' });
+  const rows = await query(`SELECT status FROM tasks WHERE task_id = ? LIMIT 1`, [req.params.taskId]);
+  const prev = String((rows[0] as Record<string, unknown> | undefined)?.status ?? '');
+  if (!['failed', 'done', 'cancelled', 'resolved'].includes(prev)) {
+    res.status(400).json({ error: '任务不存在或不是可重开状态（failed/done/cancelled/resolved）' });
     return;
   }
-  const s = await reportFailedDisposition(req.params.taskId, REOPEN_LANDING, '[处置] 发起人重开：尝试次数清零，任务回到 {s}');
-  res.json({ ok: true, status: s });
+  await query(
+    `UPDATE tasks SET status = ${REOPEN_LANDING},
+            deliver_attempts=0, result=NULL, result_status=NULL, result_at=NULL, last_activity_at=?
+      WHERE task_id = ?`,
+    [nowString(), req.params.taskId],
+  );
+  const s = await reportFailedDisposition(
+    req.params.taskId,
+    REOPEN_LANDING,
+    prev === 'failed'
+      ? '[处置] 发起人重开：尝试次数清零，任务回到 {s}'
+      : `[处置] 管理员重开任务（原 ${prev}，补充信息）：回到 {s}，可继续交流`,
+  );
+  res.json({ ok: true, status: s, from: prev });
 });
 
 /** failed 处置：改派 assignee（留痕回帖）。改派后直接落 open/active（P3-2：不再需要 reopen 两步） */
@@ -613,7 +672,7 @@ apiRouter.post('/tasks/:taskId/deliverable-visibility', requireAdminJson, async 
   const old = String((rows[0] as Record<string, unknown>).deliverable_visibility);
   await query(`UPDATE tasks SET deliverable_visibility = ? WHERE task_id = ?`, [value, req.params.taskId]);
   await query(
-    `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
+    `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
     [rows[0].id, `[交付物可见性] ${old} → ${value}（改档回溯改变存量交付物暴露面）`],
   );
   res.json({ ok: true, value });
@@ -667,7 +726,7 @@ apiRouter.put('/settings/llm-providers', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: r.error });
     return;
   }
-  res.json({ ok: true, providers: await listProviders() });
+  res.json({ ok: true, id: r.id, providers: await listProviders() });
 });
 
 /** 删除 provider（其下仍有模型时拒绝） */
@@ -695,6 +754,7 @@ apiRouter.put('/settings/llm-models', requireAdminJson, async (req, res) => {
     name: String(body.name ?? ''),
     model: String(body.model ?? ''),
     vision: body.vision === true || body.vision === 1,
+    temperature: body.temperature === undefined || body.temperature === null || body.temperature === '' ? null : Number(body.temperature),
     price: String(body.price ?? ''),
     note: String(body.note ?? ''),
     enabled: body.enabled !== false,
@@ -716,10 +776,12 @@ apiRouter.delete('/settings/llm-models/:id', requireAdminJson, async (req, res) 
   res.json({ ok: true, models: await listModels() });
 });
 
-/** 调用日志（成本留痕：模型/用途/任务/tokens/价格） */
-apiRouter.get('/settings/llm-calls', requireAdminJson, async (_req, res) => {
-  const calls = await listLlmCalls(50);
-  res.json({ calls });
+/** 调用日志（分页：?page=1&page_size=20；成本留痕：provider/模型/用途/任务/tokens/价格） */
+apiRouter.get('/settings/llm-calls', requireAdminJson, async (req, res) => {
+  const page = Number(req.query.page ?? 1);
+  const pageSize = Number(req.query.page_size ?? 10);
+  const r = await listLlmCalls(page, pageSize);
+  res.json({ calls: r.items, total: r.total, page, page_size: pageSize });
 });
 
 /** 立即扫描队列（审核/验收 + 编排闸门/周期克隆；LLM 未配置时降级处理） */
@@ -738,10 +800,12 @@ apiRouter.post('/settings/llm-scan', requireAdminJson, async (_req, res) => {
   });
 });
 
-/** 提示词修改留痕历史（§3.4：改人/改时/前值） */
-apiRouter.get('/settings/history', requireAdminJson, async (_req, res) => {
-  const history = await getSettingsHistory(50);
-  res.json({ history });
+/** 提示词/设置修改留痕历史（分页：?page=1&page_size=20；§3.4：改人/改时/前值） */
+apiRouter.get('/settings/history', requireAdminJson, async (req, res) => {
+  const page = Number(req.query.page ?? 1);
+  const pageSize = Number(req.query.page_size ?? 10);
+  const r = await getSettingsHistory(page, pageSize);
+  res.json({ history: r.items, total: r.total, page, page_size: pageSize });
 });
 
 // ─────────────────────────── 附件（§3.7）：管理端浏览/预览/清理 ───────────────────────────
@@ -770,19 +834,94 @@ apiRouter.post('/attachments/cleanup', requireAdminJson, async (_req, res) => {
   res.json({ ok: true, cleaned });
 });
 
-// ─────────────────────────── 全局动态（最新产出/回复） ───────────────────────────
-apiRouter.get('/activity', requireAdminJson, async (_req, res) => {
-  const activity = await query(
-    `(SELECT 'report' AS type, r.created_at, a.agent_id AS who, t.task_id, r.content AS content
+// ─────────────────────────── 全局动态（最新产出/回复，分页） ───────────────────────────
+apiRouter.get('/activity', requireAdminJson, async (req, res) => {
+  const page = Math.max(1, Math.floor(Number(req.query.page ?? 1)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(req.query.page_size ?? 10))));
+  const inner = `(SELECT 'report' AS type, r.created_at, a.agent_id AS who, t.task_id, r.content AS content
         FROM reports r
         LEFT JOIN agents a ON a.id = r.agent_id
         LEFT JOIN tasks t ON t.id = r.task_id)
      UNION ALL
      (SELECT 'message' AS type, m.created_at, a.agent_id AS who, t.task_id, m.content AS content
-        FROM messages m
+        FROM task_messages m
         LEFT JOIN agents a ON a.id = m.sender_id
-        LEFT JOIN tasks t ON t.id = m.task_id)
-     ORDER BY created_at DESC LIMIT 10`,
-  );
-  res.json({ activity });
+        LEFT JOIN tasks t ON t.id = m.task_id)`;
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM (${inner}) t`)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const activity = (await query(
+    `SELECT * FROM (${inner}) t ORDER BY created_at DESC, type LIMIT ? OFFSET ?`,
+    [pageSize, (page - 1) * pageSize],
+  )) as Array<Record<string, unknown>>;
+  res.json({ activity, total, page, page_size: pageSize });
+});
+
+// ─────────────────────────── 对话通道（管理员 ↔ agent 独立对话） ───────────────────────────
+/** 对话列表 */
+apiRouter.get('/conversations', requireAdminJson, async (req, res) => {
+  const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
+  const r = await listConversations(page, pageSize);
+  res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
+});
+
+/** 发起对话（同 agent 已有 open 对话 → 返回现有，幂等；task_id 可选：从任务发起时关联上下文） */
+apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
+  const agentId = Number((req.body ?? {}).agent_id);
+  if (!agentId) {
+    res.status(400).json({ error: '缺少 agent_id' });
+    return;
+  }
+  const taskIdRaw = (req.body ?? {}).task_id;
+  const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
+  const conversation = await getOrCreateConversation(agentId, taskId);
+  res.json({ conversation });
+});
+
+/** 对话历史（正序分页） */
+apiRouter.get('/conversations/:id/messages', requireAdminJson, async (req, res) => {
+  const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const r = await listChatMessages(req.params.id, page, pageSize);
+  res.json({ messages: r.items, total: r.total, page, page_size: pageSize });
+});
+
+/** 增量拉取（打字机轮询：since_id 之后的消息） */
+apiRouter.get('/conversations/:id/messages/since', requireAdminJson, async (req, res) => {
+  const since = Math.max(0, Number(req.query.since_id ?? 0));
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const messages = await chatMessagesSince(req.params.id, since);
+  res.json({ messages });
+});
+
+/** 管理员发消息（落库 + 推送 agent 桥接器） */
+apiRouter.post('/conversations/:id/messages', requireAdminJson, async (req, res) => {
+  const content = String((req.body ?? {}).content ?? '').trim();
+  if (!content) {
+    res.status(400).json({ error: '消息不能为空' });
+    return;
+  }
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const message = await addChatMessage(req.params.id, 'admin', content);
+  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文让 pi 明确讨论对象
+  const task = conv.task_id ? await getTaskContext(conv.task_id) : null;
+  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task });
+  res.json({ message });
+});
+
+/** 归档对话 */
+apiRouter.post('/conversations/:id/archive', requireAdminJson, async (req, res) => {
+  const ok = await archiveConversation(req.params.id);
+  res.json({ ok });
 });

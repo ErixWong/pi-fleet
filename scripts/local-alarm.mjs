@@ -1,11 +1,25 @@
 // 本地闹钟脚本（等效 Linux 部署的调度层，Node 版 alarm.sh）
 // 流程：REST poll 领取平台任务 → 拉起 pi -p 执行（用 pi 的 MCP 工具干资料收集）→ REST 回传结果
+// key 来源：优先 PI_AGENT_KEY 环境变量，否则读 ~/.pi/agent/mcp.json 里 task-dispatch 的 bearerToken（免环境变量）
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const BASE = process.env.PLATFORM_URL ?? 'http://127.0.0.1:3000';
-const AGENT_KEY = process.env.PI_AGENT_KEY;
+
+/** 从 pi 的 mcp.json 读 task-dispatch 服务器的 key（兼容 bearerToken 直存 / bearerTokenEnv 引用） */
+function readKeyFromPiMcp() {
+  try {
+    const cfg = JSON.parse(readFileSync(path.join(os.homedir(), '.pi', 'agent', 'mcp.json'), 'utf8'));
+    const srv = cfg.mcpServers?.['task-dispatch'];
+    if (srv?.bearerToken) return srv.bearerToken;
+    if (srv?.bearerTokenEnv) return process.env[srv.bearerTokenEnv] ?? '';
+  } catch { /* 忽略，走环境变量或报错 */ }
+  return '';
+}
+
+const AGENT_KEY = process.env.PI_AGENT_KEY || readKeyFromPiMcp();
 const WORK_ROOT = path.resolve('work');
 
 if (!AGENT_KEY) {
@@ -27,13 +41,28 @@ async function api(method, pathname, body) {
   return data;
 }
 
+/** 解析 pi 的 JS 入口（Windows npm 全局），找不到则回退 PATH 中的 pi 命令 */
+function resolvePiCli() {
+  if (process.env.PI_CLI) return process.env.PI_CLI;
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    const c = path.join(process.env.APPDATA, 'npm', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js');
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
 /** 拉起 pi -p 执行任务，返回 pi 的最终输出文本 */
 function runPi(taskId, instruction, timeoutMs) {
   return new Promise((resolve, reject) => {
     const prompt =
       `你正在执行任务 ${taskId}。请严格按以下任务指令完成：\n\n${instruction}\n\n` +
       `完成后，把完整的资料收集结果（调研报告/总结）作为你的最终回复输出，不要省略。`;
-    const child = spawn('pi', ['-p', prompt], { shell: true, env: { ...process.env } });
+    // 直接 node 跑 pi 的 cli.js（参数数组不经 cmd/shell 拼接，Windows 下中文/引号安全）；
+    // 找不到入口（Linux 等）回退 PATH 中的 pi
+    const piCli = resolvePiCli();
+    const child = piCli
+      ? spawn(process.execPath, [piCli, '-p', prompt], { env: { ...process.env } })
+      : spawn('pi', ['-p', prompt], { env: { ...process.env } });
     let stdout = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', () => {});
@@ -107,3 +136,5 @@ for (const t of tasks) {
   }
 }
 console.log('闹钟完成');
+// Windows 下 node 退出时 fetch 连接残留触发 libuv 断言（async.c），显式退出避免计划任务记异常退出码
+process.exit(0);

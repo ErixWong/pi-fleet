@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/mcp-acceptance.mjs && node scripts/rest-acceptance.mjs && node scripts/web-acceptance.mjs",
+    "test": "node scripts/test-all.mjs",
     "init-admin": "tsx scripts/init-admin.ts"
   },
   "dependencies": {
@@ -23,6 +23,7 @@
     "express-session": "^1.18.1",
     "mariadb": "^3.4.0",
     "multer": "^2.2.0",
+    "ws": "^8.21.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -30,6 +31,7 @@
     "@types/express-session": "^1.18.1",
     "@types/multer": "^2.2.0",
     "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
     "playwright": "^1.62.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

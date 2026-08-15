@@ -51,7 +51,7 @@ async function cleanup() {
   }
   if (stageIds.length) {
     const ph = stageIds.map(() => '?').join(',');
-    await pool.query(`DELETE FROM messages WHERE task_id IN (SELECT id FROM tasks WHERE stage_id IN (${ph}))`, stageIds);
+    await pool.query(`DELETE FROM task_messages WHERE task_id IN (SELECT id FROM tasks WHERE stage_id IN (${ph}))`, stageIds);
     await pool.query(`DELETE FROM deliverables WHERE task_id IN (SELECT id FROM tasks WHERE stage_id IN (${ph}))`, stageIds);
     await pool.query(`DELETE FROM reports WHERE task_id IN (SELECT id FROM tasks WHERE stage_id IN (${ph}))`, stageIds);
     await pool.query(`DELETE FROM tasks WHERE stage_id IN (${ph})`, stageIds);

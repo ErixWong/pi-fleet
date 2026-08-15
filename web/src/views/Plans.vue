@@ -3,9 +3,12 @@ import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
 import { recLabel } from '../utils';
+import Pagination from '../components/Pagination.vue';
 
 const plans = ref([]);
 const error = ref('');
+const page = ref(1);
+const total = ref(0);
 const form = ref(blankForm());
 let modal = null;
 const modalEl = ref(null);
@@ -20,9 +23,13 @@ function blankTask() {
   return { title: '', instruction: '', visibility: 'private', assignee: '', deliverable_spec: '[]' };
 }
 
-onMounted(async () => {
-  plans.value = (await api.plans()).plans || [];
-});
+async function load() {
+  const data = await api.plans(page.value, 10);
+  plans.value = data.plans || [];
+  total.value = data.total ?? 0;
+}
+
+onMounted(load);
 
 function open() {
   error.value = '';
@@ -72,7 +79,8 @@ async function submit() {
     };
     await api.createPlan(payload);
     modal.hide();
-    plans.value = (await api.plans()).plans || [];
+    page.value = 1;
+    await load();
   } catch (e) { error.value = e.message; }
 }
 
@@ -112,6 +120,10 @@ function badge(status) {
       </tr>
     </tbody>
   </table>
+
+  <div class="mt-2">
+    <Pagination :total="total" v-model:page="page" :page-size="10" @change="load" />
+  </div>
 
   <!-- 创建计划 modal -->
   <div ref="modalEl" class="modal fade" tabindex="-1">

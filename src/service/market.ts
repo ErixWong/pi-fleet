@@ -206,18 +206,18 @@ export async function createTask(
       [taskId, title, instruction, visibility, stageId, status, agent.id, assigneeId, workdir, specJson, contentHash, opts.deliverable_visibility ?? 'participants'],
     );
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'chat', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'chat', ?)`,
       [Number((ins as unknown as { insertId: unknown }).insertId), agent.id, instruction],
     );
     if (!llmOn && status !== 'blocked') {
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [Number((ins as unknown as { insertId: unknown }).insertId), '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
       );
     }
     if (status === 'blocked') {
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
         [Number((ins as unknown as { insertId: unknown }).insertId), '[闸门] 任务在非当前 stage，已置 blocked（前序 stage 完成后放行）'],
       );
     }
@@ -291,7 +291,7 @@ export async function reviseTask(
       const nextStatus = resolvePublishStatus(llmOn, rows[0].assignee_id !== null);
       await conn.query(`UPDATE tasks SET status = ? WHERE id = ?`, [nextStatus, rows[0].id]);
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'verdict', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'verdict', ?)`,
         [rows[0].id, agent.id, llmOn ? '[修订提交] 已重新提交 LLM 审核' : '[修订提交] 已重新发布（LLM 审核未配置，降级放行）'],
       );
     }
@@ -602,7 +602,7 @@ export async function submitForReview(
           [attempts, nowString(), t.id],
         );
         await conn.query(
-          `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+          `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
            VALUES (?, NULL, 'platform', 'verdict', ?)`,
           [t.id, `${reason}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
         );
@@ -613,7 +613,7 @@ export async function submitForReview(
         [attempts, nowString(), t.id],
       );
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
          VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [t.id, `${reason}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
       );
@@ -627,7 +627,7 @@ export async function submitForReview(
         [attempts, nowString(), t.id],
       );
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
          VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [
           t.id,
@@ -641,7 +641,7 @@ export async function submitForReview(
       [attempts, nowString(), t.id],
     );
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [
         t.id,
@@ -683,7 +683,7 @@ export async function approveTask(
       [opinion?.trim() ?? null, nowString(), nowString(), agent.id, t.id],
     );
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, ?, 'agent', 'verdict', ?)`,
       [t.id, agent.id, `[验收通过 by ${agent.name}]${note}`],
     );
@@ -724,7 +724,7 @@ export async function rejectTask(
         [attempts, nowString(), t.id],
       );
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
          VALUES (?, ?, 'agent', 'verdict', ?)`,
         [t.id, agent.id, `[验收打回 by ${agent.name}] ${reason}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
       );
@@ -735,7 +735,7 @@ export async function rejectTask(
       [attempts, nowString(), t.id],
     );
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, ?, 'agent', 'verdict', ?)`,
       [t.id, agent.id, `[验收打回 by ${agent.name}] ${reason}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
     );
@@ -769,7 +769,7 @@ export async function cancelTask(
     );
     if (reason?.trim()) {
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, type, content)
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
          VALUES (?, ?, 'agent', 'verdict', ?)`,
         [rows[0].id, agent.id, `[任务取消 by ${agent.name}] ${reason.trim()}`],
       );

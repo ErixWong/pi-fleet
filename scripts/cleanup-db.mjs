@@ -28,9 +28,9 @@ if (testIds.length === 0) {
   // 附件：测试主机为 owner 的（引用已随 deliverables 清除）
   const delAtt = await pool.query(`DELETE FROM attachments WHERE owner_agent_id IN (${ph})`, testIds);
   const delRep = await pool.query(`DELETE FROM reports WHERE task_id IN ${scope}`, twice);
-  const delMsg = await pool.query(`DELETE FROM messages WHERE task_id IN ${scope}`, twice);
+  const delMsg = await pool.query(`DELETE FROM task_messages WHERE task_id IN ${scope}`, twice);
   // 测试主机作为发送者的孤儿消息（无归属任务）
-  await pool.query(`DELETE FROM messages WHERE sender_id IN (${ph})`, testIds);
+  await pool.query(`DELETE FROM task_messages WHERE sender_id IN (${ph})`, testIds);
   // 测试任务
   const delTasks = await pool.query(`DELETE FROM tasks WHERE assignee_id IN (${ph}) OR creator_id IN (${ph})`, twice);
   // 测试主机

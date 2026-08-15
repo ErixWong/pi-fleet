@@ -455,6 +455,11 @@ code { color: var(--code-text); }
 .sender-brief-bg { background: var(--badge-primary-bg); color: var(--badge-primary-color); }
 .sender-report-bg { background: var(--badge-success-bg); color: var(--badge-success-color); }
 .sender-note-bg { background: var(--badge-info-bg); color: var(--badge-info-color); }
+/* 回帖发送者区分：平台(LLM 审核/验收) 灰紫；主机 agent 绿 */
+.sender-platform { color: var(--badge-secondary-color, #6c757d); }
+.sender-agent { color: var(--badge-success-color); }
+.sender-platform-bg { background: var(--badge-secondary-bg, rgba(108,117,125,.15)); color: var(--badge-secondary-color, #6c757d); }
+.sender-agent-bg { background: var(--badge-success-bg); color: var(--badge-success-color); }
 
 /* 空态 */
 .empty-state { color: var(--text-faint); text-align: center; padding: 2.5rem 1rem; }

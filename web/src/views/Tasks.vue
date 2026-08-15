@@ -2,11 +2,14 @@
 import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
+import Pagination from '../components/Pagination.vue';
 
 const tasks = ref([]);
 const agents = ref([]);
 const filter = ref({ kind: '', status: '' });
 const error = ref('');
+const page = ref(1);
+const total = ref(0);
 
 // 指派任务表单
 const manualForm = ref({ title: '', instruction: '', assignee_id: '', workdir: '', visibility: 'private', deliverableSpec: [] });
@@ -38,21 +41,24 @@ const manualModalEl = ref(null);
 const schedModalEl = ref(null);
 
 async function load() {
-  const params = {};
+  const params = { page: page.value, page_size: 10 };
   if (filter.value.kind) params.kind = filter.value.kind;
   if (filter.value.status) params.status = filter.value.status;
   const data = await api.tasks(params);
   tasks.value = data.tasks;
+  total.value = data.total ?? 0;
   if (data.agents.length > 0) {
     agents.value = data.agents;
   }
 }
 
-onMounted(async () => {
-  const data = await api.tasks();
-  tasks.value = data.tasks;
-  agents.value = data.agents;
-});
+/** 过滤条件变化 → 回到第一页重新加载 */
+function onFilterChange() {
+  page.value = 1;
+  load();
+}
+
+onMounted(load);
 
 function openManual() {
   error.value = '';
@@ -131,13 +137,16 @@ function badge(status) {
     </div>
   </div>
 
+  <div class="row g-3">
+    <div class="col-12">
+
   <div class="mb-3 d-flex gap-2">
-    <select v-model="filter.kind" class="form-select form-select-sm" style="width:150px" @change="load">
+    <select v-model="filter.kind" class="form-select form-select-sm" style="width:150px" @change="onFilterChange">
       <option value="">类型: 全部</option>
       <option value="manual">manual</option>
       <option value="scheduled">scheduled</option>
     </select>
-    <select v-model="filter.status" class="form-select form-select-sm" style="width:150px" @change="load">
+    <select v-model="filter.status" class="form-select form-select-sm" style="width:150px" @change="onFilterChange">
       <option value="">状态: 全部</option>
       <option v-for="s in ['pending_audit','rejected','active','claimed','submitted','pending_confirm','open','pending','running','done','failed','resolved','cancelled']" :key="s" :value="s">{{ s }}</option>
     </select>
@@ -154,8 +163,7 @@ function badge(status) {
           <router-link :to="`/tasks/${t.task_id}`">{{ t.title }}</router-link>
           <div class="text-secondary small">{{ t.task_id }}</div>
         </td>
-        <td><span class="badge" :class="t.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ t.kind }}</span></td>
-        <td>
+        <td><span class="badge" :class="t.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ t.kind }}</span></td>        <td>
           <span class="badge" :class="t.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
                 :title="t.visibility === 'public' ? '公开：在公共池，可被其他主机认领' : '私有：仅发起人及指派主机可见'">
             {{ t.visibility }}
@@ -169,6 +177,12 @@ function badge(status) {
       </tr>
     </tbody>
   </table>
+
+  <div class="mt-2">
+    <Pagination :total="total" v-model:page="page" :page-size="10" @change="load" />
+  </div>
+  </div>
+</div>
 
   <!-- 指派任务 modal -->
   <div ref="manualModalEl" class="modal fade" tabindex="-1">

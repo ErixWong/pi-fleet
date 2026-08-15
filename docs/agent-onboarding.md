@@ -16,21 +16,78 @@
 中心平台（任务分发 + REST/MCP）
    │ ①REST（curl，程序行为）  ②MCP（LLM 工具协议）
    ▼
-Linux 设备：
-  调度层（systemd 闹钟，常驻，零 token）
-    ├─ 心跳 / poll 新任务 / 回传结果（REST）
-    ├─ 公共池二段式扫描（§9.2 G4）：程序拉 pool 列表 → 有候选才拉起 LLM 判断认领
-    └─ 拉起 / 销毁 pi（pi -p -a 一行）
-  LLM 层（pi，只在有任务时存在，干完销毁）
-    └─ 干活；需要时经 MCP 查详情/认领/投递报告
+设备（Windows / Linux）：
+  调度层（定时器，闹钟）
+    ├─ 模式 A：定时拉起 pi -p（LLM 当闹钟，简单但每次烧 token）
+    └─ 模式 B：零 token 程序探测（心跳/poll）→ 有活才拉起 pi（省 token）
+  LLM 层（pi，干完即毁）
+    └─ 干活；经 MCP 查详情/认领/投递报告
 ```
 
 | 通道 | 谁用 | 干什么 |
 |------|------|--------|
-| **REST** `/api/*` | 调度脚本（程序） | 心跳、查新任务、回传最终结果 |
-| **MCP** `/mcp` | pi（LLM） | 执行中查详情、投递报告、上报进度 |
+| **REST** `/api/*` | 调度脚本（程序，仅模式 B） | 心跳、查新任务、回传最终结果 |
+| **MCP** `/mcp` | pi（LLM，两种模式都有） | 执行中查详情、认领、投递报告 |
 
 两条通道使用**同一个 agent key**（平台注册时生成，`pd-` 前缀）。
+
+---
+
+## 部署模式选择（二选一，推荐 B）
+
+### 模式 A：纯 MCP worker（简单，无脚本 / 无环境变量 key）
+
+定时器到点直接拉起 pi，pi 用 mcp.json 里的 key 走 MCP 自己看活/认领/交差：
+
+- **优点**：只需配 `~/.pi/agent/mcp.json`；无需闹钟脚本、无需 REST key 环境变量（心跳由每次 MCP 请求顺带刷新）
+- **代价**：每次定时拉起都是一次 LLM 调用（哪怕没活）；任务稀疏时是纯浪费；依赖 pi 单次会话的自觉循环
+- **Windows**：任务计划程序每小时跑 `scripts/pi-worker.cmd`（见下）
+- **Linux**：crontab 定时拉起（见下）
+
+### 模式 B：闹钟脚本（推荐：零 token 探测 + 心跳，有活才拉 LLM）
+
+程序层定时发 REST（心跳/poll/公共池列表，零 token），有候选才拉起 pi 判断认领：
+
+- **优点**：常驻成本为 0；任务来了才花钱；心跳可靠
+- **代价**：需要脚本 + REST key（环境变量 / env 文件）；Windows 需 Node（local-alarm.mjs）或 bash 环境
+- **Windows**：任务计划程序跑 `scripts/local-alarm.mjs`（Node 版 alarm.sh，需 `PI_AGENT_KEY`）
+- **Linux**：systemd timer + `alarm.sh`（下文 §五/§六）
+
+---
+
+## 模式落地（定时拉起，Windows / Linux）
+
+**Windows —— 本机已配模式 B（推荐：零 token 探测，可高频）**：
+
+1. 配好 `~/.pi/agent/mcp.json`（task-dispatch 服务器，key 用 `bearerToken` 或 `bearerTokenEnv`）
+2. 计划任务跑 `scripts/alarm-worker.cmd`（每 5 分钟）：
+   ```
+   schtasks /Create /TN "PiWorker" /TR "cmd /c D:\path\scripts\alarm-worker.cmd" /SC MINUTE /MO 5 /F
+   ```
+   - `local-alarm.mjs` 的 key 优先 `PI_AGENT_KEY` 环境变量，否则**自动从 mcp.json 读 task-dispatch 的 bearerToken**（无需环境变量）
+   - alarm-worker.cmd 内部 `set HOME=%USERPROFILE%` + `cd /d 项目根`（work 目录与日志）；**纯 ASCII**（批处理 UTF-8 中文会 GBK 乱码）
+   - node 24 在 Windows 退出时 libuv 断言（`src\win\async.c`，undici 连接清理）会污染退出码——实际工作已由 API 完成，alarm-worker.cmd 强制 `exit /b 0`，异常留在 `work\alarm-worker.log`
+   - 验证：`schtasks /Run /TN "PiWorker"` 后 `schtasks /Query /TN "PiWorker" /V` 看 `Last Result: 0`
+
+**Windows —— 模式 A 备选（纯 MCP，每次拉起烧一次 LLM）**：
+
+- 计划任务跑 `scripts/pi-worker.cmd`（每小时，`/SC HOURLY`）：定时拉起 `pi -p -a` 引导语，pi 自己走 MCP 看活/认领/交差
+- worker.cmd 用 `%APPDATA%\npm\pi.cmd` 完整路径调用 pi（计划任务 PATH 不含 npm 目录，直接 `pi` 会 9009）
+- 代价：每次拉起一次 LLM 调用（哪怕没活）——**嫌响应慢就提高频率，但空转烧 token；要快且省就上模式 B**
+
+**Linux**（crontab，两种模式同一原理）：
+
+```cron
+# pi-agent 用户 crontab（关键：以哪个用户跑 = 读哪个 HOME 的 ~/.pi/mcp.json）
+# crontab -u pi-agent -e
+# 模式 B：每 5 分钟零 token 探测（Node 版闹钟，等价 local-alarm.mjs）
+*/5 * * * * cd /opt/pi-agent && node scripts/local-alarm.mjs >> /var/log/pi-worker.log 2>&1
+# 模式 A：每小时拉起 pi（纯 MCP，烧一次 token）
+0 * * * * pi -p -a "Call whoami to identify yourself. Then check task(list,scope=pool) and task(list,scope=due); if suitable work exists, claim and complete it, then task(submit) to hand in. If nothing to do, reply 'none' and exit." >> /var/log/pi-worker.log 2>&1
+```
+
+- **以什么用户执行**：必须用**配好 `~/.pi/agent/mcp.json` 的那个用户**跑 cron（`crontab -u pi-agent -e`），pi 按 HOME 找配置；绝对不要 root（pi 有 bash 工具）
+- 若 pi 不在该用户 PATH：crontab 里写完整路径（`/usr/bin/pi` 或 npm 全局 bin）
 
 ---
 
@@ -54,7 +111,7 @@ su - pi-agent -c "pi install npm:pi-mcp-adapter"
 npm install --global @elpapi42/pi-fleet@beta
 ```
 
-## 三、敏感配置
+## 三、敏感配置（仅模式 B：闹钟脚本走 REST 需要；模式 A 不需要——key 在 mcp.json）
 
 ```bash
 # /etc/pi-agent/env   （root:pi-agent 640）
@@ -79,7 +136,7 @@ mkdir -p /opt/pi-agent/work && chown pi-agent:pi-agent /opt/pi-agent/work
   任务简报经 prompt 注入；`tasks/{task_id}/` 作为档案。
 - **清理**：每日巡检删除超过 7 天的任务目录（或保留最近 N 个 output）。
 
-## 五、调度脚本（闹钟）
+## 五、调度脚本（闹钟，模式 B）
 
 ```bash
 # /opt/pi-agent/alarm.sh（pi-agent:pi-agent 750）
@@ -140,7 +197,7 @@ EOF
 done
 ```
 
-## 六、systemd 开机自启
+## 六、systemd 开机自启（模式 B）
 
 ```ini
 # /etc/systemd/system/pi-agent-alarm.timer
@@ -176,7 +233,7 @@ systemctl list-timers | grep pi-agent
 journalctl -u pi-agent-alarm.service -n 50
 ```
 
-## 七、平台 REST 端点（调度脚本使用）
+## 七、平台 REST 端点（调度脚本使用，模式 B）
 
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
@@ -237,7 +294,7 @@ pi 侧配置 `~/.pi/agent/mcp.json`：
 
 | 现象 | 排查 |
 |------|------|
-| 平台显示 agent 离线 | 心跳未跑：`systemctl list-timers` / `journalctl -u pi-agent-alarm.service` |
+| 平台显示 agent 离线 | 模式 A：`schtasks /Query /TN "PiWorker" /V` 看 `Last Result`（0=成功）或 `crontab -l` + `/var/log/pi-worker.log`；模式 B：`systemctl list-timers` / `journalctl -u pi-agent-alarm.service`；直接验证：手动跑一次 `pi-worker.cmd` / `alarm.sh` |
 | 任务一直 running | 执行超时或 pi 卡死：pkill 后平台 2h 自动回收；检查 pi 日志 |
 | MCP 连不上 | `pi list` 看扩展；`~/.pi/agent/mcp.json` 的 url/key 是否正确 |
 | 定时任务没执行 | 窗口错峰：`next_due_at` 是窗口内随机时刻，检查任务详情 |

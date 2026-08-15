@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   CONSTRAINT fk_tasks_creator FOREIGN KEY (creator_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS messages (
+-- 任务消息流（原 messages 表，2026-08-15 改名：语义=任务内帖子流，与 chat_messages 对话消息区分；旧库由 initDb RENAME 迁移）
+CREATE TABLE IF NOT EXISTS task_messages (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   task_id BIGINT NOT NULL,
   sender_id BIGINT NULL,
@@ -116,9 +117,36 @@ CREATE TABLE IF NOT EXISTS messages (
   type ENUM('chat','progress','report','verdict','system') NOT NULL DEFAULT 'chat' COMMENT 'chat=普通回复 progress=进度 report=报告 verdict=验收判决',
   content MEDIUMTEXT NOT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_messages_task FOREIGN KEY (task_id) REFERENCES tasks(id),
-  CONSTRAINT fk_messages_sender FOREIGN KEY (sender_id) REFERENCES agents(id)
+  CONSTRAINT fk_taskmsg_task FOREIGN KEY (task_id) REFERENCES tasks(id),
+  CONSTRAINT fk_taskmsg_sender FOREIGN KEY (sender_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
+
+-- 独立对话通道（管理员↔agent 直接对话，与 task_messages 解耦；task_id 为可选的来源任务上下文）
+CREATE TABLE IF NOT EXISTS conversations (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  conversation_id VARCHAR(32) NOT NULL UNIQUE,
+  agent_id BIGINT NOT NULL,
+  task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选；对话仍存独立表不污染任务流）',
+  status ENUM('open','archived') NOT NULL DEFAULT 'open',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_conv_agent FOREIGN KEY (agent_id) REFERENCES agents(id)
+) ENGINE=InnoDB;
+CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(task_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  conversation_id VARCHAR(32) NOT NULL COMMENT '业务 ID conv-<8hex>，FK conversations.conversation_id',
+  sender_role ENUM('admin','agent') NOT NULL,
+  content TEXT NOT NULL,
+  streaming TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=pi 流式中间态（打字机），0=最终落库',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_chatmsg_conv FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
+) ENGINE=InnoDB;
+CREATE INDEX IF NOT EXISTS idx_chatmsg_conv ON chat_messages(conversation_id, id);
+-- 修正早期错误定义（conversation_id 误为 BIGINT；新表无数据，直接重建）
+DROP TABLE IF EXISTS chat_messages_v1_bad;
 
 CREATE TABLE IF NOT EXISTS reports (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -197,8 +225,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3 A
 -- 开放生态：agent 接单开关（默认关，safer default）
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS accept_external TINYINT(1) NOT NULL DEFAULT 0 AFTER tags;
 -- 消息类型（§10.3：报告/进度并入消息流）与来源标记（§3.4 验收回帖）
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','report','verdict','system') NOT NULL DEFAULT 'chat' AFTER sender_role;
-ALTER TABLE messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
+ALTER TABLE task_messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','report','verdict','system') NOT NULL DEFAULT 'chat' AFTER sender_role;
+ALTER TABLE task_messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
 -- 附件系统：交付物引用附件（引用即授权；同名交付物版本自增）
 ALTER TABLE deliverables ADD COLUMN IF NOT EXISTS attachment_id BIGINT NULL AFTER agent_id;
 -- 编排（orchestration.md）tasks 结构迁移（status 枚举加 blocked、origin/stage_id/series_id/content_hash/
@@ -259,6 +287,7 @@ CREATE TABLE IF NOT EXISTS llm_models (
   name VARCHAR(128) NOT NULL,
   model VARCHAR(128) NOT NULL COMMENT '请求体 model 字段（如 gpt-4o）',
   vision TINYINT(1) NOT NULL DEFAULT 0 COMMENT '多模态（可识图）',
+  temperature DECIMAL(3,1) NULL DEFAULT NULL COMMENT '采样温度；NULL=平台默认 1（兼容仅允许 temperature=1 的中转）',
   price VARCHAR(64) NOT NULL DEFAULT '' COMMENT '价格标记（自由文本，如 ¥1.2/1M tokens），留痕性质',
   note VARCHAR(255) NOT NULL DEFAULT '',
   enabled TINYINT(1) NOT NULL DEFAULT 1,
@@ -268,6 +297,7 @@ CREATE TABLE IF NOT EXISTS llm_models (
 
 -- 旧库升级：llm_models 补 provider_id 列（数据迁移在 initDb 内 JS 完成，成功后删 base_url/api_key 列）
 ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER id;
+ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS temperature DECIMAL(3,1) NULL DEFAULT NULL AFTER vision;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER model_id;
 
 -- LLM 调用日志（成本归平台：provider/模型/用途/tokens/价格）
@@ -292,6 +322,38 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(created_at);
 export async function initDb(): Promise<void> {
   const conn = await getPool().getConnection();
   try {
+    // 迁移：messages → task_messages（2026-08-15 语义改名；RENAME 为元数据操作，避 errno 194）
+    const tbl = (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('messages','task_messages')`,
+    )) as Array<Record<string, unknown>>;
+    if (Number(tbl[0]?.c ?? 0) === 1) {
+      await conn.query(`RENAME TABLE IF EXISTS messages TO task_messages`);
+      console.log('[db] messages → task_messages 迁移完成');
+    }
+    // 修正：chat_messages 早期误建为 BIGINT conversation_id（无数据），DROP 后由 SCHEMA 重建为 VARCHAR
+    const chatCols = (await conn.query(
+      `SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'chat_messages' AND column_name = 'conversation_id'`,
+    )) as Array<Record<string, unknown>>;
+    if (chatCols.length > 0 && String(chatCols[0].column_type).toLowerCase().startsWith('bigint')) {
+      await conn.query(`DROP TABLE IF EXISTS chat_messages`);
+      console.log('[db] chat_messages 重建（conversation_id VARCHAR）');
+    }
+    // 迁移：conversations 加 task_id（来源任务上下文；新表 ALTER 可行）
+    const convCols = (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'task_id'`,
+    )) as Array<Record<string, unknown>>;
+    if (Number(convCols[0]?.c ?? 0) === 0) {
+      await conn.query(`ALTER TABLE conversations ADD COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）' AFTER agent_id`);
+      console.log('[db] conversations 加 task_id');
+    }
+    // 迁移：task_id 早期误建为 BIGINT → MODIFY 为 VARCHAR(32)（业务串 T-xxx；新表可行）
+    const convTaskType = (await conn.query(
+      `SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'task_id'`,
+    )) as Array<Record<string, unknown>>;
+    if (convTaskType.length > 0 && String(convTaskType[0].column_type).toLowerCase().startsWith('bigint')) {
+      await conn.query(`ALTER TABLE conversations MODIFY COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）'`);
+      console.log('[db] conversations.task_id → VARCHAR(32)');
+    }
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }

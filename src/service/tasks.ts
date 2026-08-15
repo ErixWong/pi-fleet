@@ -27,7 +27,7 @@ export interface MessageView {
 export async function getTaskMessages(taskId: string): Promise<MessageView[]> {
   const rows = await query(
     `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, m.content, m.created_at
-       FROM messages m
+       FROM task_messages m
        LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.task_id = (SELECT id FROM tasks WHERE task_id = ?)
       ORDER BY m.created_at ASC, m.id ASC`,
@@ -48,7 +48,7 @@ export async function getTaskMessages(taskId: string): Promise<MessageView[]> {
 export async function getLastMessage(taskId: string): Promise<MessageView | null> {
   const rows = await query(
     `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, m.content, m.created_at
-       FROM messages m
+       FROM task_messages m
        LEFT JOIN agents a ON a.id = m.sender_id
       WHERE m.task_id = (SELECT id FROM tasks WHERE task_id = ?)
       ORDER BY m.created_at DESC, m.id DESC LIMIT 1`,
@@ -105,8 +105,8 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
               t.next_due_at, lm.sender_id AS lm_sender
          FROM tasks t
          LEFT JOIN (
-           SELECT task_id, sender_id FROM messages m1
-            WHERE m1.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.task_id = m1.task_id)
+           SELECT task_id, sender_id FROM task_messages m1
+            WHERE m1.id = (SELECT MAX(m2.id) FROM task_messages m2 WHERE m2.task_id = m1.task_id)
          ) lm ON lm.task_id = t.id
         WHERE (
                (t.kind = 'manual' AND t.status IN ('open','claimed')
@@ -190,8 +190,8 @@ export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]>
        FROM tasks t
        LEFT JOIN (
          SELECT task_id, id, sender_id, sender_role, type, content, created_at
-           FROM messages m1
-          WHERE m1.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.task_id = m1.task_id)
+           FROM task_messages m1
+          WHERE m1.id = (SELECT MAX(m2.id) FROM task_messages m2 WHERE m2.task_id = m1.task_id)
        ) lm ON lm.task_id = t.id
        LEFT JOIN agents a ON a.id = lm.sender_id
       WHERE t.assignee_id = ? OR t.creator_id = ?
@@ -250,7 +250,7 @@ export async function postMessageToTask(
       return { ok: false, error: `任务已 ${status}，无法回复` };
     }
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', ?, ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', ?, ?)`,
       [tasks[0].id, agent.id, type, content],
     );
     await conn.query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), tasks[0].id]);
@@ -275,7 +275,7 @@ export async function resolveTask(
     if (status !== 'open') return { ok: false, error: `任务已 ${status}，无需关闭` };
     if (finalResult) {
       await conn.query(
-        `INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'system', ?)`,
+        `INSERT INTO task_messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'system', ?)`,
         [tasks[0].id, agent.id, `[任务已关闭 by ${agent.name}] ${finalResult}`],
       );
     }
@@ -309,7 +309,7 @@ export async function requestTask(
     );
     // 首条消息 = 请求内容（task_id 用数字主键）
     await conn.query(
-      `INSERT INTO messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'agent', ?)`,
+      `INSERT INTO task_messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'agent', ?)`,
       [Number((ins as unknown as { insertId: unknown }).insertId), agent.id, instruction],
     );
     return { ok: true, task_id: taskId };

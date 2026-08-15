@@ -24,8 +24,10 @@ const DEFAULTS: Record<string, string> = {
   // 这里只留读取边界/超时与用途绑定（llm_audit_model / llm_verify_model，默认 auto）
   llm_verifier_read_bytes: String(64 * 1024), // LLM 验收文本读取上限（§3.7 验收读取边界）
   llm_timeout_ms: String(60_000),
+  // 主机失联阈值（分钟）：超过此时间无心跳（last_seen_at）→ 前端显示「失联」徽标；只读标记，不自动禁用
+  agent_offline_after_min: String(30),
   // 提示词模板（§3.4：提示词即平台审核口径，内置默认值，管理员可改；修改留痕）
-  prompt_audit: `你是任务分发平台的发布审核器。请审核任务发布内容，输出 JSON：{"passed": true|false, "reason": "简短原因"}。
+  prompt_audit: `你是任务分发平台的发布审核器。请审核任务发布内容，输出 json：{"passed": true|false, "reason": "简短原因"}。
 审核标准（只查可操作性，不评判内容对错善恶）：
 1. 任务描述是否清晰可执行（有明确目标、上下文、约束）；
 2. 验收方案（deliverable_spec）是否可操作——每项须有非空 name，类型约束（.ext 或 mime/前缀）合理；
@@ -33,7 +35,7 @@ const DEFAULTS: Record<string, string> = {
 任务标题：{{title}}
 任务描述：{{instruction}}
 验收方案：{{deliverable_spec}}`,
-  prompt_verify: `你是任务分发平台的验收器。请按验收方案校验交付物内容，输出 JSON：{"passed": true|false, "reason": "简短原因"}。
+  prompt_verify: `你是任务分发平台的验收器。请按验收方案校验交付物内容，输出 json：{"passed": true|false, "reason": "简短原因"}。
 规则：
 1. 逐项核对验收方案：每个约定项的交付物是否真实满足（存在、非空、内容符合语义要求）；
 2. 只判断"是否达成约定"，不评判内容质量好坏之外的对错善恶；
@@ -95,9 +97,17 @@ export async function updateSettings(
   }
 }
 
-/** 提示词修改历史（最近 N 条） */
-export async function getSettingsHistory(limit = 20): Promise<Array<Record<string, unknown>>> {
-  return query(`SELECT * FROM settings_history ORDER BY id DESC LIMIT ?`, [limit]);
+/** 提示词/设置修改历史（分页，最近在前） */
+export async function getSettingsHistory(page = 1, pageSize = 10): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  const pageNum = Math.max(1, Math.floor(page));
+  const size = Math.min(100, Math.max(1, Math.floor(pageSize)));
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM settings_history`)) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const items = (await query(
+    `SELECT * FROM settings_history ORDER BY id DESC LIMIT ? OFFSET ?`,
+    [size, (pageNum - 1) * size],
+  )) as Array<Record<string, unknown>>;
+  return { items, total };
 }
 
 /** LLM 是否已配置（任一启用模型或旧配置）——见 src/service/llm.ts 的异步实现 */
