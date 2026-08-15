@@ -297,9 +297,10 @@ export async function planTree(planId: string): Promise<{ ok: boolean; plan?: Pl
 /** 全部 plan 列表（管理端） */
 export async function listPlans(pageSize = 100, offset = 0): Promise<Array<Record<string, unknown>>> {
   return query(
-    `SELECT p.plan_id, p.name, p.recurrence, p.status, p.next_due_at, p.created_at,
+    `SELECT p.plan_id, p.name, p.status, p.created_at,
             (SELECT COUNT(*) FROM plan_stages s WHERE s.plan_id = p.id) AS stage_count,
-            (SELECT COUNT(*) FROM plan_stages s JOIN tasks t ON t.stage_id = s.id WHERE s.plan_id = p.id) AS task_count
+            (SELECT COUNT(*) FROM plan_stages s JOIN tasks t ON t.stage_id = s.id WHERE s.plan_id = p.id) AS task_count,
+            (SELECT COUNT(*) FROM plan_stages s WHERE s.plan_id = p.id AND s.recurrence != 'none') AS scheduled_stage_count
        FROM plans p ORDER BY p.id DESC LIMIT ? OFFSET ?`,
     [pageSize, offset],
   );
@@ -312,7 +313,7 @@ export async function listPlans(pageSize = 100, offset = 0): Promise<Array<Recor
  */
 export async function runStageGates(): Promise<number> {
   const plans = (await query(
-    `SELECT * FROM plans WHERE recurrence = 'none' AND status = 'active'`,
+    `SELECT * FROM plans WHERE status = 'active'`,
   )) as Array<Record<string, unknown>>;
   let released = 0;
   for (const p of plans) {

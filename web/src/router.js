@@ -4,7 +4,7 @@ import { api } from './api';
 const routes = [
   { path: '/login', component: () => import('./views/Login.vue') },
   { path: '/', component: () => import('./views/Dashboard.vue'), meta: { auth: true } },
-  { path: '/tasks', component: () => import('./views/Tasks.vue'), meta: { auth: true } },
+  { path: '/tasks', redirect: '/plans' },
   { path: '/tasks/:taskId', component: () => import('./views/TaskDetail.vue'), meta: { auth: true } },
   { path: '/plans', component: () => import('./views/Plans.vue'), meta: { auth: true } },
   { path: '/plans/:planId', component: () => import('./views/PlanDetail.vue'), meta: { auth: true } },

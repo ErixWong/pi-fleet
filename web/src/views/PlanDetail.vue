@@ -59,8 +59,7 @@ async function changeVisibility(t, value) {
       <h4 class="mb-0 fw-bold">{{ plan.name }}</h4>
       <span class="text-secondary small">{{ plan.plan_id }}</span>
       <span class="badge" :class="plan.status === 'done' ? 'text-bg-success' : plan.status === 'paused' ? 'text-bg-secondary' : 'text-bg-primary'">{{ plan.status }}</span>
-      <span class="badge text-bg-info">{{ recLabel(plan.recurrence) }}</span>
-      <span v-if="plan.next_due_at" class="text-secondary small">下次克隆：{{ plan.next_due_at }}</span>
+      <span v-if="plan.scheduled_stage_count" class="badge text-bg-warning">含定时 stage</span>
     </div>
 
     <!-- 树视图：stage 竖排，当前高亮 / 后续置灰 / stalled 标红 -->
@@ -74,6 +73,9 @@ async function changeVisibility(t, value) {
             {{ s.current ? '当前' : stalledStages[s.seq] ? 'stalled' : `阶段 ${si + 1}` }}
           </span>
           <span class="fw-semibold">{{ s.name }}</span>
+          <span class="badge text-bg-secondary" style="font-size:0.65rem">{{ s.wait_prev ? '顺序' : '并发' }}</span>
+          <span v-if="s.recurrence !== 'none'" class="badge text-bg-warning" style="font-size:0.65rem">定时 {{ recLabel(s.recurrence) }}</span>
+          <span v-if="s.next_due_at" class="text-secondary small">下次生成：{{ s.next_due_at }}</span>
           <span class="text-secondary small">seq {{ s.seq }}</span>
           <span v-if="s.skipped.length" class="badge text-bg-secondary ms-auto">跳过：{{ s.skipped.join('、') }}</span>
         </div>

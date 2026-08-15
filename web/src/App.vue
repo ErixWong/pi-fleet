@@ -30,8 +30,7 @@ async function logout() {
       <span class="navbar-brand me-3"><i class="bi bi-hdd-network me-1"></i>任务分发平台</span>
       <div class="navbar-nav d-flex gap-1">
         <router-link to="/" class="nav-link" exact-active-class="active"><i class="bi bi-grid-1x2 me-1"></i>仪表盘</router-link>
-        <router-link to="/tasks" class="nav-link" active-class="active"><i class="bi bi-list-check me-1"></i>任务</router-link>
-        <router-link to="/plans" class="nav-link" active-class="active"><i class="bi bi-diagram-3 me-1"></i>计划</router-link>
+        <router-link to="/plans" class="nav-link" active-class="active"><i class="bi bi-diagram-3 me-1"></i>任务与计划</router-link>
         <router-link to="/agents" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
         <router-link to="/settings" class="nav-link" active-class="active"><i class="bi bi-gear me-1"></i>设置</router-link>
       </div>
