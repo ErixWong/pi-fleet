@@ -133,7 +133,7 @@ function tbadge(status) {
 <template>
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
-      <h4 class="mb-0 fw-bold">任务与计划</h4>
+      <h4 class="mb-0 fw-bold">计划与任务</h4>
       <div class="text-secondary small">plan → stage → task 强制三层；stage 可顺序（等待前序）或并发，可定时（周期生成原子任务）</div>
     </div>
     <button class="btn btn-primary" @click="open"><i class="bi bi-plus-lg me-1"></i>创建计划</button>
