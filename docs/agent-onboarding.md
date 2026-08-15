@@ -83,7 +83,7 @@
 # 模式 B：每 5 分钟零 token 探测（Node 版闹钟，等价 local-alarm.mjs）
 */5 * * * * cd /opt/pi-agent && node scripts/local-alarm.mjs >> /var/log/pi-worker.log 2>&1
 # 模式 A：每小时拉起 pi（纯 MCP，烧一次 token）
-0 * * * * pi -p -a "Call whoami to identify yourself. Then check task(list,scope=pool) and task(list,scope=due); for each task you claim: reply 'received, starting work' via task(reply) right after claiming, then complete it (use task(detail) for full context), and BEFORE task(submit) call task(reply) once more introducing the deliverable — short summary plus your honest thoughts/journey (what you tried, obstacles, what you learned); then task(submit) to hand in. If nothing to do, reply 'none' and exit." >> /var/log/pi-worker.log 2>&1
+0 * * * * pi -p -a "Call whoami to identify yourself. Then check task(list,scope=pool) and task(list,scope=due); IMPORTANT: a due task whose status is 'claimed' means your previous submission was REJECTED by review and needs rework — call task(detail) to read the rejection reasons, fix them, then resubmit (you are allowed to submit again while the task is claimed). For each task you work on: reply 'received, starting work' via task(reply) right after claiming, then complete it (use task(detail) for full context), and BEFORE task(submit) call task(reply) once more introducing the deliverable — short summary plus your honest thoughts/journey (what you tried, obstacles, what you learned); then task(submit) to hand in. If nothing to do, reply 'none' and exit." >> /var/log/pi-worker.log 2>&1
 ```
 
 - **以什么用户执行**：必须用**配好 `~/.pi/agent/mcp.json` 的那个用户**跑 cron（`crontab -u pi-agent -e`），pi 按 HOME 找配置；绝对不要 root（pi 有 bash 工具）
