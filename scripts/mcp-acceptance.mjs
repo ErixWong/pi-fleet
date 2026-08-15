@@ -48,17 +48,18 @@ function check(name, cond, extra = '') {
   else { failed++; console.log(`  ✗ ${name} ${extra}`); }
 }
 
+// 验收假设 LLM 未配置（门禁降级路径）：临时禁用真实 provider，跑完恢复（try/finally 保证还原）
+const savedProviders = [];
+let exitCode = 0;
 try {
   // 1. 管理员登录 + 创建两个 agent（A 执行方 / B 发起方）
   console.log('== 1. 管理员 API ==');
   await api('POST', '/api/login', { password: PASSWORD });
-  // 验收假设 LLM 未配置（门禁降级路径）：临时禁用真实 provider，跑完恢复
-  const savedProviders = [];
-  {
-    const { providers } = await api('GET', '/api/settings/llm-providers');
-    for (const p of providers ?? []) {
-      if (p.enabled) { savedProviders.push(p.id); await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: false }); }
-    }
+{
+  const { providers } = await api('GET', '/api/settings/llm-providers');
+  for (const p of providers ?? []) {
+    if (p.enabled) { savedProviders.push(p.id); await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: false }); }
+  }
   }
   // 测试 plan 基建：任务必须从属 stage（强制三层）
   const testPlan = await api('POST', '/api/plans', {
@@ -538,8 +539,20 @@ try {
   await clientD.close();
 
   console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
-  process.exit(failed === 0 ? 0 : 1);
+  exitCode = failed === 0 ? 0 : 1;
 } catch (e) {
   console.error('\n验收异常:', e.message);
-  process.exit(1);
+  exitCode = 1;
+} finally {
+  // 恢复临时禁用的真实 LLM provider（单独跑脚本也必须还原，防禁用残留；顶层 await 保证完成后再退出）
+  if (savedProviders.length > 0) {
+    for (const id of savedProviders) {
+      try {
+        const { providers } = await api('GET', '/api/settings/llm-providers');
+        const p = (providers ?? []).find((x) => x.id === id);
+        if (p) await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: true });
+      } catch (e2) { console.error('[mcp-acceptance] 恢复 LLM provider 失败:', e2.message); }
+    }
+  }
 }
+process.exit(exitCode);

@@ -45,6 +45,11 @@ const restoreLlm = async () => {
   }
 };
 
+const { createPool } = await import('mariadb');
+const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
+
+let exitCode = 0;
+try {
 const created = await api('POST', '/api/agents', { name: 'rest-test', hostname: 't1' });
 const KEY = created.data.key;
 check('agent 创建', !!KEY);
@@ -148,8 +153,6 @@ const schedPlan = await api('POST', '/api/plans', {
 });
 check('定时 stage plan 创建', schedPlan.status === 201, JSON.stringify(schedPlan.data));
 // 提前 next_due + 首实例置 done（模拟完成）→ llm-scan 驱动周期生成（LLM 已禁用，扫描快速）
-const { createPool } = await import('mariadb');
-const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
 await pool.query(`UPDATE plan_stages SET next_due_at = DATE_SUB(NOW(), INTERVAL 30 MINUTE) WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)`, [schedPlan.data.plan_id]);
 await pool.query(`UPDATE tasks SET status='done', result='首轮完成', result_status='success' WHERE stage_id = (SELECT id FROM plan_stages WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)) AND origin='periodic'`, [schedPlan.data.plan_id]);
 await api('POST', '/api/settings/llm-scan', {}, undefined);
@@ -225,7 +228,13 @@ check('文本类附件 inline 预览', (adminDl.headers.get('content-disposition
 const orphan = await api('POST', '/api/attachments/cleanup', {}, undefined);
 check('孤儿附件清理 ≥1', orphan.data.cleaned >= 1, JSON.stringify(orphan.data));
 
-await pool.end();
-await restoreLlm();
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
-process.exit(failed === 0 ? 0 : 1);
+exitCode = failed === 0 ? 0 : 1;
+} catch (e) {
+  console.error('\n验收异常:', e.message);
+  exitCode = 1;
+} finally {
+  await pool.end();
+  await restoreLlm();
+}
+process.exit(exitCode);

@@ -19,6 +19,14 @@ const messagesTotal = ref(0);
 
 // 与执行 agent 对话（任务详情内嵌面板）
 const chatOpen = ref(false);
+// 左侧计划结构面板（plan → stage → task 树，可收起，吸附左侧）
+const planTree = ref(null);
+const planCollapsed = ref(false);
+async function loadPlan() {
+  if (!task.value?.plan_pub_id) { planTree.value = null; return; }
+  try { planTree.value = await api.plan(task.value.plan_pub_id); }
+  catch { planTree.value = null; }
+}
 const activeTask = computed(() =>
   task.value
     ? {
@@ -53,6 +61,7 @@ async function load() {
   messages.value = [...(data.messages || [])].reverse();
   deliverables.value = data.deliverables || { spec: [], versions: [] };
   messagesTotal.value = data.messages_total ?? 0;
+  await loadPlan();
 }
 
 onMounted(load);
@@ -258,7 +267,42 @@ function scanBadge(s) {
       <i class="bi bi-chat-dots me-1"></i>{{ chatOpen ? '收起对话' : '与 agent 对话' }}
     </button>
   </div>
-  <div v-if="task">
+  <div v-if="task" class="d-flex align-items-start gap-3">
+  <!-- 左侧：计划结构面板（吸附，可收起） -->
+  <aside v-if="planTree" class="plan-panel card shadow-sm" :class="{ collapsed: planCollapsed }">
+    <div class="d-flex align-items-center plan-panel-head">
+      <button class="btn btn-sm btn-outline-secondary border-0 p-1" @click="planCollapsed = !planCollapsed"
+        :title="planCollapsed ? '展开计划结构' : '收起计划结构'" style="flex-shrink:0">
+        <i class="bi" :class="planCollapsed ? 'bi-chevron-right' : 'bi-chevron-left'"></i>
+      </button>
+      <template v-if="!planCollapsed">
+        <router-link :to="`/plans/${planTree.plan.plan_id}`" class="fw-semibold text-decoration-none plan-panel-title">
+          <i class="bi bi-diagram-3 me-1"></i>{{ planTree.plan.name }}
+        </router-link>
+      </template>
+    </div>
+    <div v-if="!planCollapsed" class="plan-panel-body">
+      <div v-for="st in planTree.plan.stages" :key="st.id" class="plan-stage mb-2">
+        <div class="d-flex align-items-center gap-1 plan-stage-head">
+          <i class="bi bi-layers"></i>
+          <span class="fw-semibold text-truncate" :title="st.name">{{ st.name }}</span>
+          <span class="ms-auto small text-secondary">S{{ st.seq }}</span>
+        </div>
+        <div class="plan-stage-meta mb-1">
+          <span class="badge text-bg-light me-1">{{ st.wait_prev == 0 ? '并发' : '顺序' }}</span>
+          <span v-if="st.recurrence && st.recurrence !== 'none'" class="badge text-bg-info me-1">{{ st.recurrence }}</span>
+          <span v-if="st.next_due_at" class="small text-secondary"><i class="bi bi-alarm me-1"></i>{{ st.next_due_at.slice(5, 16) }}</span>
+        </div>
+        <router-link v-for="t in st.tasks" :key="t.task_id" :to="`/tasks/${t.task_id}`"
+          class="plan-task d-flex align-items-center gap-1 text-decoration-none"
+          :class="{ 'plan-task-active': t.task_id === task.task_id }">
+          <span class="text-truncate flex-fill">{{ t.title }}</span>
+          <span class="badge badge-status" :class="badge(t.status)">{{ t.status }}</span>
+        </router-link>
+      </div>
+    </div>
+  </aside>
+  <div class="flex-grow-1 min-w-0">
   <div class="row g-3">
     <div :class="chatOpen ? 'col-8' : 'col-12'">
     <!-- 任务头部：信息横排 -->
@@ -270,15 +314,17 @@ function scanBadge(s) {
           <span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span>
           <span class="badge" :class="task.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
                 :title="task.visibility === 'public' ? '公开：公共池可认领' : '私有：仅发起人及指派主机'">{{ task.visibility }}</span>
+          <span class="ms-auto text-secondary small text-end">
+            <span class="d-block"><i class="bi bi-calendar-plus me-1"></i>创建：{{ task.created_at }}</span>
+            <span v-if="task.status === 'resolved' || task.status === 'done'" class="d-block">
+              <i class="bi bi-check2-circle me-1"></i>完成：{{ task.result_at }} · {{ task.resolved_by_name || '管理员' }}
+            </span>
+          </span>
         </div>
         <div class="d-flex flex-wrap gap-4 text-secondary small">
           <span><i class="bi bi-person-plus me-1"></i>发起方：{{ task.creator_name || '管理员' }} {{ task.creator_agent_id || '' }}</span>
           <span><i class="bi bi-person-check me-1"></i>执行方：{{ task.assignee_name }} ({{ task.assignee }})</span>
           <span v-if="task.workdir"><i class="bi bi-folder2-open me-1"></i>工作目录：<code>{{ task.workdir }}</code></span>
-          <span><i class="bi bi-clock me-1"></i>创建：{{ task.created_at }}</span>
-          <span v-if="task.status === 'resolved' || task.status === 'done'">
-            <i class="bi bi-check2-circle me-1"></i>完成：{{ task.resolved_by_name || '管理员' }} · {{ task.result_at }}
-          </span>
           <span v-if="task.deliverable_version"><i class="bi bi-box-seam me-1"></i>交付版本：{{ task.deliverable_version }}</span>
           <span v-if="task.deliver_attempts"><i class="bi bi-arrow-repeat me-1"></i>交付尝试：{{ task.deliver_attempts }}/{{ task.max_attempts }}</span>
           <span v-if="task.status === 'active' && task.visibility === 'public'"><i class="bi bi-globe2 me-1"></i>在公共池中，等待认领</span>
@@ -429,6 +475,7 @@ function scanBadge(s) {
     </div>
   <div v-if="chatOpen && task?.assignee_id" class="col-4">
     <ChatPanel :task="activeTask" @close="toggleChat" />
+  </div>
   </div>
   </div>
   </div>

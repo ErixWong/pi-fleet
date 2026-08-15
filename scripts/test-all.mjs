@@ -90,10 +90,21 @@ async function cleanupTestData() {
       `SELECT id FROM agents WHERE name IN ('sess-A','sess-B','sess-C','sess-D','sess-E','rest-test') OR name LIKE 'ui-%' OR name LIKE 'test-agent-%'`,
     )).map((r) => Number(r.id));
     if (ids.length > 0) {
+      // 先按测试 agent 关联的任务 id 清理子表（FK 顺序：task_messages/deliverables/reports 引用 tasks）
+      const taskIds = (await pool.query(
+        `SELECT id FROM tasks WHERE assignee_id IN (?) OR creator_id IN (?)`,
+        [ids, ids],
+      )).map((r) => Number(r.id));
+      if (taskIds.length > 0) {
+        await pool.query('DELETE FROM task_messages WHERE task_id IN (?)', [taskIds]);
+        await pool.query('DELETE FROM deliverables WHERE task_id IN (?)', [taskIds]);
+        await pool.query('DELETE FROM reports WHERE task_id IN (?)', [taskIds]);
+        await pool.query('DELETE FROM tasks WHERE id IN (?)', [taskIds]);
+        console.log(`[test-all] 清理测试任务 ${taskIds.length} 个`);
+      }
       await pool.query('DELETE FROM task_messages WHERE sender_id IN (?)', [ids]);
       await pool.query('DELETE FROM deliverables WHERE agent_id IN (?)', [ids]);
       await pool.query('DELETE FROM reports WHERE agent_id IN (?)', [ids]);
-      await pool.query('DELETE FROM tasks WHERE assignee_id IN (?)', [ids]);
       await pool.query('DELETE FROM attachments WHERE owner_agent_id IN (?) OR uploader_agent_id IN (?)', [ids, ids]);
       await pool.query('DELETE FROM agents WHERE id IN (?)', [ids]);
       console.log(`[test-all] 清理测试 agent ${ids.length} 个（保留 local-pi* 与真实任务）`);

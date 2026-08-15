@@ -327,7 +327,9 @@ export interface TaskDetailView {
 export async function taskDetail(agent: AgentIdentity, taskId: string): Promise<TaskDetailView> {
   const rows = await query(
     `SELECT t.*, a.agent_id AS assignee, a.name AS assignee_name,
-            c.agent_id AS creator_agent_id, c.name AS creator_name
+            c.agent_id AS creator_agent_id, c.name AS creator_name,
+            (SELECT p.plan_id FROM plans p WHERE p.id = t.plan_id) AS plan_pub_id,
+            (SELECT p.name FROM plans p WHERE p.id = t.plan_id) AS plan_pub_name
        FROM tasks t
        LEFT JOIN agents a ON a.id = t.assignee_id
        LEFT JOIN agents c ON c.id = t.creator_id
