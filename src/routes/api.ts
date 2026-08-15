@@ -392,7 +392,7 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
   const reports = await query(
     `SELECT r.content, r.created_at, a.agent_id, a.name AS sender_name, a.hostname AS sender_hostname
        FROM reports r LEFT JOIN agents a ON a.id = r.agent_id
-      WHERE r.task_id = ? ORDER BY r.created_at DESC LIMIT 10`,
+      WHERE r.task_id = ? ORDER BY r.id DESC LIMIT 10`,
     [task.id],
   );
   // 协作会话：返回消息流（分页：倒序取最新一页，前端反转成正序渲染）
@@ -403,7 +403,7 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
   const messages = await query(
     `SELECT m.id, m.sender_id, m.sender_role, m.type, a.name AS sender_name, a.hostname AS sender_hostname, m.content, m.created_at
        FROM task_messages m LEFT JOIN agents a ON a.id = m.sender_id
-      WHERE m.task_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`,
+      WHERE m.task_id = ? ORDER BY m.id DESC LIMIT ? OFFSET ?`,
     [task.id, mPageSize, (mPage - 1) * mPageSize],
   );
   // 交付物：约定（解析为数组）+ 版本记录
