@@ -88,11 +88,37 @@ export async function getConversation(convId: string, agentId?: number): Promise
 }
 
 /** 发起对话：带 task_id → 只复用该任务的 open 对话（没有就新建，任务独立上下文）；不带 → 复用同 agent 的 open 对话 */
+/** 发起对话：
+ *  带 task_id → 任务对话：复用该任务的 open 对话（没有就新建，任务独立上下文）
+ *  不带 task_id → 主机对话：**固定 conversation_id conv-host-{agentId}，永远同一个 session**——
+ *  刷新/多网页/归档后重开都是同一个对话（归档自动恢复 open），记忆不断 */
 export async function getOrCreateConversation(agentId: number, taskId?: string, workdir?: string): Promise<ConversationView> {
-  // 任务对话：复用同任务 open 对话；主机对话（无 task_id）：只复用无任务 open 对话（与任务对话隔离）
+  if (!taskId) {
+    const convId = `conv-host-${agentId}`;
+    const exist = (await query(
+      `SELECT conversation_id, status FROM conversations WHERE conversation_id = ? LIMIT 1`,
+      [convId],
+    )) as Array<Record<string, unknown>>;
+    if (exist.length > 0) {
+      // 归档后重开 → 恢复 open（保持同一个 session）
+      if (String(exist[0].status) === 'archived') {
+        await query(`UPDATE conversations SET status = 'open' WHERE conversation_id = ?`, [convId]);
+      }
+      if (workdir !== undefined) {
+        await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir ?? null, convId]);
+      }
+      const c = await getConversation(convId);
+      if (c) return c;
+    }
+    await query(`INSERT INTO conversations (conversation_id, agent_id, workdir) VALUES (?, ?, ?)`, [convId, agentId, workdir ?? null]);
+    const c = await getConversation(convId);
+    if (!c) throw new Error('对话创建失败');
+    return c;
+  }
+  // 任务对话：复用同任务的 open 对话
   const exist = (await query(
-    `SELECT id, conversation_id FROM conversations WHERE agent_id = ? AND status = 'open'${taskId ? ' AND task_id = ?' : ' AND task_id IS NULL'} ORDER BY updated_at DESC LIMIT 1`,
-    taskId ? [agentId, taskId] : [agentId],
+    `SELECT id, conversation_id FROM conversations WHERE agent_id = ? AND status = 'open' AND task_id = ? ORDER BY updated_at DESC LIMIT 1`,
+    [agentId, taskId],
   )) as Array<Record<string, unknown>>;
   if (exist.length > 0) {
     const c = await getConversation(String(exist[0].conversation_id));
@@ -107,11 +133,7 @@ export async function getOrCreateConversation(agentId: number, taskId?: string, 
     }
   }
   const convId = `conv-${randomBytes(4).toString('hex')}`;
-  if (taskId) {
-    await query(`INSERT INTO conversations (conversation_id, agent_id, task_id, workdir) VALUES (?, ?, ?, ?)`, [convId, agentId, taskId, workdir ?? null]);
-  } else {
-    await query(`INSERT INTO conversations (conversation_id, agent_id, workdir) VALUES (?, ?, ?)`, [convId, agentId, workdir ?? null]);
-  }
+  await query(`INSERT INTO conversations (conversation_id, agent_id, task_id, workdir) VALUES (?, ?, ?, ?)`, [convId, agentId, taskId, workdir ?? null]);
   const c = await getConversation(convId);
   if (!c) throw new Error('对话创建失败');
   return c;

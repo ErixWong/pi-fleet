@@ -61,6 +61,14 @@ async function main(): Promise<void> {
   app.use('/api/agent', agentRouter);
   app.use(mcpRouter);
 
+  // 全局异常保护：任何路由/异步错误不崩进程（返回 500），否则 unhandledRejection 会让 Node 直接退出
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[error]', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: '服务器内部错误' });
+    }
+  });
+
   const server = app.listen(config.port, () => {
     console.log(`✓ 平台已启动: http://127.0.0.1:${config.port}`);
     console.log(`  API 端点:   http://127.0.0.1:${config.port}/api`);
@@ -122,3 +130,7 @@ main().catch((err) => {
   console.error('启动失败:', err);
   process.exit(1);
 });
+
+// 兜底：未捕获的异步异常/拒绝不崩进程（express 4 不自动捕获 async 路由 rejection）
+process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
+process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));

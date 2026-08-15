@@ -881,6 +881,11 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验是否在 home 内）' });
     return;
   }
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
   const conversation = await getOrCreateConversation(agentId, taskId, workdir);
   res.json({ conversation });
 });
