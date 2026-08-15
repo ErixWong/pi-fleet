@@ -40,7 +40,7 @@ export async function listPoolTasks(agent: AgentIdentity): Promise<PoolTaskView[
             c.agent_id AS creator_agent_id, c.name AS creator_name
        FROM tasks t
        LEFT JOIN agents c ON c.id = t.creator_id
-      WHERE t.kind = 'manual' AND t.status = 'active' AND t.visibility = 'public'
+      WHERE t.status = 'active' AND t.visibility = 'public'
         AND t.assignee_id IS NULL
         AND (t.creator_id IS NULL OR t.creator_id != ?)
       ORDER BY t.created_at ASC LIMIT 50`,
@@ -200,10 +200,14 @@ export async function createTask(
     }
     const status = statusBase;
     const contentHash = taskContentHash({ title, instruction, deliverable_spec: specJson, visibility });
+    // 强制三层：agent 追加任务必须有 stage_id（市场 create 强制）
+    if (!stageId) return { ok: false, error: '任务必须从属 plan 的 stage（缺少 stage_id）' };
+    const planRow = (await conn.query(`SELECT plan_id FROM plan_stages WHERE id = ? LIMIT 1`, [stageId])) as Array<Record<string, unknown>>;
+    if (planRow.length === 0) return { ok: false, error: 'stage 不存在' };
     const ins = await conn.query(
-      `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, stage_id, status, creator_id, assignee_id, workdir, deliverable_spec, content_hash, deliverable_visibility)
-       VALUES (?, ?, ?, 'manual', 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [taskId, title, instruction, visibility, stageId, status, agent.id, assigneeId, workdir, specJson, contentHash, opts.deliverable_visibility ?? 'participants'],
+      `INSERT INTO tasks (task_id, title, instruction, origin, visibility, plan_id, stage_id, status, creator_id, assignee_id, workdir, deliverable_spec, content_hash, deliverable_visibility)
+       VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [taskId, title, instruction, visibility, planRow[0].plan_id, stageId, status, agent.id, assigneeId, workdir, specJson, contentHash, opts.deliverable_visibility ?? 'participants'],
     );
     await conn.query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'chat', ?)`,
@@ -539,7 +543,7 @@ export async function submitForReview(
 ): Promise<{ ok: boolean; status?: string; reason?: string; error?: string }> {
   return withTransaction(async (conn) => {
     const rows = (await conn.query(
-      `SELECT t.id, t.kind, t.status, t.creator_id, t.assignee_id, t.deliverable_spec,
+      `SELECT t.id, t.status, t.creator_id, t.assignee_id, t.deliverable_spec,
               t.deliver_attempts, t.max_attempts, t.origin, t.visibility
          FROM tasks t WHERE t.task_id = ? LIMIT 1 FOR UPDATE`,
       [taskId],
@@ -549,9 +553,8 @@ export async function submitForReview(
     if (Number(t.assignee_id) !== agent.id) {
       return { ok: false, error: `只有执行方可以提交，你不是任务 ${taskId} 的认领人` };
     }
-    const kind = String(t.kind);
     const status = String(t.status);
-    const origin = String(t.origin ?? (kind === 'scheduled' ? 'periodic' : 'manual'));
+    const origin = String(t.origin ?? 'manual');
     const visibility = String(t.visibility ?? 'private');
 
     // 1. private + periodic：直接记录（自己给自己，验收无意义；§编排四矩阵）

@@ -82,7 +82,6 @@ export interface DueTask {
   task_id: string;
   title: string;
   instruction: string;
-  kind: 'manual' | 'scheduled';
   workdir: string | null;
   /** manual 会话任务附带完整消息流（供调度脚本组装简报，上下文重建） */
   messages?: MessageView[];
@@ -90,31 +89,25 @@ export interface DueTask {
 
 /**
  * 返回"等待该 agent 动作"的任务：
- * - manual（协作会话/认领）：status IN (open,claimed) 且最后消息发送者 ≠ 该 agent（无消息时 assignee 先处理）；
+ * - 协作会话/认领：status IN (open,claimed) 且最后消息发送者 ≠ 该 agent（无消息时 assignee 先处理）；
  *   认领后待验收（submitted/pending_confirm）时发起人（creator）被返回
- * - scheduled：到期（next_due_at <= now）
- * manual 不改变状态（会话中）；scheduled 放行置 running + 推进下次执行。
- * 同 agent 同 workdir 已有占用时不并发放行（防项目互踩）。
+ * 不改变状态（会话中）；同 agent 同 workdir 已有占用时不并发放行（防项目互踩）。
  */
 export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
   const me = agent.id;
   return withTransaction(async (conn) => {
     const rows = (await conn.query(
-      `SELECT t.id, t.task_id, t.title, t.instruction, t.kind, t.schedule_cron,
-              t.window_start, t.window_end, t.workdir,
-              t.next_due_at, lm.sender_id AS lm_sender
+      `SELECT t.id, t.task_id, t.title, t.instruction, t.workdir, lm.sender_id AS lm_sender
          FROM tasks t
          LEFT JOIN (
            SELECT task_id, sender_id FROM task_messages m1
             WHERE m1.id = (SELECT MAX(m2.id) FROM task_messages m2 WHERE m2.task_id = m1.task_id)
          ) lm ON lm.task_id = t.id
         WHERE (
-               (t.kind = 'manual' AND t.status IN ('open','claimed')
+               (t.status IN ('open','claimed')
                  AND (t.assignee_id = ? AND (lm.sender_id IS NULL OR lm.sender_id != ?)))
-               OR (t.kind = 'manual' AND t.status IN ('open','claimed','submitted','pending_confirm')
+               OR (t.status IN ('open','claimed','submitted','pending_confirm')
                  AND (t.creator_id = ? AND (lm.sender_id IS NULL OR lm.sender_id != ?)))
-               OR (t.kind = 'scheduled' AND t.status IN ('pending','done','failed')
-                   AND t.next_due_at IS NOT NULL AND t.next_due_at <= ?)
               )
           AND (
                 t.workdir IS NULL
@@ -127,40 +120,22 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
         ORDER BY t.created_at ASC
         LIMIT 20
         FOR UPDATE`,
-      [me, me, me, me, nowString(), me],
+      [me, me, me, me, me],
     )) as Array<Record<string, unknown>>;
 
     const due: DueTask[] = [];
     for (const r of rows) {
-      const isScheduled = r.kind === 'scheduled';
-      if (isScheduled) {
-        const nextDue = computeNextDue(
-          (r.schedule_cron as string | null) ?? 'daily',
-          (r.window_start as string | null) ?? null,
-          (r.window_end as string | null) ?? null,
-          new Date(),
-        );
-        await conn.query(
-          `UPDATE tasks
-              SET status = 'running', claimed_at = ?, next_due_at = ?, last_activity_at = ?
-            WHERE id = ? AND status IN ('pending','done','failed')`,
-          [nowString(), toLocalString(nextDue), nowString(), r.id],
-        );
-      } else {
-        // manual 回合：刷新活跃时间，状态保持 open
-        await conn.query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), r.id]);
-      }
+      await conn.query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), r.id]);
       due.push({
         task_id: String(r.task_id),
         title: String(r.title),
         instruction: String(r.instruction),
-        kind: (r.kind as 'manual' | 'scheduled') ?? 'manual',
         workdir: (r.workdir as string | null) ?? null,
       });
     }
-    // manual 任务附带完整消息流（上下文重建）
+    // 附带完整消息流（上下文重建）
     await Promise.all(
-      due.filter((d) => d.kind === 'manual').map(async (d) => {
+      due.map(async (d) => {
         d.messages = await getTaskMessages(d.task_id);
       }),
     );
@@ -173,7 +148,6 @@ export async function claimDueTasks(agent: AgentIdentity): Promise<DueTask[]> {
 export interface ThreadView {
   task_id: string;
   title: string;
-  kind: string;
   status: string;
   workdir: string | null;
   awaiting_me: boolean;
@@ -184,7 +158,7 @@ export interface ThreadView {
 export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]> {
   const me = agent.id;
   const rows = await query(
-    `SELECT t.task_id, t.title, t.kind, t.status, t.workdir, t.created_at,
+    `SELECT t.task_id, t.title, t.status, t.workdir, t.created_at,
             lm.id AS lm_id, lm.sender_id AS lm_sender, lm.sender_role AS lm_role, lm.type AS lm_type,
             a.name AS lm_sender_name, lm.content AS lm_content, lm.created_at AS lm_created
        FROM tasks t
@@ -215,7 +189,6 @@ export async function listMyThreads(agent: AgentIdentity): Promise<ThreadView[]>
     return {
       task_id: String(r.task_id),
       title: String(r.title),
-      kind: String(r.kind),
       status: String(r.status),
       workdir: (r.workdir as string | null) ?? null,
       awaiting_me: awaitingMe,
@@ -245,8 +218,7 @@ export async function postMessageToTask(
     )) as Array<Record<string, unknown>>;
     if (tasks.length === 0) return { ok: false, error: `任务 ${taskId} 不存在或你未参与` };
     const status = String(tasks[0].status);
-    const kind = String(tasks[0].kind);
-    if (kind !== 'scheduled' && status !== 'open' && status !== 'claimed') {
+    if (status !== 'open' && status !== 'claimed') {
       return { ok: false, error: `任务已 ${status}，无法回复` };
     }
     await conn.query(
@@ -287,13 +259,14 @@ export async function resolveTask(
   });
 }
 
-/** agent 发起任务（派给目标主机），创建会话并写入首条请求消息 */
+/** agent 发起任务（MCP create / agent requestTask）：强制从属 plan 的 stage（任务原子化，2026-08-15 编排重构） */
 export async function requestTask(
   agent: AgentIdentity,
   assigneeAgentId: string,
   title: string,
   instruction: string,
   workdir?: string | null,
+  stageId?: number | null,
 ): Promise<{ ok: boolean; task_id?: string; error?: string }> {
   return withTransaction(async (conn) => {
     const target = (await conn.query(
@@ -301,11 +274,20 @@ export async function requestTask(
       [assigneeAgentId],
     )) as Array<Record<string, unknown>>;
     if (target.length === 0) return { ok: false, error: `目标主机 ${assigneeAgentId} 不存在或已禁用` };
+    if (!stageId) return { ok: false, error: '任务必须从属 plan 的 stage（缺少 stage_id）' };
+    const stage = (await conn.query(
+      `SELECT s.plan_id, s.recurrence FROM plan_stages s WHERE s.id = ? LIMIT 1`,
+      [stageId],
+    )) as Array<Record<string, unknown>>;
+    if (stage.length === 0) return { ok: false, error: 'stage 不存在' };
+    if (String(stage[0].recurrence ?? 'none') !== 'none') {
+      return { ok: false, error: '定时 stage 不接受手动追加任务（任务由周期自动生成）' };
+    }
     const taskId = `T-${yymmdd()}-${randomHex()}`;
     const ins = await conn.query(
-      `INSERT INTO tasks (task_id, title, instruction, kind, creator_id, assignee_id, status, workdir)
-       VALUES (?, ?, ?, 'manual', ?, ?, 'open', ?)`,
-      [taskId, title, instruction, agent.id, target[0].id, workdir?.trim() || null],
+      `INSERT INTO tasks (task_id, title, instruction, origin, plan_id, stage_id, creator_id, assignee_id, status, workdir)
+       VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, 'open', ?)`,
+      [taskId, title, instruction, stage[0].plan_id, stageId, agent.id, target[0].id, workdir?.trim() || null],
     );
     // 首条消息 = 请求内容（task_id 用数字主键）
     await conn.query(

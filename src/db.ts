@@ -74,27 +74,48 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
+-- 编排：plan → stage → task 强制三层（2026-08-15 重构：任务必须从属 stage；stage 双属性 wait_prev/recurrence）
+CREATE TABLE IF NOT EXISTS plans (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  plan_id VARCHAR(32) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  status ENUM('active','paused','archived','done') NOT NULL DEFAULT 'active',
+  creator_agent_id BIGINT NULL COMMENT '谁创建归谁（阶段①账号派生归属）',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS plan_stages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  plan_id BIGINT NOT NULL,
+  seq INT NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  wait_prev TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否等待前序 stage 完成：1=顺序（闸门）；0=并发（不等待，可并行启动）',
+  recurrence ENUM('none','daily','weekly:0','weekly:1','weekly:2','weekly:3','weekly:4','weekly:5','weekly:6','hourly') NOT NULL DEFAULT 'none' COMMENT '定时：是否自动重复生成任务（none=手动/一次性；其他=周期生成原子任务）',
+  window_start TIME NULL COMMENT '错峰窗口起（recurrence 非 none 时生效）',
+  window_end TIME NULL COMMENT '错峰窗口止（recurrence 非 none 时生效）',
+  next_due_at DATETIME NULL COMMENT '定时 stage 下一次生成时刻（recurrence 非 none 时生效）',
+  UNIQUE KEY uq_plan_seq (plan_id, seq),
+  CONSTRAINT fk_stage_plan FOREIGN KEY (plan_id) REFERENCES plans(id)
+) ENGINE=InnoDB;
+CREATE INDEX IF NOT EXISTS idx_stage_plan ON plan_stages(plan_id, seq);
+
 CREATE TABLE IF NOT EXISTS tasks (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   task_id VARCHAR(32) NOT NULL UNIQUE,
   title VARCHAR(255) NOT NULL,
   instruction TEXT NOT NULL,
-  kind ENUM('manual','scheduled') NOT NULL DEFAULT 'manual',
+  origin ENUM('manual','periodic') NOT NULL DEFAULT 'manual' COMMENT '来源：manual=手动创建；periodic=定时 stage 周期生成',
+  plan_id BIGINT NOT NULL COMMENT '从属 plan（强制三层：task → stage → plan）',
+  stage_id BIGINT NOT NULL COMMENT '所属 stage（强制：任务必须挂 stage）',
   visibility ENUM('private','public') NOT NULL DEFAULT 'private' COMMENT 'private=仅发起人+指派主机可见可接；public=入公共池可被认领',
   creator_id BIGINT NULL,
   assignee_id BIGINT NULL,
   status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved','blocked') NOT NULL DEFAULT 'pending',
-  origin ENUM('manual','periodic') NOT NULL DEFAULT 'manual' COMMENT '来源（§编排四：kind 退役，行为由 visibility×origin 推导）',
-  stage_id BIGINT NULL COMMENT '所属 stage（可选；无=独立任务）',
-  series_id BIGINT NULL COMMENT '周期序列首实例 id（§编排三：序列克隆归拢）',
+  series_id BIGINT NULL COMMENT '周期序列首实例 id（同一定时 stage 每轮生成的任务归拢）',
   content_hash CHAR(64) NULL COMMENT '定义字段 hash（周期审核继承）',
   deliverable_visibility ENUM('participants','account','public') NOT NULL DEFAULT 'participants' COMMENT '交付物可见性三档（§编排八）',
   deliver_attempts INT NOT NULL DEFAULT 0 COMMENT '交付尝试次数（打回/预检不合格累计）',
   max_attempts INT NOT NULL DEFAULT 3 COMMENT '交付尝试上限（任务级覆盖平台默认）',
-  schedule_cron VARCHAR(100) NULL,
-  window_start TIME NULL,
-  window_end TIME NULL,
-  next_due_at DATETIME NULL,
   workdir VARCHAR(512) NULL,
   deliverable_spec TEXT NULL,
   deliverable_version VARCHAR(16) NULL,
@@ -105,7 +126,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   last_activity_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_tasks_assignee FOREIGN KEY (assignee_id) REFERENCES agents(id),
-  CONSTRAINT fk_tasks_creator FOREIGN KEY (creator_id) REFERENCES agents(id)
+  CONSTRAINT fk_tasks_creator FOREIGN KEY (creator_id) REFERENCES agents(id),
+  CONSTRAINT fk_tasks_plan FOREIGN KEY (plan_id) REFERENCES plans(id),
+  CONSTRAINT fk_tasks_stage FOREIGN KEY (stage_id) REFERENCES plan_stages(id)
 ) ENGINE=InnoDB;
 
 -- 任务消息流（原 messages 表，2026-08-15 改名：语义=任务内帖子流，与 chat_messages 对话消息区分；旧库由 initDb RENAME 迁移）
@@ -174,7 +197,6 @@ CREATE TABLE IF NOT EXISTS deliverables (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(next_due_at);
 CREATE INDEX IF NOT EXISTS idx_reports_task ON reports(task_id, created_at);
 
 -- 附件系统（§3.7）：磁盘落盘 + DB 存元数据；owner 以 agent 占位账号（阶段①迁移回填 owner_account_id）
@@ -229,33 +251,10 @@ ALTER TABLE task_messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','
 ALTER TABLE task_messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
 -- 附件系统：交付物引用附件（引用即授权；同名交付物版本自增）
 ALTER TABLE deliverables ADD COLUMN IF NOT EXISTS attachment_id BIGINT NULL AFTER agent_id;
--- 编排（orchestration.md）tasks 结构迁移（status 枚举加 blocked、origin/stage_id/series_id/content_hash/
--- deliverable_visibility 列、旧 scheduled 回填）已移入 initDb 的 migrateTasksV2：
+-- 编排（orchestration.md）tasks 结构迁移：2026-08-15 模型重构后 tasks 由 SCHEMA 直接重建（强三层+无 kind），旧 migrateTasksV2 已移除
 -- 带 information_schema 版本门，不在此无条件执行（本环境 ALTER 重建必失败 errno 194）。
 
--- 编排：plan（三层容器，命名弃用 project 避免与 workdir 项目模式撞车）
-CREATE TABLE IF NOT EXISTS plans (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  plan_id VARCHAR(32) NOT NULL UNIQUE,
-  name VARCHAR(255) NOT NULL,
-  recurrence VARCHAR(20) NOT NULL DEFAULT 'none' COMMENT 'none | daily | weekly:<0-6> | hourly；非空 ⇒ 单 stage',
-  window_start TIME NULL,
-  window_end TIME NULL,
-  next_due_at DATETIME NULL COMMENT '周期 plan 下一次克隆时刻',
-  status ENUM('active','paused','archived','done') NOT NULL DEFAULT 'active',
-  creator_agent_id BIGINT NULL COMMENT '谁创建归谁（阶段①账号派生归属）',
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-
-CREATE TABLE IF NOT EXISTS plan_stages (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  plan_id BIGINT NOT NULL,
-  seq INT NOT NULL,
-  name VARCHAR(128) NOT NULL,
-  UNIQUE KEY uq_plan_seq (plan_id, seq),
-  CONSTRAINT fk_stage_plan FOREIGN KEY (plan_id) REFERENCES plans(id)
-) ENGINE=InnoDB;
-CREATE INDEX IF NOT EXISTS idx_stage_plan ON plan_stages(plan_id, seq);
+-- 编排：plan（三层容器，命名弃用 project 避免与 workdir 项目模式撞车）——表定义已移至 agents 之后/tasks 之前（FK 顺序）
 
 -- 提示词/设置修改留痕（§3.4：提示词即审核口径，修改需留痕：改人、改时、前值）
 CREATE TABLE IF NOT EXISTS settings_history (
@@ -330,6 +329,21 @@ export async function initDb(): Promise<void> {
       await conn.query(`RENAME TABLE IF EXISTS messages TO task_messages`);
       console.log('[db] messages → task_messages 迁移完成');
     }
+    // 迁移：编排模型重构（2026-08-15）——强制三层（task→stage→plan）+ stage 双属性（wait_prev/recurrence）
+    // 检测旧结构（plans 有 recurrence 列 或 tasks 有 schedule_cron 列）→ 清空重建（用户确认删除全部 task/plan 数据）
+    const oldPlan = (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'plans' AND column_name = 'recurrence'`,
+    )) as Array<Record<string, unknown>>;
+    const oldTask = (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'tasks' AND column_name = 'schedule_cron'`,
+    )) as Array<Record<string, unknown>>;
+    if (Number(oldPlan[0]?.c ?? 0) > 0 || Number(oldTask[0]?.c ?? 0) > 0) {
+      console.log('[db] 编排模型重构：清空并重建 tasks/plans/plan_stages 及关联数据（task_messages/deliverables/reports）');
+      for (const t of ['task_messages', 'deliverables', 'reports', 'tasks', 'plan_stages', 'plans']) {
+        await conn.query(`DROP TABLE IF EXISTS ${t}`);
+      }
+      console.log('[db] 编排表已清空重建，等待 SCHEMA 创建新结构');
+    }
     // 修正：chat_messages 早期误建为 BIGINT conversation_id（无数据），DROP 后由 SCHEMA 重建为 VARCHAR
     const chatCols = (await conn.query(
       `SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'chat_messages' AND column_name = 'conversation_id'`,
@@ -365,51 +379,9 @@ export async function initDb(): Promise<void> {
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }
-    await migrateTasksV2(conn);
     await migrateLlmProviders(conn);
   } finally {
     conn.release();
-  }
-}
-
-/**
- * 编排（orchestration.md）tasks 结构迁移，带版本门：
- * - 先用 information_schema 探测，缺列才执行 ALTER；已迁移的库每次启动零 DDL
- * - 本环境对 tasks 做 ALTER 重建必失败（errno 194）：失败时给出明确指引而不是裸崩
- * - 旧 scheduled 回填只在存在未迁移行时执行（不每次启动全表扫）
- */
-async function migrateTasksV2(conn: { query(sql: string, params?: unknown[]): Promise<unknown> }): Promise<void> {
-  const cols = (await conn.query(
-    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tasks'
-        AND COLUMN_NAME IN ('origin','stage_id','series_id','content_hash','deliverable_visibility')`,
-  )) as Array<Record<string, unknown>>;
-  const statusCol = (await conn.query(`SHOW COLUMNS FROM tasks LIKE 'status'`)) as Array<Record<string, unknown>>;
-  const statusType = String(statusCol[0]?.Type ?? '');
-  const needAlter = cols.length < 5 || !statusType.includes('blocked');
-  if (needAlter) {
-    try {
-      if (!statusType.includes('blocked')) {
-        await conn.query(`ALTER TABLE tasks MODIFY COLUMN status ENUM('pending','pending_audit','rejected','active','claimed','submitted','pending_confirm','done','failed','cancelled','open','running','resolved','blocked') NOT NULL DEFAULT 'pending'`);
-      }
-      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS origin ENUM('manual','periodic') NOT NULL DEFAULT 'manual' AFTER kind`);
-      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS stage_id BIGINT NULL AFTER origin`);
-      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS series_id BIGINT NULL AFTER stage_id`);
-      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS content_hash CHAR(64) NULL AFTER series_id`);
-      await conn.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliverable_visibility ENUM('participants','account','public') NOT NULL DEFAULT 'participants' AFTER status`);
-    } catch (e) {
-      throw new Error(
-        `tasks 表结构迁移失败（本环境 ALTER 重建受限 errno 194）：请先停服运行 node scripts/rebuild-tasks.mjs 完成复制换表，再启动。原始错误：${(e as Error).message}`,
-      );
-    }
-  }
-  await conn.query(`CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage_id)`);
-  // 旧 scheduled 数据迁移：kind='scheduled' → origin='periodic' + series_id=id（每任务一条序列）；无待迁移行则跳过
-  const pending = (await conn.query(
-    `SELECT 1 FROM tasks WHERE kind = 'scheduled' AND origin = 'manual' LIMIT 1`,
-  )) as unknown[];
-  if (pending.length > 0) {
-    await conn.query(`UPDATE tasks SET origin='periodic', series_id=id WHERE kind='scheduled' AND origin='manual'`);
   }
 }
 

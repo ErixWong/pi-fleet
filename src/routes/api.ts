@@ -284,25 +284,29 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
 
 apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
   const body = (req.body ?? {}) as {
-    kind?: string;
     title?: string;
     instruction?: string;
+    plan_id?: string | number;
+    stage_id?: string | number;
     assignee_id?: string | number;
     /** 可见性（§3.2）：默认 private；public = 丢公共池待认领 */
     visibility?: string;
-    schedule_cron?: string;
-    window_start?: string;
-    window_end?: string;
     workdir?: string;
     deliverable_spec?: unknown;
   };
-  const kind = body.kind === 'scheduled' ? 'scheduled' : 'manual';
   const title = (body.title ?? '').trim();
   const instruction = (body.instruction ?? '').trim();
+  const planId = body.plan_id ? Number(body.plan_id) : null;
+  const stageId = body.stage_id ? Number(body.stage_id) : null;
   const assigneeId = body.assignee_id ? Number(body.assignee_id) : null;
   const visibility: 'private' | 'public' = body.visibility === 'public' ? 'public' : 'private';
   if (!title || !instruction) {
     res.status(400).json({ error: '缺少标题或指令' });
+    return;
+  }
+  // 强制三层：任务必须从属 plan 的 stage（2026-08-15 编排模型重构；旧 kind='scheduled' 入口废弃，定时由 stage 负责）
+  if (!planId || !stageId) {
+    res.status(400).json({ error: '任务必须从属 plan 的 stage（缺少 plan_id 或 stage_id）' });
     return;
   }
 
@@ -326,21 +330,18 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
             ? (body.deliverable_spec as string).trim() || null
             : JSON.stringify(body.deliverable_spec);
 
-      if (kind === 'scheduled') {
-        const cron = (body.schedule_cron ?? 'daily').trim() || 'daily';
-        const ws = (body.window_start ?? '').trim() || '03:00';
-        const we = (body.window_end ?? '').trim() || '06:00';
-        if (!assigneeId) {
-          throw new Error('定时任务必须指派给一个 agent');
-        }
-        const nextDue = computeNextDue(cron, ws, we, new Date());
-        await conn.query(
-          `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, assignee_id, status,
-                              schedule_cron, window_start, window_end, next_due_at, workdir, deliverable_spec)
-           VALUES (?, ?, ?, 'scheduled', 'periodic', ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
-          [taskId, title, instruction, visibility, assigneeId, cron, ws, we, toLocalString(nextDue), workdir, deliverableSpec],
-        );
-      } else {
+      // 校验 stage 属于 plan；定时 stage 禁止手动追加（只收周期生成）
+      const stRows = (await conn.query(
+        `SELECT s.recurrence FROM plan_stages s WHERE s.id = ? AND s.plan_id = ? LIMIT 1`,
+        [stageId, planId],
+      )) as Array<Record<string, unknown>>;
+      if (stRows.length === 0) {
+        throw new Error('stage 不存在或不属于该 plan');
+      }
+      if (String(stRows[0].recurrence ?? 'none') !== 'none') {
+        throw new Error('定时 stage 不接受手动追加任务（任务由周期自动生成）');
+      }
+      {
         // manual：有指派 → 协作会话（open）；无指派 + public → 公共池（active 待认领）；
         // 配置了 LLM → 先过 pending_audit 审核（§3.4）
         if (!assigneeId && visibility !== 'public') {
@@ -350,9 +351,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         const llmOn = await llmConfigured();
         const status = llmOn ? 'pending_audit' : assigneeId ? 'open' : 'active';
         const ins = await conn.query(
-          `INSERT INTO tasks (task_id, title, instruction, kind, visibility, assignee_id, status, workdir, deliverable_spec)
-           VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?)`,
-          [taskId, title, instruction, visibility, assigneeId, status, workdir, deliverableSpec],
+          `INSERT INTO tasks (task_id, title, instruction, origin, visibility, plan_id, stage_id, assignee_id, status, workdir, deliverable_spec)
+           VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?)`,
+          [taskId, title, instruction, visibility, planId, stageId, assigneeId, status, workdir, deliverableSpec],
         );
         await conn.query(
           `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`,
@@ -542,19 +543,20 @@ apiRouter.get('/plans', requireAdminJson, async (req, res) => {
 /** 创建 plan（stages + tasks 一次性定义；仅人建） */
 apiRouter.post('/plans', requireAdminJson, async (req, res) => {
   const body = (req.body ?? {}) as {
-    name?: string; recurrence?: string; window_start?: string; window_end?: string;
-    stages?: { name?: string; tasks?: { title?: string; instruction?: string; deliverable_spec?: unknown; visibility?: string; assignee?: string }[] }[];
+    name?: string;
+    stages?: { name?: string; wait_prev?: number | boolean; recurrence?: string; window_start?: string; window_end?: string; tasks?: { title?: string; instruction?: string; deliverable_spec?: unknown; visibility?: string; assignee?: string }[] }[];
   };
   try {
     const r = await createPlan(
       null, // 管理员创建（creator_agent_id=null）
       {
         name: body.name ?? '',
-        recurrence: body.recurrence,
-        window_start: body.window_start,
-        window_end: body.window_end,
         stages: (body.stages ?? []).map((s) => ({
           name: s.name ?? '',
+          wait_prev: s.wait_prev,
+          recurrence: s.recurrence,
+          window_start: s.window_start,
+          window_end: s.window_end,
           tasks: (s.tasks ?? []).map((t) => ({
             title: t.title ?? '',
             instruction: t.instruction ?? '',

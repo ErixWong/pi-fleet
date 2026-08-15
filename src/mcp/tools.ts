@@ -117,7 +117,7 @@ function registerTools(server: McpServer): void {
       visibility: z.enum(['private', 'public']).optional().describe('create/revise：默认 private'),
       assignee: z.string().optional().describe('create：指派执行方 agent_id（private 必填）'),
       workdir: z.string().optional().describe('create：可选工作目录'),
-      stage_id: z.number().int().optional().describe('create：所属 plan 阶段 id（agent 追加任务到现有 stage；未来 stage 落 blocked，已完成 stage 拒绝）'),
+      stage_id: z.number().int().describe('create：所属 plan 阶段 id（强制三层：任务必须从属 stage；agent 追加到现有 stage，未来 stage 落 blocked，已完成 stage 拒绝）'),
       result: z.string().optional().describe('submit：完成说明/结果'),
       deliverables: z
         .array(z.object({
@@ -148,8 +148,7 @@ function registerTools(server: McpServer): void {
                 listMyThreads(agent),
                 (async () => {
                   const params: unknown[] = [agent.id];
-                  let sql = `SELECT t.task_id, t.title, t.kind, t.status, t.visibility, t.schedule_cron,
-                                    t.window_start, t.window_end, t.next_due_at, t.claimed_at, t.workdir
+                  let sql = `SELECT t.task_id, t.title, t.status, t.visibility, t.claimed_at, t.workdir
                                FROM tasks t
                               WHERE t.assignee_id = ? OR t.creator_id = ?`;
                   params.push(agent.id);

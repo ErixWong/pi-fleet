@@ -24,15 +24,20 @@ export interface PlanCreateTask {
 export interface PlanCreateStage {
   name: string;
   tasks: PlanCreateTask[];
+  /** 是否等待前序 stage 完成：1=顺序（闸门）；0=并发（不等待，可并行启动） */
+  wait_prev?: number | boolean;
+  /** 定时：none | daily | weekly:<0-6> | hourly；非 none = 周期生成原子任务 */
+  recurrence?: string;
+  window_start?: string;
+  window_end?: string;
 }
 
 export interface PlanCreateOptions {
   name: string;
-  recurrence?: string; // none | daily | weekly:<0-6> | hourly
-  window_start?: string;
-  window_end?: string;
   stages: PlanCreateStage[];
 }
+
+const RECURRENCE_RE = /^(none|daily|hourly|weekly:[0-6])$/;
 
 /** 平台生成任务 ID（market.createTask / plan 任务 / 周期克隆共用，格式 T-yymmdd-xxxxxxxx 是跨模块契约） */
 export function nextTaskId(): string {
@@ -80,46 +85,38 @@ export async function createPlan(
   opts: PlanCreateOptions,
 ): Promise<{ ok: boolean; plan_id?: string; error?: string }> {
   const name = (opts.name ?? '').trim();
-  const recurrence = (opts.recurrence ?? 'none').trim() || 'none';
   const stages = opts.stages ?? [];
   if (!name) return { ok: false, error: '缺少计划名称' };
   if (stages.length === 0) return { ok: false, error: '至少需要一个 stage' };
   if (stages.some((s) => !s.name?.trim())) return { ok: false, error: 'stage 缺少名称' };
-  if (recurrence !== 'none' && stages.length !== 1) {
-    return { ok: false, error: '周期 plan 必须恰好一个 stage（§编排三）' };
-  }
-  if (recurrence !== 'none' && !['daily', 'hourly'].includes(recurrence) && !/^weekly:[0-6]$/.test(recurrence)) {
-    return { ok: false, error: 'recurrence 须为 none / daily / weekly:<0-6> / hourly' };
+  for (const s of stages) {
+    const rec = (s.recurrence ?? 'none').trim() || 'none';
+    if (!RECURRENCE_RE.test(rec)) return { ok: false, error: `stage「${s.name}」recurrence 须为 none / daily / weekly:<0-6> / hourly` };
   }
 
   const planId = nextPlanId();
   return withTransaction(async (conn) => {
     const llmOn = await llmConfigured();
-    // 周期 plan：首实例 next_due_at = 窗口内随机时刻；窗口缺省 03:00-06:00 且落库
-    // （克隆轮重算直接读库，缺省不落库会导致首实例与后续克隆窗口不一致）
-    let nextDue: string | null = null;
-    let windowStart: string | null = null;
-    let windowEnd: string | null = null;
-    if (recurrence !== 'none') {
-      windowStart = (opts.window_start ?? '').trim() || '03:00';
-      windowEnd = (opts.window_end ?? '').trim() || '06:00';
-      nextDue = toLocalString(computeNextDue(recurrence, windowStart, windowEnd, new Date()));
-    }
     const ins = await conn.query(
-      `INSERT INTO plans (plan_id, name, recurrence, window_start, window_end, next_due_at, status, creator_agent_id)
-       VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
-      [planId, name, recurrence, windowStart, windowEnd, nextDue, creatorAgentId],
+      `INSERT INTO plans (plan_id, name, status, creator_agent_id) VALUES (?, ?, 'active', ?)`,
+      [planId, name, creatorAgentId],
     );
     const planIdNum = Number((ins as unknown as { insertId: unknown }).insertId);
 
     for (let i = 0; i < stages.length; i++) {
       const stageName = stages[i].name.trim();
+      const rec = (stages[i].recurrence ?? 'none').trim() || 'none';
+      const waitPrev = stages[i].wait_prev === 0 || stages[i].wait_prev === false ? 0 : 1;
+      // 错峰窗口缺省 03:00-06:00（定时 stage 生效）
+      const windowStart = rec !== 'none' ? (stages[i].window_start ?? '').trim() || '03:00' : null;
+      const windowEnd = rec !== 'none' ? (stages[i].window_end ?? '').trim() || '06:00' : null;
       const st = await conn.query(
-        `INSERT INTO plan_stages (plan_id, seq, name) VALUES (?, ?, ?)`,
-        [planIdNum, i + 1, stageName],
+        `INSERT INTO plan_stages (plan_id, seq, name, wait_prev, recurrence, window_start, window_end) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [planIdNum, i + 1, stageName, waitPrev, rec, windowStart, windowEnd],
       );
       const stageId = Number((st as unknown as { insertId: unknown }).insertId);
-      const isCurrent = i === 0; // 首 stage 为当前
+      // stage 激活判定：首 stage 或 wait_prev=0（并发）→ 激活；否则等前序完成（初始 blocked）
+      const isActive = i === 0 || waitPrev === 0;
       for (const t of stages[i].tasks) {
         if (!t.title?.trim() || !t.instruction?.trim()) {
           throw new Error(`stage「${stageName}」存在缺标题或指令的任务`);
@@ -139,11 +136,11 @@ export async function createPlan(
         }
         const specJson = t.deliverable_spec == null ? null : JSON.stringify(t.deliverable_spec);
         const hash = taskContentHash({ title: t.title, instruction: t.instruction, deliverable_spec: specJson, visibility });
-        // 落点：当前 stage → 过发布门禁；未来 stage → blocked
-        // 周期首实例（§编排四矩阵）：private 跳过 LLM 门禁（自己给自己）；public 首实例过审核
-        const isPeriodic = recurrence !== 'none';
+        // 落点：激活 stage → 过发布门禁；未激活 → blocked
+        // 定时 stage 首实例（§编排四矩阵）：private 跳过 LLM 门禁（自己给自己）；public 首实例过审核
+        const isPeriodic = rec !== 'none';
         let status: string;
-        if (!isCurrent) {
+        if (!isActive) {
           status = 'blocked';
         } else if (isPeriodic && visibility === 'private') {
           status = assigneeId ? 'open' : 'active';
@@ -152,9 +149,9 @@ export async function createPlan(
         }
         const taskId = nextTaskId();
         const tins = await conn.query(
-          `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, stage_id, status, assignee_id, creator_id, workdir, deliverable_spec, content_hash, deliverable_visibility)
-           VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'participants')`,
-          [taskId, t.title.trim(), t.instruction.trim(), isPeriodic ? 'periodic' : 'manual', visibility, stageId, status, assigneeId, creatorAgentId, specJson, hash],
+          `INSERT INTO tasks (task_id, title, instruction, origin, visibility, plan_id, stage_id, status, assignee_id, creator_id, workdir, deliverable_spec, content_hash, deliverable_visibility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'participants')`,
+          [taskId, t.title.trim(), t.instruction.trim(), isPeriodic ? 'periodic' : 'manual', visibility, planIdNum, stageId, status, assigneeId, creatorAgentId, specJson, hash],
         );
         const taskDbId = Number((tins as unknown as { insertId: unknown }).insertId);
         // 周期首实例：series_id = 自身 id（§编排三：WHERE series_id=? 串起整条序列，首实例自身不遗漏）
@@ -167,12 +164,16 @@ export async function createPlan(
           [taskDbId, creatorAgentId, creatorAgentId === null ? 'admin' : 'agent', t.instruction.trim()],
         );
         // 降级标记：非周期或周期 public 首实例（private 周期跳过门禁，无标记）
-        if (!llmOn && status !== 'blocked' && (recurrence === 'none' || visibility === 'public')) {
+        if (!llmOn && status !== 'blocked' && (rec === 'none' || visibility === 'public')) {
           await conn.query(
             `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
             [taskDbId, '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
           );
         }
+      }
+      // 定时 stage：首实例任务创建后设置下一次生成时刻（窗口内随机）
+      if (rec !== 'none') {
+        await conn.query(`UPDATE plan_stages SET next_due_at = ? WHERE id = ?`, [toLocalString(computeNextDue(rec, windowStart ?? '03:00', windowEnd ?? '06:00', new Date())), stageId]);
       }
     }
     return { ok: true, plan_id: planId };
@@ -227,13 +228,16 @@ export async function stagePlacement(stageId: number): Promise<{
 export interface PlanView {
   plan_id: string;
   name: string;
-  recurrence: string;
   status: string;
-  next_due_at: string | null;
   stages: {
     id: number;
     seq: number;
     name: string;
+    wait_prev: number;
+    recurrence: string;
+    window_start: string | null;
+    window_end: string | null;
+    next_due_at: string | null;
     current: boolean;
     tasks: Array<Record<string, unknown>>;
     skipped: string[]; // cancelled 任务标题
@@ -252,12 +256,10 @@ export async function planTree(planId: string): Promise<{ ok: boolean; plan?: Pl
   const view: PlanView = {
     plan_id: String(p.plan_id),
     name: String(p.name),
-    recurrence: String(p.recurrence ?? 'none'),
     status: String(p.status),
-    next_due_at: (p.next_due_at as string | null) ?? null,
     stages: [],
   };
-  const stageViews: { id: number; seq: number; name: string; tasks: Array<Record<string, unknown>>; skipped: string[] }[] = [];
+  const stageViews: { id: number; seq: number; name: string; wait_prev: number; recurrence: string; window_start: string | null; window_end: string | null; next_due_at: string | null; tasks: Array<Record<string, unknown>>; skipped: string[] }[] = [];
   for (const st of stages) {
     const tasks = (await query(
       `SELECT t.task_id, t.title, t.status, t.visibility, t.origin, t.deliver_attempts, t.max_attempts,
@@ -276,6 +278,11 @@ export async function planTree(planId: string): Promise<{ ok: boolean; plan?: Pl
       id: Number(st.id),
       seq: Number(st.seq),
       name: String(st.name),
+      wait_prev: Number(st.wait_prev ?? 1),
+      recurrence: String(st.recurrence ?? 'none'),
+      window_start: (st.window_start as string | null) ?? null,
+      window_end: (st.window_end as string | null) ?? null,
+      next_due_at: (st.next_due_at as string | null) ?? null,
       tasks,
       skipped,
     });
@@ -314,24 +321,30 @@ export async function runStageGates(): Promise<number> {
       `SELECT * FROM plan_stages WHERE plan_id = ? ORDER BY seq`,
       [planId],
     )) as Array<Record<string, unknown>>;
+    // 逐个 stage 独立判定激活：wait_prev=0 → 永远激活（并发）；wait_prev=1 → 等直接前序 stage 完成
     for (let i = 0; i < stages.length; i++) {
       const cur = stages[i] as Record<string, unknown>;
-      if (!(await isStageComplete(Number(cur.id)))) break; // 当前未完成，后续不推进
-      const next = stages[i + 1] as Record<string, unknown> | undefined;
-      if (!next) {
-        // 最后 stage 完成 → plan done
-        await query(`UPDATE plans SET status = 'done' WHERE id = ? AND status = 'active'`, [planId]);
-        continue;
-      }
+      const needPrev = Number(cur.wait_prev ?? 1) !== 0 && i > 0;
+      const active = !needPrev || (await isStageComplete(Number((stages[i - 1] as Record<string, unknown>).id)));
       const blocked = (await query(
         `SELECT * FROM tasks WHERE stage_id = ? AND status = 'blocked'`,
-        [next.id],
-      )) as Array<Record<string, unknown>>;
-      if (blocked.length === 0) continue;
-      const skipped = (await query(
-        `SELECT title FROM tasks WHERE stage_id = ? AND status = 'cancelled'`,
         [cur.id],
       )) as Array<Record<string, unknown>>;
+      if (!active) continue;
+      if (blocked.length === 0) {
+        // 最后 stage 已完成（无 blocked 且完成）→ plan done
+        if (i === stages.length - 1 && (await isStageComplete(Number(cur.id)))) {
+          await query(`UPDATE plans SET status = 'done' WHERE id = ? AND status = 'active'`, [planId]);
+        }
+        continue;
+      }
+      const prevDone = i > 0 && (await isStageComplete(Number((stages[i - 1] as Record<string, unknown>).id)));
+      const skipped = i > 0 && prevDone
+        ? (await query(
+            `SELECT title FROM tasks WHERE stage_id = ? AND status = 'cancelled'`,
+            [(stages[i - 1] as Record<string, unknown>).id],
+          )) as Array<Record<string, unknown>>
+        : [];
       const skipNote = skipped.length > 0
         ? `；前序跳过：${skipped.map((r) => String(r.title)).join('、')}`
         : '';
@@ -341,11 +354,10 @@ export async function runStageGates(): Promise<number> {
         await query(`UPDATE tasks SET status = ? WHERE id = ? AND status = 'blocked'`, [target, bt.id]);
         await query(
           `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
-          [bt.id, `[闸门放行] 前序 stage 完成，本任务放行${skipNote}`],
+          [bt.id, `[闸门放行] ${i === 0 || Number(cur.wait_prev ?? 1) === 0 ? '并发 stage 激活' : '前序 stage 完成'}，本任务放行${skipNote}`],
         );
         released++;
       }
-      // 放行后可能连锁推进下一 stage（循环继续检查）
     }
   }
   return released;
@@ -354,41 +366,35 @@ export async function runStageGates(): Promise<number> {
 // ─────────────────────────── 周期序列克隆（clock） ───────────────────────────
 
 /**
- * 周期 plan 克隆（§编排三）：next_due_at 到点 → 从上一实例克隆定义字段生成新实例行。
+ * 定时 stage 周期生成（clock）：recurrence 非 none 的 stage，next_due_at 到点 → 从上一实例克隆定义字段生成新原子任务。
  * - 上一实例未终结（非 done/cancelled/failed）→ 跳过本轮 + 回帖，next_due_at 照常推进（防堆积）
- * - 审核继承：content hash 未变 → 继承（标记）；变更 → 重新审核；visibility 变更强制重审
- * - 私有周期不经门禁；public 周期首实例审核
+ * - 审核继承：content hash 未变 → 继承（标记）；变更 → 重新审核
+ * - 任务原子化：任务本身不重复，重复是 stage 的属性（每轮生成一个全新原子任务）
  */
 export async function runPeriodicClones(): Promise<number> {
   const due = (await query(
-    `SELECT * FROM plans WHERE recurrence != 'none' AND status = 'active'
-       AND next_due_at IS NOT NULL AND next_due_at <= ? LIMIT 20`,
+    `SELECT s.* FROM plan_stages s JOIN plans p ON p.id = s.plan_id
+      WHERE s.recurrence != 'none' AND p.status = 'active'
+        AND s.next_due_at IS NOT NULL AND s.next_due_at <= ? LIMIT 20`,
     [nowString()],
   )) as Array<Record<string, unknown>>;
   let cloned = 0;
-  for (const p of due) {
-    const planId = Number(p.id);
-    // 推进 next_due_at（无论本轮是否克隆，防重复扫）；
-    // 乐观锁：旧值守卫防并发双跑（60s interval 与管理端「立即扫描」并存）——别人已推进则本轮放弃
+  for (const st of due) {
+    const stageId = Number(st.id);
+    // 推进 next_due_at（无论本轮是否克隆，防重复扫）；乐观锁防并发双跑
     const nextDue = computeNextDue(
-      String(p.recurrence),
-      (p.window_start as string | null) ?? null,
-      (p.window_end as string | null) ?? null,
+      String(st.recurrence),
+      (st.window_start as string | null) ?? '03:00',
+      (st.window_end as string | null) ?? '06:00',
       new Date(),
     );
     const adv = await query(
-      `UPDATE plans SET next_due_at = ? WHERE id = ? AND next_due_at = ?`,
-      [toLocalString(nextDue), planId, String(p.next_due_at)],
+      `UPDATE plan_stages SET next_due_at = ? WHERE id = ? AND next_due_at = ?`,
+      [toLocalString(nextDue), stageId, String(st.next_due_at)],
     );
     if (Number((adv as unknown as { affectedRows?: number }).affectedRows ?? 0) === 0) continue;
 
-    // 单 stage（创建校验保证）：取上一实例（该 stage 下最新任务）
-    const stage = (await query(
-      `SELECT * FROM plan_stages WHERE plan_id = ? ORDER BY seq LIMIT 1`,
-      [planId],
-    )) as Array<Record<string, unknown>>;
-    if (stage.length === 0) continue;
-    const stageId = Number(stage[0].id);
+    // 取上一实例（该 stage 下最新任务）；无实例（如定时 stage 无初始任务模板）→ 本轮跳过
     const last = (await query(
       `SELECT * FROM tasks WHERE stage_id = ? ORDER BY id DESC LIMIT 1`,
       [stageId],
@@ -401,7 +407,7 @@ export async function runPeriodicClones(): Promise<number> {
     if (!['done', 'cancelled', 'failed'].includes(srcStatus)) {
       await query(
         `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
-        [src.id, `[周期] 本轮 ${String(p.name)} 到点但上一实例未终结（${srcStatus}），跳过本轮（防堆积）`],
+        [src.id, `[周期] 本轮到点但上一实例未终结（${srcStatus}），跳过本轮（防堆积）`],
       );
       continue;
     }
@@ -411,29 +417,27 @@ export async function runPeriodicClones(): Promise<number> {
       title: String(src.title), instruction: String(src.instruction),
       deliverable_spec: src.deliverable_spec as string | null, visibility: String(src.visibility),
     });
-    // 审核继承：仅按内容 hash 判定；visibility 变更强制重审待「序列编辑」落地后实现（当前克隆始终沿用上一实例 visibility）
     const needReaudit = hash !== String(src.content_hash ?? '');
 
     const llmOn = await llmConfigured();
     const isPublic = String(src.visibility) === 'public';
-    // 发布门禁矩阵（§编排四）：private+periodic 跳过；public+periodic 首实例/变更审核
     const status = isPublic && (needReaudit || !src.content_hash)
       ? resolvePublishStatus(llmOn, false)
       : src.assignee_id !== null ? 'open' : 'active';
 
     const taskId = nextTaskId();
     const ins = await query(
-      `INSERT INTO tasks (task_id, title, instruction, kind, origin, visibility, stage_id, status,
+      `INSERT INTO tasks (task_id, title, instruction, origin, visibility, plan_id, stage_id, status,
                           assignee_id, creator_id, workdir, deliverable_spec, content_hash, series_id, deliverable_visibility)
-       VALUES (?, ?, ?, 'manual', 'periodic', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, 'periodic', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       [
-        taskId, src.title, src.instruction, src.visibility, stageId, status,
+        taskId, src.title, src.instruction, src.visibility, src.plan_id, stageId, status,
         src.assignee_id, src.creator_id, src.deliverable_spec, hash, src.series_id ?? src.id,
         src.deliverable_visibility ?? 'participants',
       ],
     );
     const newTaskId = Number((ins as unknown as { insertId: unknown }).insertId);
-    // 首条消息 = 请求（对齐 createTask 形态，P0-1：manual 拾取分支依赖首条消息 sender ≠ 执行方）
+    // 首条消息 = 请求
     const creatorId = src.creator_id === null ? null : Number(src.creator_id);
     await query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, ?, 'chat', ?)`,
