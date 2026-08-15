@@ -14,6 +14,9 @@ const WS_URL = BASE.replace(/^http/, 'ws') + '/api/agent/chat-stream';
 const IDLE_KILL_MS = Number(process.env.CHAT_IDLE_KILL_MS ?? 120000); // 回复完成后空闲回收
 const PI_TIMEOUT_MS = Number(process.env.CHAT_PI_TIMEOUT_MS ?? 300000);
 const POLL_MS = Number(process.env.CHAT_POLL_MS ?? 1500);
+// 对话场景首字要快：默认低思考级别（deepseek-v4-flash 默认 high，首 token 极慢）；
+// 可 CHAT_PI_THINKING=off|minimal|low|medium|high|xhigh|max 覆盖
+const PI_THINKING = process.env.CHAT_PI_THINKING ?? 'low';
 
 function readKeyFromPiMcp() {
   try {
@@ -101,8 +104,8 @@ function spawnPi(convId, onEvent) {
       try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
     }
     const child = CLI
-      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     s.proc = child;
     console.log(`[bridge] spawn pi ${convId} pid=${child.pid} cwd=${cwd}`);
     child.stderr?.on('data', (d) => console.log(`[bridge][pi-stderr] ${String(d).slice(0, 200)}`));

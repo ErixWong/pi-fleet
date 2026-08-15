@@ -271,7 +271,7 @@ async function saveWorkdir() {
               <span>{{ fmtTime(m.created_at) }}</span>
             </div>
             <div v-if="m.sender_role === 'agent'" class="chat-md" v-html="md(m.content)"></div>
-            <div v-else class="chat-plain" style="white-space: pre-wrap; word-break: break-word">{{ m.content }}</div>
+            <div v-else class="chat-plain" style="white-space: pre-wrap; word-break: break-word">{{ m.content || (m.streaming ? '正在思考…' : '') }}</div>
             <span v-if="m.streaming" class="chat-cursor"></span>
           </div>
         </div>
