@@ -255,11 +255,28 @@ agentRouter.post('/tasks/workdir', async (req, res) => {
 // ─────────────────────────── 兼容：定时任务单轮结果 ───────────────────────────
 agentRouter.post('/tasks/result', async (req, res) => {
   const agent = getAgent();
-  const body = (req.body ?? {}) as { task_id?: string; status?: string; result?: string };
+  const body = (req.body ?? {}) as {
+    task_id?: string;
+    status?: string;
+    result?: string;
+    deliverables?: Array<{ name: string; path?: string; attachment_id?: string; message?: string }>;
+  };
   if (!body.task_id || (body.status !== 'success' && body.status !== 'failed')) {
     res.status(400).json({ error: '缺少 task_id 或 status(success|failed)' });
     return;
   }
+  // success：走完整提交验收链（交付物版本登记 + 程序预检 + LLM 验收，§3.6 submit 语义）
+  if (body.status === 'success') {
+    const { submitForReview } = await import('../service/market.js');
+    const r = await submitForReview(agent, body.task_id, body.result ?? '', body.deliverables ?? []);
+    if (!r.ok) {
+      res.status(400).json({ error: r.error });
+      return;
+    }
+    res.json({ ok: true, task_id: body.task_id, status: r.status, reason: r.reason ?? null });
+    return;
+  }
+  // failed：直接置失败（result_status=failed）
   const { submitTaskResult } = await import('../service/tasks.js');
   const r = await submitTaskResult(agent, body.task_id, body.status as SubmitStatus, body.result ?? '');
   if (!r.ok) {
