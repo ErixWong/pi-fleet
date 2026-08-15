@@ -201,7 +201,7 @@ async function changeVisibility(t, value) {
   </div></div>
   <div v-else class="card">
     <table class="table table-hover mb-0">
-      <thead><tr><th style="width:36px"></th><th>计划</th><th>阶段/任务</th><th>定时 stage</th><th>状态</th><th>创建</th><th style="width:70px"></th></tr></thead>
+      <thead><tr><th style="width:36px"></th><th>计划</th><th>阶段/任务</th><th>定时 stage</th><th>状态</th><th>创建</th><th style="width:44px"></th></tr></thead>
       <tbody>
         <template v-for="p in plans" :key="p.plan_id">
           <tr style="cursor:pointer" @click="toggle(p)">
@@ -215,7 +215,7 @@ async function changeVisibility(t, value) {
             <td><span class="badge" :class="badge(p.status)">{{ p.status }}</span></td>
             <td class="text-secondary small">{{ p.created_at }}</td>
             <td>
-              <button class="btn btn-sm btn-outline-secondary" title="处理计划：failed 任务处置 / 交付物可见性" @click.stop="openProcess(p)"><i class="bi bi-tools me-1"></i>处理</button>
+              <button class="btn btn-sm btn-outline-secondary" title="处理计划：failed 任务处置 / 交付物可见性" @click.stop="openProcess(p)"><i class="bi bi-tools"></i></button>
             </td>
           </tr>
           <!-- 展开：stage → task 树 -->
