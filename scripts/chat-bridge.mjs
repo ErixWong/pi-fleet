@@ -101,8 +101,8 @@ function spawnPi(convId, onEvent) {
       try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
     }
     const child = CLI
-      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
-      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     s.proc = child;
     console.log(`[bridge] spawn pi ${convId} pid=${child.pid} cwd=${cwd}`);
     child.stderr?.on('data', (d) => console.log(`[bridge][pi-stderr] ${String(d).slice(0, 200)}`));

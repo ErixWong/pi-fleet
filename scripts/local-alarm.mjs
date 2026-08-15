@@ -61,8 +61,8 @@ function runPi(taskId, instruction, timeoutMs) {
     // 找不到入口（Linux 等）回退 PATH 中的 pi
     const piCli = resolvePiCli();
     const child = piCli
-      ? spawn(process.execPath, [piCli, '-p', prompt], { env: { ...process.env } })
-      : spawn('pi', ['-p', prompt], { env: { ...process.env } });
+      ? spawn(process.execPath, [piCli, '-p', prompt], { env: { ...process.env }, windowsHide: true })
+      : spawn('pi', ['-p', prompt], { env: { ...process.env }, windowsHide: true });
     let stdout = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', () => {});
