@@ -14,6 +14,12 @@ const modalEl = ref(null);
 // 展开的 plan 树缓存：plan_id → planTree.plan
 const expanded = ref({});
 const treeData = ref({});
+// 「处理」modal：计划树 + failed 处置 + 交付物可见性
+const procModalEl = ref(null);
+let procModal = null;
+const procPlan = ref(null);
+const procError = ref('');
+const procStalled = ref({});
 
 function blankForm() {
   return {
@@ -113,7 +119,10 @@ async function submit() {
   } catch (e) { error.value = e.message; }
 }
 
-onBeforeUnmount(() => modal?.dispose());
+onBeforeUnmount(() => {
+  modal?.dispose();
+  procModal?.dispose();
+});
 
 function badge(status) {
   return {
@@ -127,6 +136,53 @@ function tbadge(status) {
     submitted: 'text-bg-info', pending_confirm: 'text-bg-warning', open: 'text-bg-info', pending: 'text-bg-secondary',
     running: 'text-bg-info', resolved: 'text-bg-success',
   }[status] || 'text-bg-secondary';
+}
+
+// ─────────── 「处理」modal：打开 + failed 处置 + 可见性（同 PlanDetail） ───────────
+function computeStalled() {
+  const m = {};
+  for (const s of procPlan.value?.stages ?? []) {
+    if (s.tasks.some((t) => t.status === 'failed')) m[s.seq] = true;
+  }
+  procStalled.value = m;
+}
+async function refreshProcess() {
+  if (!procPlan.value) return;
+  const r = await api.plan(procPlan.value.plan_id);
+  if (r.plan) {
+    procPlan.value = r.plan;
+    treeData.value[procPlan.value.plan_id] = r.plan;
+    computeStalled();
+  }
+}
+async function openProcess(p) {
+  procError.value = '';
+  try {
+    const r = await api.plan(p.plan_id);
+    procPlan.value = r.plan || null;
+    if (r.plan) {
+      treeData.value[p.plan_id] = r.plan;
+      computeStalled();
+    }
+    procModal = new Modal(procModalEl.value);
+    procModal.show();
+  } catch (e) { procError.value = e.message; }
+}
+async function reopenTask(t) {
+  if (!confirm(`重开任务「${t.title}」？尝试次数将清零，任务按落点回到 open/active。`)) return;
+  try { await api.taskReopen(t.task_id); await refreshProcess(); } catch (e) { procError.value = e.message; }
+}
+async function reassignTask(t) {
+  const agentId = prompt(`改派「${t.title}」给哪个 agent_id？`, '');
+  if (!agentId || !agentId.trim()) return;
+  try { await api.taskReassign(t.task_id, agentId.trim()); await refreshProcess(); } catch (e) { procError.value = e.message; }
+}
+async function cancelTask(t) {
+  if (!confirm(`取消「${t.title}」？（取消=跳过，不阻塞闸门）`)) return;
+  try { await api.cancelTask(t.task_id); await refreshProcess(); } catch (e) { procError.value = e.message; }
+}
+async function changeVisibility(t, value) {
+  try { await api.taskDeliverableVisibility(t.task_id, value); await refreshProcess(); } catch (e) { procError.value = e.message; }
 }
 </script>
 
@@ -145,7 +201,7 @@ function tbadge(status) {
   </div></div>
   <div v-else class="card">
     <table class="table table-hover mb-0">
-      <thead><tr><th style="width:36px"></th><th>计划</th><th>阶段/任务</th><th>定时 stage</th><th>状态</th><th>创建</th></tr></thead>
+      <thead><tr><th style="width:36px"></th><th>计划</th><th>阶段/任务</th><th>定时 stage</th><th>状态</th><th>创建</th><th style="width:70px"></th></tr></thead>
       <tbody>
         <template v-for="p in plans" :key="p.plan_id">
           <tr style="cursor:pointer" @click="toggle(p)">
@@ -158,11 +214,14 @@ function tbadge(status) {
             <td class="text-secondary small">{{ p.scheduled_stage_count > 0 ? `${p.scheduled_stage_count} 个` : '—' }}</td>
             <td><span class="badge" :class="badge(p.status)">{{ p.status }}</span></td>
             <td class="text-secondary small">{{ p.created_at }}</td>
+            <td>
+              <button class="btn btn-sm btn-outline-secondary" title="处理计划：failed 任务处置 / 交付物可见性" @click.stop="openProcess(p)"><i class="bi bi-tools me-1"></i>处理</button>
+            </td>
           </tr>
           <!-- 展开：stage → task 树 -->
           <tr v-if="expanded[p.plan_id] && treeData[p.plan_id]">
             <td></td>
-            <td colspan="5">
+            <td colspan="6">
               <div class="py-2">
                 <div v-for="(s, si) in treeData[p.plan_id].stages" :key="s.id" class="mb-2">
                   <div class="d-flex align-items-center gap-2 flex-wrap">
@@ -199,6 +258,77 @@ function tbadge(status) {
 
   <div class="mt-2">
     <Pagination :total="total" v-model:page="page" :page-size="10" @change="load" />
+  </div>
+
+  <!-- 「处理」modal：计划树 + failed 处置 + 交付物可见性 -->
+  <div ref="procModalEl" class="modal fade" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header py-2 d-flex align-items-center gap-2">
+          <h5 class="modal-title mb-0"><i class="bi bi-diagram-3 me-1"></i>处理计划</h5>
+          <template v-if="procPlan">
+            <span class="fw-semibold">{{ procPlan.name }}</span>
+            <span class="text-secondary small">{{ procPlan.plan_id }}</span>
+            <span class="badge" :class="badge(procPlan.status)">{{ procPlan.status }}</span>
+          </template>
+          <button type="button" class="btn-close ms-auto" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div v-if="procError" class="alert alert-danger py-2">{{ procError }}</div>
+          <div v-if="!procPlan" class="text-secondary small">加载中…</div>
+          <template v-else>
+            <div class="d-flex flex-column gap-3">
+              <div v-for="(s, si) in procPlan.stages" :key="s.id" class="card" :class="{
+                'border-primary': s.current,
+                'opacity-75': !s.current && procPlan.status !== 'done',
+              }">
+                <div class="card-header py-2 d-flex align-items-center gap-2">
+                  <span class="badge" :class="s.current ? 'text-bg-primary' : procStalled[s.seq] ? 'text-bg-danger' : 'text-bg-secondary'">
+                    {{ s.current ? '当前' : procStalled[s.seq] ? 'stalled' : `阶段 ${si + 1}` }}
+                  </span>
+                  <span class="fw-semibold">{{ s.name }}</span>
+                  <span class="badge text-bg-secondary" style="font-size:0.65rem">{{ s.wait_prev ? '顺序' : '并发' }}</span>
+                  <span v-if="s.recurrence !== 'none'" class="badge text-bg-warning" style="font-size:0.65rem">定时 {{ recLabel(s.recurrence) }}</span>
+                  <span v-if="s.next_due_at" class="text-secondary small">下次生成：{{ s.next_due_at }}</span>
+                  <span class="text-secondary small">seq {{ s.seq }}</span>
+                  <span v-if="s.skipped.length" class="badge text-bg-secondary ms-auto">跳过：{{ s.skipped.join('、') }}</span>
+                </div>
+                <div class="card-body p-2">
+                  <div v-if="s.tasks.length === 0" class="text-secondary small p-2">（空阶段）</div>
+                  <div v-for="t in s.tasks" :key="t.task_id" class="d-flex align-items-center gap-2 py-1 border-bottom" style="border-color:var(--border-soft)">
+                    <router-link :to="`/tasks/${t.task_id}`" class="text-decoration-none">{{ t.title }}</router-link>
+                    <span class="badge" :class="tbadge(t.status)">{{ t.status }}</span>
+                    <span class="badge" :class="t.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'">{{ t.visibility }}</span>
+                    <span class="text-secondary small">{{ t.assignee || (t.status === 'blocked' ? '（闸门中）' : '') }}</span>
+                    <span v-if="t.deliver_attempts" class="text-secondary small">尝试 {{ t.deliver_attempts }}/{{ t.max_attempts }}</span>
+                    <!-- failed 处置（§编排五：重开 / 改派 / 取消=跳过） -->
+                    <span v-if="t.status === 'failed'" class="ms-auto d-flex gap-1">
+                      <button class="btn btn-sm btn-outline-success" @click="reopenTask(t)">重开</button>
+                      <button class="btn btn-sm btn-outline-warning" @click="reassignTask(t)">改派</button>
+                      <button class="btn btn-sm btn-outline-danger" @click="cancelTask(t)">取消(跳过)</button>
+                    </span>
+                    <!-- 交付物可见性 -->
+                    <span v-else class="ms-auto d-flex align-items-center gap-1">
+                      <span class="text-secondary small">交付物</span>
+                      <select class="form-select form-select-sm" style="width:130px"
+                              :value="t.deliverable_visibility" @change="changeVisibility(t, $event.target.value)">
+                        <option value="participants">participants</option>
+                        <option value="account">account</option>
+                        <option value="public">public</option>
+                      </select>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-if="procPlan.status === 'done'" class="alert alert-success py-2 mt-3 mb-0">全部阶段完成，计划已自动置 done（只归档不删除）。</div>
+          </template>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 创建计划 modal -->
