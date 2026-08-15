@@ -109,6 +109,22 @@ async function cleanupTestData() {
       await pool.query('DELETE FROM agents WHERE id IN (?)', [ids]);
       console.log(`[test-all] 清理测试 agent ${ids.length} 个（保留 local-pi* 与真实任务）`);
     }
+    // 验收脚本创建的测试 plan（每次跑会新增：MCP 验收计划 / REST 验收计划 / REST 定时 stage 计划 / 每日健康检查 / 测试流水线 / WebUI-*）
+    const testPlans = (await pool.query(
+      `SELECT id FROM plans WHERE name IN ('MCP 验收计划','REST 验收计划','REST 定时 stage 计划','每日健康检查','测试流水线') OR name LIKE 'WebUI-%'`,
+    )).map((r) => Number(r.id));
+    if (testPlans.length > 0) {
+      const tpids = (await pool.query('SELECT id FROM tasks WHERE plan_id IN (?)', [testPlans])).map((r) => Number(r.id));
+      if (tpids.length > 0) {
+        await pool.query('DELETE FROM task_messages WHERE task_id IN (?)', [tpids]);
+        await pool.query('DELETE FROM deliverables WHERE task_id IN (?)', [tpids]);
+        await pool.query('DELETE FROM reports WHERE task_id IN (?)', [tpids]);
+        await pool.query('DELETE FROM tasks WHERE id IN (?)', [tpids]);
+      }
+      await pool.query('DELETE FROM plan_stages WHERE plan_id IN (?)', [testPlans]);
+      await pool.query('DELETE FROM plans WHERE id IN (?)', [testPlans]);
+      console.log(`[test-all] 清理测试 plan ${testPlans.length} 个`);
+    }
   } finally {
     await pool.end();
   }
