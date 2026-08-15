@@ -28,6 +28,7 @@ import {
   getTaskContext,
   listChatMessages,
   listConversations,
+  setConversationWorkdir,
 } from '../service/chat.js';
 import { chatHub } from '../ws-server.js';
 import { sendAttachmentFile } from './attach-shared.js';
@@ -864,17 +865,41 @@ apiRouter.get('/conversations', requireAdminJson, async (req, res) => {
   res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
 });
 
-/** 发起对话（同 agent 已有 open 对话 → 返回现有，幂等；task_id 可选：从任务发起时关联上下文） */
+/** 发起对话（同 agent 已有 open 对话 → 返回现有，幂等；task_id 可选：从任务发起时关联上下文；workdir 可选：远程 pi 在该路径下运行，须为 ~ 开头限制在 home 下） */
 apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   const agentId = Number((req.body ?? {}).agent_id);
   if (!agentId) {
     res.status(400).json({ error: '缺少 agent_id' });
     return;
   }
-  const taskIdRaw = (req.body ?? {}).task_id;
+  const body = req.body as Record<string, unknown>;
+  const taskIdRaw = body.task_id;
   const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
-  const conversation = await getOrCreateConversation(agentId, taskId);
+  const workdirRaw = body.workdir;
+  const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
+  if (workdir !== undefined && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
+    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验是否在 home 内）' });
+    return;
+  }
+  const conversation = await getOrCreateConversation(agentId, taskId, workdir);
   res.json({ conversation });
+});
+
+/** 更新对话工作目录（远程 pi 下次回复在该路径下运行；限制在主机 home 下） */
+apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) => {
+  const raw = (req.body ?? {}).workdir;
+  const workdir = raw === undefined || raw === null || raw === '' ? null : String(raw);
+  if (workdir !== null && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
+    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径' });
+    return;
+  }
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  await setConversationWorkdir(req.params.id, workdir);
+  res.json({ ok: true, workdir });
 });
 
 /** 对话历史（正序分页） */
@@ -914,9 +939,9 @@ apiRouter.post('/conversations/:id/messages', requireAdminJson, async (req, res)
     return;
   }
   const message = await addChatMessage(req.params.id, 'admin', content);
-  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文让 pi 明确讨论对象
+  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文 + 工作目录
   const task = conv.task_id ? await getTaskContext(conv.task_id) : null;
-  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task });
+  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task, workdir: conv.workdir });
   res.json({ message });
 });
 

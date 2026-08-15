@@ -121,7 +121,8 @@ async function load() {
 - **agent API**（src/routes/agent.ts）：`chat-check`（零副作用回合检测）、`chat-messages`（历史 + **任务上下文 getTaskContext**，归属校验）、`chat-reply`（非流式落库）
 - **WS**（src/ws-server.ts）：`/api/agent/chat-stream` Bearer 认证；平台推 `conv_new_message`（含 task）；桥接器回推 `conv_stream_start/conv_stream/conv_stream_end`；管理端浏览器不连 WS，300ms 轮询 since
 - **桥接器**（scripts/chat-bridge.mjs，常驻）：收到消息拉起 pi `--mode rpc --session-id chat-{convId}`（**跨进程续接验证过**）→ **prompt 注入【任务上下文】**（任务 ID/标题/状态/指令摘要，buildPrompt）→ 转发 text_delta 打字机 → agent_end 落库；空闲 120s kill；WS 断线退回 1.5s chat-check 轮询（chat-messages 拉任务上下文 + 不流式回复）；启动 `node scripts/chat-bridge.mjs`（key 从 ~/.pi/agent/mcp.json 读）
-- **前端**：TaskDetail.vue「与 agent 对话」按钮 + ChatPanel.vue（任务上下文头部/气泡 markdown/时间戳/300ms 轮询打字机/textarea Enter 发送/归档）；Tasks.vue 列表无对话入口
+- **前端**：TaskDetail.vue「与 agent 对话」+ ChatPanel.vue（任务上下文头部/气泡 markdown/时间戳/300ms 轮询打字机/textarea Enter 发送/归档/全屏模式 workdir 输入）+ ChatPage.vue 全屏专门对话页（`/chat/:agentId`，主机详情「对话」按钮跳转）；Tasks.vue 列表无对话入口；主机对话（无 task_id）只复用无任务 open 对话，与任务对话隔离
+- **工作目录**：conversations.workdir（发起时传或 `POST /conversations/:id/workdir` 设置）；**远程 pi 在该路径下启动**——bridge spawn 时 cwd=workdir（自动 mkdir）；**安全限制：路径必须限制在主机 home 下**（平台校验 `~/` 开头或绝对路径格式，bridge 在主机上 resolve 后校验必须以 home 为前缀，否则忽略用默认目录）
 - **验收**：playwright 冒烟（work/chat-detail-smoke.mjs，详情页发起→上下文→7.4s 回复）+ npm test 162 全过；对话隔离：不进 task_messages、任务 reply 不触发对话
 
 ## 主机失联检测（心跳徽标）

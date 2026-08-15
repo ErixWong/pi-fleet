@@ -1,10 +1,11 @@
 <script setup>
 import { onMounted, ref } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
 
 const route = useRoute();
+const router = useRouter();
 const agent = ref(null);
 const tasks = ref([]);
 const newKey = ref(null); // 重置后的新 key（一次性展示）
@@ -22,6 +23,11 @@ async function loadTasks() {
 }
 
 onMounted(loadTasks);
+
+/** 跳转全屏专门对话页 */
+function openChat() {
+  router.push(`/chat/${agent.value.id}`);
+}
 
 async function toggle() {
   await api.toggleAgent(agent.value.id);
@@ -59,7 +65,12 @@ function badge(status) {
 </script>
 
 <template>
-  <router-link to="/agents" class="btn btn-sm btn-outline-secondary mb-3">← Agent 列表</router-link>
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <router-link to="/agents" class="btn btn-sm btn-outline-secondary">← Agent 列表</router-link>
+    <button v-if="agent" class="btn btn-sm btn-primary" @click="openChat">
+      <i class="bi bi-chat-dots me-1"></i>对话
+    </button>
+  </div>
   <div v-if="agent">
     <h4 class="mb-3">{{ agent.name }} <span class="text-secondary small">{{ agent.agent_id }}</span></h4>
 

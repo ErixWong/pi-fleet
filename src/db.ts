@@ -354,6 +354,14 @@ export async function initDb(): Promise<void> {
       await conn.query(`ALTER TABLE conversations MODIFY COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）'`);
       console.log('[db] conversations.task_id → VARCHAR(32)');
     }
+    // 迁移：conversations 加 workdir（对话工作目录：指定后远程 pi 在该路径下运行）
+    const convWd = (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'workdir'`,
+    )) as Array<Record<string, unknown>>;
+    if (Number(convWd[0]?.c ?? 0) === 0) {
+      await conn.query(`ALTER TABLE conversations ADD COLUMN workdir VARCHAR(255) NULL COMMENT '对话工作目录（远程 pi 在该路径下运行）' AFTER task_id`);
+      console.log('[db] conversations 加 workdir');
+    }
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }

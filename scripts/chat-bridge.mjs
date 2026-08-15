@@ -5,11 +5,10 @@
 // - 每对话一个 pi 子进程（--session-id=convId 续接）：空闲 kill，下条消息拉起续接（记忆保持）
 // - WS 断线 → 退回 chat-check 轮询（1.5s）+ 拉起 pi 一次性 chat-reply（不流式）
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
-
 const BASE = process.env.PLATFORM_URL ?? 'http://127.0.0.1:3000';
 const WS_URL = BASE.replace(/^http/, 'ws') + '/api/agent/chat-stream';
 const IDLE_KILL_MS = Number(process.env.CHAT_IDLE_KILL_MS ?? 120000); // 回复完成后空闲回收
@@ -61,6 +60,22 @@ function killSession(convId) {
   console.log(`[bridge] 空闲回收 ${convId}`);
 }
 
+/** 解析对话工作目录并校验必须在主机 home 下（安全限制）；不合法返回 null */
+function resolveWorkdir(workdir) {
+  if (!workdir) return null;
+  const home = os.homedir();
+  const p = workdir.startsWith('~/') || workdir === '~'
+    ? path.join(home, workdir === '~' ? '' : workdir.slice(2))
+    : workdir;
+  const resolved = path.resolve(p);
+  const homeResolved = path.resolve(home);
+  if (resolved === homeResolved || resolved.startsWith(homeResolved + path.sep)) {
+    return resolved;
+  }
+  console.log(`[bridge] 工作目录 ${workdir} 不在 home 下，已忽略（用默认目录）`);
+  return null;
+}
+
 function scheduleIdleKill(convId) {
   const s = sessions.get(convId);
   if (!s) return;
@@ -77,11 +92,15 @@ function spawnPi(convId, onEvent) {
   if (!existing) sessions.set(convId, s);
   if (s.busy) return; // 上一条还没回完，忽略并发
   if (!s.proc || s.proc.killed || s.proc.exitCode !== null) {
+    const cwd = resolveWorkdir(s.workdir) ?? process.cwd();
+    if (!existsSync(cwd)) {
+      try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
+    }
     const child = CLI
-      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`], { stdio: ['pipe', 'pipe', 'pipe'] })
-      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     s.proc = child;
-    console.log(`[bridge] spawn pi ${convId} pid=${child.pid}`);
+    console.log(`[bridge] spawn pi ${convId} pid=${child.pid} cwd=${cwd}`);
     child.stderr?.on('data', (d) => console.log(`[bridge][pi-stderr] ${String(d).slice(0, 200)}`));
     child.stdout.on('data', (d) => {
       s.buffer += d.toString();
@@ -157,10 +176,10 @@ function connect() {
     let evt; try { evt = JSON.parse(String(raw)); } catch { return; }
     if (evt.type === 'conv_new_message' && evt.conversation_id) {
       const s = sessions.get(evt.conversation_id);
-      const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null };
-      if (s) { s.pendingMsg = evt.content; if (evt.task) s.taskCtx = evt.task; }
+      const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null, workdir: evt.workdir ?? null };
+      if (s) { s.pendingMsg = evt.content; if (evt.task) s.taskCtx = evt.task; if (evt.workdir) s.workdir = evt.workdir; }
       else sessions.set(evt.conversation_id, init);
-      console.log(`[bridge] ${new Date().toLocaleTimeString()} 新消息 ${evt.conversation_id}: ${String(evt.content).slice(0, 40)}` + (evt.task ? `（任务 ${evt.task.task_id}）` : ''));
+      console.log(`[bridge] ${new Date().toLocaleTimeString()} 新消息 ${evt.conversation_id}: ${String(evt.content).slice(0, 40)}` + (evt.task ? `（任务 ${evt.task.task_id}）` : '') + (evt.workdir ? `（workdir ${evt.workdir}）` : ''));
       spawnPi(evt.conversation_id, forward);
     }
   });
@@ -197,13 +216,15 @@ async function startPolling() {
         for (const c of conversations) {
           // 拉对话 + 任务上下文（兜底路径无推送，需自取）
           let taskCtx = null;
+          let workdir = null;
           try {
             const hist = await api('POST', '/api/agent/chat-messages', { conversation_id: c.conversation_id });
             taskCtx = hist.task ?? null;
+            workdir = hist.conversation?.workdir ?? null;
           } catch { /* 拉不到上下文不影响回复 */ }
           const s = sessions.get(c.conversation_id);
-          const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx };
-          if (s) { s.pendingMsg = c.last_message ?? '请继续我们的对话。'; if (taskCtx) s.taskCtx = taskCtx; }
+          const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx, workdir };
+          if (s) { s.pendingMsg = c.last_message ?? '请继续我们的对话。'; if (taskCtx) s.taskCtx = taskCtx; if (workdir) s.workdir = workdir; }
           else sessions.set(c.conversation_id, init);
           spawnPi(c.conversation_id, forward);
         }

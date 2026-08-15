@@ -17,6 +17,7 @@ export interface ConversationView {
   task_id: string | null;
   task_title: string | null;
   task_status: string | null;
+  workdir: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -41,7 +42,7 @@ export async function listConversations(page = 1, pageSize = 10): Promise<{ item
   const total = Number(totalRows[0]?.c ?? 0);
   const rows = (await query(
     `SELECT c.id, c.conversation_id, c.agent_id, a.name AS agent_name, c.task_id, t.title AS task_title, t.status AS task_status,
-            c.status, c.created_at, c.updated_at,
+            c.workdir, c.status, c.created_at, c.updated_at,
             lm.content AS last_message, lm.sender_role AS last_sender
        FROM conversations c
        LEFT JOIN agents a ON a.id = c.agent_id
@@ -65,6 +66,7 @@ function toConv(r: Record<string, unknown>): ConversationView {
     task_id: r.task_id === null || r.task_id === undefined ? null : String(r.task_id),
     task_title: r.task_title === null || r.task_title === undefined ? null : String(r.task_title),
     task_status: r.task_status === null || r.task_status === undefined ? null : String(r.task_status),
+    workdir: r.workdir === null || r.workdir === undefined ? null : String(r.workdir),
     status: String(r.status),
     created_at: String(r.created_at ?? ''),
     updated_at: String(r.updated_at ?? ''),
@@ -77,7 +79,7 @@ function toConv(r: Record<string, unknown>): ConversationView {
 export async function getConversation(convId: string, agentId?: number): Promise<ConversationView | null> {
   const rows = (await query(
     `SELECT c.id, c.conversation_id, c.agent_id, a.name AS agent_name, c.task_id, t.title AS task_title,
-            c.status, c.created_at, c.updated_at
+            c.workdir, c.status, c.created_at, c.updated_at
        FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id LEFT JOIN tasks t ON t.task_id = c.task_id
       WHERE c.conversation_id = ?${agentId ? ' AND c.agent_id = ?' : ''} LIMIT 1`,
     agentId ? [convId, agentId] : [convId],
@@ -86,20 +88,29 @@ export async function getConversation(convId: string, agentId?: number): Promise
 }
 
 /** 发起对话：带 task_id → 只复用该任务的 open 对话（没有就新建，任务独立上下文）；不带 → 复用同 agent 的 open 对话 */
-export async function getOrCreateConversation(agentId: number, taskId?: string): Promise<ConversationView> {
+export async function getOrCreateConversation(agentId: number, taskId?: string, workdir?: string): Promise<ConversationView> {
+  // 任务对话：复用同任务 open 对话；主机对话（无 task_id）：只复用无任务 open 对话（与任务对话隔离）
   const exist = (await query(
-    `SELECT id, conversation_id FROM conversations WHERE agent_id = ? AND status = 'open'${taskId ? ' AND task_id = ?' : ''} ORDER BY updated_at DESC LIMIT 1`,
+    `SELECT id, conversation_id FROM conversations WHERE agent_id = ? AND status = 'open'${taskId ? ' AND task_id = ?' : ' AND task_id IS NULL'} ORDER BY updated_at DESC LIMIT 1`,
     taskId ? [agentId, taskId] : [agentId],
   )) as Array<Record<string, unknown>>;
   if (exist.length > 0) {
     const c = await getConversation(String(exist[0].conversation_id));
-    if (c) return c;
+    if (c) {
+      // 复用时若传了新的工作目录 → 更新（远程 pi 下次回复在该路径下运行）
+      if (workdir !== undefined && c.workdir !== workdir) {
+        await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir, c.conversation_id]);
+        const updated = await getConversation(c.conversation_id);
+        if (updated) return updated;
+      }
+      return c;
+    }
   }
   const convId = `conv-${randomBytes(4).toString('hex')}`;
   if (taskId) {
-    await query(`INSERT INTO conversations (conversation_id, agent_id, task_id) VALUES (?, ?, ?)`, [convId, agentId, taskId]);
+    await query(`INSERT INTO conversations (conversation_id, agent_id, task_id, workdir) VALUES (?, ?, ?, ?)`, [convId, agentId, taskId, workdir ?? null]);
   } else {
-    await query(`INSERT INTO conversations (conversation_id, agent_id) VALUES (?, ?)`, [convId, agentId]);
+    await query(`INSERT INTO conversations (conversation_id, agent_id, workdir) VALUES (?, ?, ?)`, [convId, agentId, workdir ?? null]);
   }
   const c = await getConversation(convId);
   if (!c) throw new Error('对话创建失败');
@@ -213,6 +224,12 @@ export async function chatMessagesSince(convId: string, sinceId: number): Promis
 }
 
 export { nowString };
+
+/** 更新对话工作目录（远程 pi 下次回复在该路径下运行） */
+export async function setConversationWorkdir(convId: string, workdir: string | null): Promise<boolean> {
+  const r = (await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir, convId])) as unknown as { affectedRows?: number };
+  return Number(r.affectedRows ?? 0) > 0;
+}
 
 /** 任务上下文（对话绑定任务时，供 agent/桥接器注入 prompt：明确讨论的是哪个任务） */
 export async function getTaskContext(taskId: string): Promise<{

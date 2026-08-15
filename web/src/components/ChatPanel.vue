@@ -3,11 +3,13 @@ import { onMounted, onBeforeUnmount, ref, nextTick, watch } from 'vue';
 import { api } from '../api';
 import { renderMd } from '../md';
 
-/** 管理员 ↔ agent 任务对话面板（任务页 4/12 侧栏）
- *  从任务行发起：props.task 携带 { agent_id, agent_name, task_id, task_title } → 自动打开该任务对话
+/** 管理员 ↔ agent 对话面板（4/12 侧栏，任务页/主机详情页复用）
+ *  props.target：{ agent_id, agent_name, task_id?, task_title? }——任务对话带 task_id/task_title
+ *  （头部显示任务上下文）；主机对话只传 agent 信息（无任务上下文）。
  *  300ms 轮询增量（since_id）渲染打字机；消息 markdown 渲染 */
 const props = defineProps({
-  task: { type: Object, default: null }, // { agent_id, agent_name, task_id, task_title }
+  target: { type: Object, default: null }, // { agent_id, agent_name, task_id?, task_title? }
+  fullscreen: { type: Boolean, default: false }, // 全屏对话页模式（高度撑满视口，输入框贴底）
 });
 const emit = defineEmits(['close']);
 
@@ -21,17 +23,20 @@ const bodyEl = ref(null);
 const inputEl = ref(null);
 const sinceId = ref(0);
 const loading = ref(false);
+const workdirInput = ref('');
+const workdirMsg = ref('');
+const workdirSaving = ref(false);
 let pollTimer = null;
 
 onMounted(async () => {
   await loadAgents();
-  if (props.task) await openConversation();
+  if (props.target) await openConversation();
 });
 
 onBeforeUnmount(stopPolling);
 
 watch(
-  () => props.task,
+  () => props.target,
   async (t) => {
     if (t) await openConversation();
   },
@@ -54,7 +59,7 @@ async function refreshAgentInfo() {
 
 async function openConversation() {
   panelError.value = '';
-  const t = props.task;
+  const t = props.target;
   if (!t?.agent_id) return;
   loading.value = true;
   try {
@@ -78,6 +83,7 @@ async function loadHistory() {
   const data = await api.conversationMessages(conversation.value.conversation_id, 1, 100);
   messages.value = data.messages ?? [];
   sinceId.value = messages.value.length ? Number(messages.value[messages.value.length - 1].id) : 0;
+  workdirInput.value = conversation.value.workdir ?? '';
   await scrollBottom();
 }
 
@@ -175,10 +181,31 @@ async function archive() {
   messages.value = [];
   stopPolling();
 }
+
+/** 保存工作目录（远程 pi 下次回复在该路径下运行；限制在主机 home 下） */
+async function saveWorkdir() {
+  if (!conversation.value) return;
+  const wd = workdirInput.value.trim();
+  if (wd && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(wd)) {
+    workdirMsg.value = '须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验）';
+    return;
+  }
+  workdirSaving.value = true;
+  workdirMsg.value = '';
+  try {
+    const r = await api.updateConversationWorkdir(conversation.value.conversation_id, wd || null);
+    conversation.value.workdir = r.workdir;
+    workdirMsg.value = '已保存，下次回复在该目录下运行';
+  } catch (e) {
+    workdirMsg.value = e.message;
+  } finally {
+    workdirSaving.value = false;
+  }
+}
 </script>
 
 <template>
-  <div class="card chat-panel chat-panel-fixed d-flex flex-column">
+  <div class="card chat-panel d-flex flex-column" :class="props.fullscreen ? 'chat-panel-full' : 'chat-panel-fixed'">
     <!-- 头部：任务上下文 + agent -->
     <div class="card-header py-2 chat-header">
       <div class="d-flex justify-content-between align-items-start gap-2">
@@ -208,6 +235,19 @@ async function archive() {
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- 工作目录（全屏对话页：指定后远程 pi 在该路径下运行，限制在主机 home 下） -->
+    <div v-if="props.fullscreen && conversation" class="px-2 py-1 chat-wd">
+      <div class="input-group input-group-sm">
+        <span class="input-group-text"><i class="bi bi-folder2-open"></i></span>
+        <input v-model="workdirInput" class="form-control" placeholder="~/projects/xxx（限制在主机 home 下，空=默认目录）"
+               :disabled="workdirSaving" @keydown.enter.exact.prevent="saveWorkdir">
+        <button class="btn btn-outline-primary" :disabled="workdirSaving" @click="saveWorkdir">
+          {{ workdirSaving ? '保存中…' : '设置' }}
+        </button>
+      </div>
+      <div v-if="workdirMsg" class="small" :class="workdirMsg.startsWith('已') ? 'text-success' : 'text-danger'">{{ workdirMsg }}</div>
     </div>
 
     <!-- 消息流 -->
@@ -261,6 +301,10 @@ async function archive() {
   height: calc(100vh - 120px);
   min-height: 320px;
   max-height: calc(100vh - 120px);
+}
+.chat-panel-full {
+  height: calc(100vh - 88px);
+  min-height: 480px;
 }
 .chat-body {
   flex-grow: 1;
