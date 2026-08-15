@@ -212,7 +212,7 @@ export async function postMessageToTask(
 ): Promise<{ ok: boolean; error?: string }> {
   return withTransaction(async (conn) => {
     const tasks = (await conn.query(
-      `SELECT id, status, kind FROM tasks WHERE task_id = ? AND (assignee_id = ? OR creator_id = ?) LIMIT 1
+      `SELECT id, status FROM tasks WHERE task_id = ? AND (assignee_id = ? OR creator_id = ?) LIMIT 1
         FOR UPDATE`,
       [taskId, agent.id, agent.id],
     )) as Array<Record<string, unknown>>;
@@ -349,7 +349,7 @@ export async function submitTaskResult(
     `UPDATE tasks
         SET status = ?, result = ?, result_status = ?, result_at = ?, last_activity_at = ?
       WHERE task_id = ? AND assignee_id = ?
-        AND status IN ('pending','assigned','running')`,
+        AND status IN ('pending','assigned','running','open','claimed')`,
     [status === 'success' ? 'done' : 'failed', result, status, nowString(), nowString(), taskId, agent.id],
   );
   const affected = (updated as unknown as { affectedRows?: number }).affectedRows ?? 0;

@@ -25,6 +25,26 @@ const check = (name, cond, extra = '') => {
 
 // 管理员创建 agent 拿 key
 await api('POST', '/api/login', { password: PASSWORD });
+
+// 验收假设 LLM 未配置（门禁降级路径）：临时禁用真实 provider，跑完恢复
+const savedProviders = [];
+{
+  const { providers } = await api('GET', '/api/settings/llm-providers');
+  for (const p of providers ?? []) {
+    if (p.enabled) {
+      savedProviders.push(p.id);
+      await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: false });
+    }
+  }
+}
+const restoreLlm = async () => {
+  for (const id of savedProviders) {
+    const { providers } = await api('GET', '/api/settings/llm-providers');
+    const p = (providers ?? []).find((x) => x.id === id);
+    if (p) await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: true });
+  }
+};
+
 const created = await api('POST', '/api/agents', { name: 'rest-test', hostname: 't1' });
 const KEY = created.data.key;
 check('agent 创建', !!KEY);
@@ -40,35 +60,34 @@ check('heartbeat 返回 agent_id', hb.data.agent_id === created.data.agent.agent
 const info = await api('POST', '/api/agent/info', {}, KEY);
 check('info 身份', info.data.name === 'rest-test');
 
-// 创建 manual + scheduled 任务
+// 新模型基建：创建验收 plan（一个顺序 stage）——任务必须从属 stage
+async function createTestPlan(name) {
+  const r = await api('POST', '/api/plans', {
+    name, stages: [{ name: '阶段1', wait_prev: 1, recurrence: 'none', tasks: [] }],
+  });
+  const tree = await api('GET', `/api/plans/${r.data.plan_id}`);
+  return { plan_id: r.data.plan_id, stage_id: tree.data.plan.stages[0].id };
+}
+const plan = await createTestPlan('REST 验收计划');
+
+// 创建任务（强制挂 stage）+ 无 stage 拒绝
+const noStage = await api('POST', '/api/tasks', {
+  title: '无 stage 任务', assignee_id: created.data.agent.id, instruction: 'x',
+});
+check('任务必须从属 stage（缺 stage 拒绝）', noStage.status === 400, JSON.stringify(noStage.data));
 const manual = await api('POST', '/api/tasks', {
-  kind: 'manual', title: 'REST 测试任务', assignee_id: created.data.agent.id,
-  instruction: '测试 REST 回传', workdir: '/tmp/proj',
+  title: 'REST 测试任务', plan_id: plan.plan_id, stage_id: plan.stage_id,
+  assignee_id: created.data.agent.id, instruction: '测试 REST 回传', workdir: `/tmp/proj-${Date.now()}`,  // 唯一 workdir 防同目录互踩
 });
-check('manual 创建', manual.status === 201);
-await api('POST', '/api/tasks', {
-  kind: 'scheduled', title: 'REST 定时任务', assignee_id: created.data.agent.id,
-  schedule_cron: 'daily', window_start: '00:00', window_end: '23:59',
-  instruction: '测试 poll 放行',
-});
+check('任务创建（挂 stage）', manual.status === 201, JSON.stringify(manual.data));
 const list = await api('GET', '/api/tasks');
 const mTask = list.data.tasks.find((t) => t.title === 'REST 测试任务');
-const sTask = list.data.tasks.find((t) => t.title === 'REST 定时任务');
+check('列表含新任务', !!mTask, JSON.stringify(list.data.tasks));
 
-// poll 前：把定时任务改为到期，然后 poll
-const { createPool } = await import('mariadb');
-const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
-await pool.query(`UPDATE tasks SET next_due_at = DATE_SUB(NOW(), INTERVAL 30 MINUTE) WHERE task_id = ?`, [sTask.task_id]);
-
+// poll 领取（协作回合）
 const poll = await api('POST', '/api/agent/poll', {}, KEY);
-check('poll 领取 manual + 放行 scheduled', poll.data.tasks.length === 2, JSON.stringify(poll.data));
-check('poll 含 manual 任务', poll.data.tasks.some((t) => t.task_id === mTask.task_id && t.kind === 'manual'), JSON.stringify(poll.data.tasks));
-check('poll 含 scheduled 任务', poll.data.tasks.some((t) => t.task_id === sTask.task_id && t.kind === 'scheduled'), JSON.stringify(poll.data.tasks));
-check('poll 返回 workdir（scheduled 无）', poll.data.tasks.find((t) => t.task_id === sTask.task_id)?.workdir === null);
-
-// renew 续期（scheduled 放行后 running）
-const renew = await api('POST', '/api/agent/tasks/renew', { task_id: sTask.task_id }, KEY);
-check('renew 续期成功', renew.data.ok === true, JSON.stringify(renew.data));
+check('poll 领取 manual 任务', poll.data.tasks.some((t) => t.task_id === mTask.task_id), JSON.stringify(poll.data));
+check('poll 返回 workdir', poll.data.tasks.find((t) => t.task_id === mTask.task_id)?.workdir?.startsWith('/tmp/proj-'));
 
 // manual 协作会话：reply 回复 + resolve 关闭
 const reply = await api('POST', '/api/agent/tasks/reply', {
@@ -84,15 +103,25 @@ const wrongReply = await api('POST', '/api/agent/tasks/reply', {
 }, KEY);
 check('关闭后回复被拒', wrongReply.status === 400, JSON.stringify(wrongReply.data));
 
+// 第二个任务：workdir 写回 + result 回传 + 报告归档（协作闭环）
+const t2 = await api('POST', '/api/tasks', {
+  title: 'REST 结果任务', plan_id: plan.plan_id, stage_id: plan.stage_id,
+  assignee_id: created.data.agent.id, instruction: '测试 result 回传',
+});
+check('第二任务创建', t2.status === 201, JSON.stringify(t2.data));
+const list2 = await api('GET', '/api/tasks');
+const sTask = list2.data.tasks.find((t) => t.title === 'REST 结果任务');
+await api('POST', '/api/agent/claim', { task_id: sTask.task_id }, KEY);
+
 // workdir 写回
 const wd = await api('POST', '/api/agent/tasks/workdir', {
   task_id: sTask.task_id, workdir: '/opt/work/tasks/' + sTask.task_id,
 }, KEY);
 check('workdir 写回成功', wd.data.ok === true, JSON.stringify(wd.data));
 
-// result 回传（scheduled）
+// result 回传
 const result = await api('POST', '/api/agent/tasks/result', {
-  task_id: sTask.task_id, status: 'success', result: 'REST 定时任务完成',
+  task_id: sTask.task_id, status: 'success', result: 'REST 任务完成',
 }, KEY);
 check('result 回传成功', result.data.ok === true, JSON.stringify(result.data));
 const wrong = await api('POST', '/api/agent/tasks/result', {
@@ -108,10 +137,43 @@ check('报告归档成功', rep.data.ok === true, JSON.stringify(rep.data));
 const detail = await api('GET', `/api/tasks/${sTask.task_id}`);
 check('任务详情含报告', detail.data.reports.length >= 1, JSON.stringify(detail.data.reports));
 
+// 定时 stage（stage 级周期生成）：创建带定时 stage 的 plan → 触发扫描 → 生成 periodic 任务
+console.log('== 定时 stage（周期生成） ==');
+const schedPlan = await api('POST', '/api/plans', {
+  name: 'REST 定时 stage 计划',
+  stages: [{
+    name: '每日巡检', wait_prev: 1, recurrence: 'daily', window_start: '00:00', window_end: '23:59',
+    tasks: [{ title: '巡检模板', instruction: '检查并报告', assignee: created.data.agent.agent_id, visibility: 'private' }],
+  }],
+});
+check('定时 stage plan 创建', schedPlan.status === 201, JSON.stringify(schedPlan.data));
+// 提前 next_due + 首实例置 done（模拟完成）→ llm-scan 驱动周期生成（LLM 已禁用，扫描快速）
+const { createPool } = await import('mariadb');
+const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
+await pool.query(`UPDATE plan_stages SET next_due_at = DATE_SUB(NOW(), INTERVAL 30 MINUTE) WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)`, [schedPlan.data.plan_id]);
+await pool.query(`UPDATE tasks SET status='done', result='首轮完成', result_status='success' WHERE stage_id = (SELECT id FROM plan_stages WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)) AND origin='periodic'`, [schedPlan.data.plan_id]);
+await api('POST', '/api/settings/llm-scan', {}, undefined);
+const schedTree = await api('GET', `/api/plans/${schedPlan.data.plan_id}`);
+const schedTasks = schedTree.data.plan.stages[0].tasks;
+check('定时 stage 周期生成（首实例 done → 本轮生成）', schedTasks.length >= 2, JSON.stringify(schedTasks.map((t) => ({ id: t.task_id, origin: t.origin, status: t.status }))));
+check('生成任务 origin=periodic', schedTasks.every((t) => t.origin === 'periodic'), JSON.stringify(schedTasks.map((t) => t.origin)));
+// 再扫：最新实例未完成 → 跳过本轮（防堆积）
+await api('POST', '/api/settings/llm-scan', {}, undefined);
+const schedTree2 = await api('GET', `/api/plans/${schedPlan.data.plan_id}`);
+const schedTasks2 = schedTree2.data.plan.stages[0].tasks;
+check('未完成实例跳过本轮（防堆积）', schedTasks2.length === schedTasks.length, JSON.stringify(schedTasks2.map((t) => t.status)));
+
+// 定时 stage 手动追加拒绝
+const appendReject = await api('POST', '/api/tasks', {
+  title: '追加到定时 stage', plan_id: schedPlan.data.plan_id, stage_id: schedTree.data.plan.stages[0].id,
+  assignee_id: created.data.agent.id, instruction: 'x',
+});
+check('定时 stage 手动追加拒绝', appendReject.status === 400, JSON.stringify(appendReject.data));
+
 // 开放生态：公共池 REST（§8）：二段式程序扫描 + 认领
 console.log('== 开放生态：公共池 REST ==');
 const pubTask = await api('POST', '/api/tasks', {
-  kind: 'manual', title: 'REST 公共池任务', visibility: 'public',
+  title: 'REST 公共池任务', plan_id: plan.plan_id, stage_id: plan.stage_id, visibility: 'public',
   instruction: '公开任务：需要整理 CSV 数据',
   deliverable_spec: [{ name: '数据文件', min_count: 1, type: '.csv' }],
 });
@@ -164,5 +226,6 @@ const orphan = await api('POST', '/api/attachments/cleanup', {}, undefined);
 check('孤儿附件清理 ≥1', orphan.data.cleaned >= 1, JSON.stringify(orphan.data));
 
 await pool.end();
+await restoreLlm();
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);

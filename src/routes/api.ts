@@ -195,7 +195,7 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks WHERE assignee_id = ?`, [id])) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const tasks = await query(
-    `SELECT task_id, title, kind, status, next_due_at, result_status
+    `SELECT task_id, title, status, result_status
        FROM tasks WHERE assignee_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [id, pageSize, offset],
   );
@@ -253,14 +253,10 @@ function nextTaskId(): string {
 }
 
 apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
-  const { kind, status } = req.query as { kind?: string; status?: string };
+  const { status } = req.query as { status?: string };
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const params: unknown[] = [];
   let where = ' WHERE 1=1';
-  if (kind) {
-    where += ' AND t.kind = ?';
-    params.push(kind);
-  }
   if (status) {
     where += ' AND t.status = ?';
     params.push(status);
@@ -268,7 +264,7 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
   const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks t${where}`, params)) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const sql = `
-    SELECT t.task_id, t.title, t.kind, t.visibility, t.status, t.schedule_cron, t.next_due_at,
+    SELECT t.task_id, t.title, t.visibility, t.status, t.origin, t.plan_id, t.stage_id,
            t.result_status, t.result_at, t.created_at, t.workdir, t.deliver_attempts, t.max_attempts,
            a.id AS assignee_id, a.agent_id AS assignee, a.name AS assignee_name
       FROM tasks t
@@ -296,7 +292,6 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
   };
   const title = (body.title ?? '').trim();
   const instruction = (body.instruction ?? '').trim();
-  const planId = body.plan_id ? Number(body.plan_id) : null;
   const stageId = body.stage_id ? Number(body.stage_id) : null;
   const assigneeId = body.assignee_id ? Number(body.assignee_id) : null;
   const visibility: 'private' | 'public' = body.visibility === 'public' ? 'public' : 'private';
@@ -304,9 +299,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: '缺少标题或指令' });
     return;
   }
-  // 强制三层：任务必须从属 plan 的 stage（2026-08-15 编排模型重构；旧 kind='scheduled' 入口废弃，定时由 stage 负责）
-  if (!planId || !stageId) {
-    res.status(400).json({ error: '任务必须从属 plan 的 stage（缺少 plan_id 或 stage_id）' });
+  // 强制三层：任务必须从属 stage（stage 唯一确定 plan；2026-08-15 编排模型重构）
+  if (!stageId) {
+    res.status(400).json({ error: '任务必须从属 plan 的 stage（缺少 stage_id）' });
     return;
   }
 
@@ -330,14 +325,15 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
             ? (body.deliverable_spec as string).trim() || null
             : JSON.stringify(body.deliverable_spec);
 
-      // 校验 stage 属于 plan；定时 stage 禁止手动追加（只收周期生成）
+      // 校验 stage 存在；定时 stage 禁止手动追加（只收周期生成）；plan_id 由 stage 唯一确定
       const stRows = (await conn.query(
-        `SELECT s.recurrence FROM plan_stages s WHERE s.id = ? AND s.plan_id = ? LIMIT 1`,
-        [stageId, planId],
+        `SELECT s.plan_id, s.recurrence FROM plan_stages s WHERE s.id = ? LIMIT 1`,
+        [stageId],
       )) as Array<Record<string, unknown>>;
       if (stRows.length === 0) {
-        throw new Error('stage 不存在或不属于该 plan');
+        throw new Error('stage 不存在');
       }
+      const planIdNum = Number(stRows[0].plan_id);
       if (String(stRows[0].recurrence ?? 'none') !== 'none') {
         throw new Error('定时 stage 不接受手动追加任务（任务由周期自动生成）');
       }
@@ -353,7 +349,7 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
         const ins = await conn.query(
           `INSERT INTO tasks (task_id, title, instruction, origin, visibility, plan_id, stage_id, assignee_id, status, workdir, deliverable_spec)
            VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?)`,
-          [taskId, title, instruction, visibility, planId, stageId, assigneeId, status, workdir, deliverableSpec],
+          [taskId, title, instruction, visibility, planIdNum, stageId, assigneeId, status, workdir, deliverableSpec],
         );
         await conn.query(
           `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'chat', ?)`,
