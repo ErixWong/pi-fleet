@@ -280,7 +280,7 @@ function scanBadge(s) {
 
 <template>
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <router-link to="/tasks" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>任务列表</router-link>
+    <router-link to="/plans" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>计划列表</router-link>
     <button v-if="task?.assignee_id" class="btn btn-sm" :class="chatOpen ? 'btn-primary' : 'btn-outline-primary'" @click="toggleChat">
       <i class="bi bi-chat-dots me-1"></i>{{ chatOpen ? '收起对话' : '与 agent 对话' }}
     </button>
