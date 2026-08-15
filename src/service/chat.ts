@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { query } from '../db.js';
 import { nowString } from '../scheduler.js';
 
@@ -115,24 +114,22 @@ export async function getOrCreateConversation(agentId: number, taskId?: string, 
     if (!c) throw new Error('对话创建失败');
     return c;
   }
-  // 任务对话：复用同任务的 open 对话
+  // 任务对话：**固定 conversation_id conv-task-{taskId}，永远同一个 session**——刷新/多网页/归档后重开都是同一个对话
+  const convId = `conv-task-${taskId}`;
   const exist = (await query(
-    `SELECT id, conversation_id FROM conversations WHERE agent_id = ? AND status = 'open' AND task_id = ? ORDER BY updated_at DESC LIMIT 1`,
-    [agentId, taskId],
+    `SELECT conversation_id, status FROM conversations WHERE conversation_id = ? LIMIT 1`,
+    [convId],
   )) as Array<Record<string, unknown>>;
   if (exist.length > 0) {
-    const c = await getConversation(String(exist[0].conversation_id));
-    if (c) {
-      // 复用时若传了新的工作目录 → 更新（远程 pi 下次回复在该路径下运行）
-      if (workdir !== undefined && c.workdir !== workdir) {
-        await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir, c.conversation_id]);
-        const updated = await getConversation(c.conversation_id);
-        if (updated) return updated;
-      }
-      return c;
+    if (String(exist[0].status) === 'archived') {
+      await query(`UPDATE conversations SET status = 'open' WHERE conversation_id = ?`, [convId]);
     }
+    if (workdir !== undefined) {
+      await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir ?? null, convId]);
+    }
+    const c = await getConversation(convId);
+    if (c) return c;
   }
-  const convId = `conv-${randomBytes(4).toString('hex')}`;
   await query(`INSERT INTO conversations (conversation_id, agent_id, task_id, workdir) VALUES (?, ?, ?, ?)`, [convId, agentId, taskId, workdir ?? null]);
   const c = await getConversation(convId);
   if (!c) throw new Error('对话创建失败');
