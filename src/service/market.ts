@@ -544,6 +544,30 @@ async function insertDeliverableVersion(
  * 预检不合格 → claimed 续做回路，deliver_attempts+1，超上限 → failed（§3.3）。
  * 验收结果（预检/打回/通过）均以消息落库并标记来源（platform/发起人）——agent 续做读完整验收历史，不靠猜。
  */
+/**
+ * 交活说明回帖（§提交体验）：agent 提交验收时往消息流落一条「报告」，
+ * 避免任务线程只有平台 verdict——让执行方的完成说明/交付物清单可见。
+ * deliverables 须为已落库的版本（调用方保证顺序）。
+ */
+async function postSubmitNote(
+  conn: { query: (sql: string, p?: unknown[]) => Promise<unknown> },
+  taskId: number,
+  agentId: number,
+  result: string,
+  deliverables?: SubmitDeliverable[],
+): Promise<void> {
+  const lines = result?.trim() ? [`[提交说明] ${result.trim()}`] : ['[提交说明]（无文字说明）'];
+  const names = (deliverables ?? []).map((d) => {
+    const msg = (d.message ?? '').trim();
+    return msg ? `${d.name}：${msg}` : d.name;
+  });
+  if (names.length > 0) lines.push('交付物：' + names.join('；'));
+  await conn.query(
+    `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, ?, 'agent', 'report', ?)`,
+    [taskId, agentId, lines.join('\n')],
+  );
+}
+
 export async function submitForReview(
   agent: AgentIdentity,
   taskId: string,
@@ -572,6 +596,7 @@ export async function submitForReview(
       if (!['pending', 'running', 'open', 'claimed'].includes(status)) {
         return { ok: false, error: `任务已 ${status}，无法提交` };
       }
+      await postSubmitNote(conn, Number(t.id), agent.id, result);
       await conn.query(
         `UPDATE tasks SET status='done', result=?, result_status='success', result_at=?, last_activity_at=?
           WHERE id = ?`,
@@ -608,6 +633,7 @@ export async function submitForReview(
 
     if (!pre.ok) {
       const reason = `[平台预检未通过] ${pre.reasons.join('；')}`;
+      await postSubmitNote(conn, Number(t.id), agent.id, result, deliverables);
       if (attempts >= maxAttempts) {
         await conn.query(
           `UPDATE tasks SET status='failed', deliver_attempts=?, last_activity_at=? WHERE id = ?`,
@@ -633,6 +659,7 @@ export async function submitForReview(
     }
 
     // 5. 预检通过：配置 LLM → submitted 等异步验收（§10.2）；未配置 → 降级放行标记"未经 LLM 验收"
+    await postSubmitNote(conn, Number(t.id), agent.id, result, deliverables);
     if (await llmConfigured()) {
       await conn.query(
         `UPDATE tasks SET status='submitted', deliver_attempts=?, last_activity_at=? WHERE id = ?`,

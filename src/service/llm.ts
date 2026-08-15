@@ -432,12 +432,17 @@ export async function scanPendingAudits(): Promise<{ audited: number; rejected: 
 /** 审核结论落库：通过 → private+assignee=open / public=active；不通过 → rejected（原因回帖） */
 async function finalizeAudit(t: Record<string, unknown>, passed: boolean, reason: string): Promise<void> {
   const id = t.id;
+  let affected = 0;
   if (passed) {
     const target = t.assignee_id !== null ? 'open' : 'active';
-    await query(`UPDATE tasks SET status = ? WHERE id = ? AND status = 'pending_audit'`, [target, id]);
+    const updated = await query(`UPDATE tasks SET status = ? WHERE id = ? AND status = 'pending_audit'`, [target, id]);
+    affected = (updated as { affectedRows?: number }).affectedRows ?? 0;
   } else {
-    await query(`UPDATE tasks SET status = 'rejected' WHERE id = ? AND status = 'pending_audit'`, [id]);
+    const updated = await query(`UPDATE tasks SET status = 'rejected' WHERE id = ? AND status = 'pending_audit'`, [id]);
+    affected = (updated as { affectedRows?: number }).affectedRows ?? 0;
   }
+  // 并发保护：UPDATE 未命中（0 行）说明已被另一扫描处理过，不再重复回帖
+  if (affected === 0) return;
   await query(
     `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
     [id, passed ? `[LLM 审核通过] ${reason}` : `[LLM 审核未通过] ${reason}（请用 task(revise) 修订后重新提交审核）`],
@@ -468,8 +473,10 @@ async function collectDeliverables(
     }
     const mime = String(r.mime ?? '');
     const abs = path.join(getSetting('attachments_root'), String(r.relative_path));
+    // SVG 是矢量文本（XML），LLM 多模态接口不认（cannot identify image file），按文本读取
+    const isSvg = mime === 'image/svg+xml';
     // 图片：读入内存（多模态识图），限制数量与大小
-    if (mime.startsWith('image/')) {
+    if (mime.startsWith('image/') && !isSvg) {
       if (images.length >= 5) {
         textParts.push(`- ${r.name}@${r.version}：图片 ${r.filename}（超出识图数量上限 5，仅列存在）`);
         continue;
@@ -488,6 +495,7 @@ async function collectDeliverables(
     }
     const textLike =
       mime.startsWith('text/') ||
+      isSvg ||
       ['application/json', 'application/xml', 'application/yaml', 'application/x-yaml', 'application/markdown', 'application/javascript'].includes(mime);
     if (!textLike) {
       textParts.push(`- ${r.name}@${r.version}：二进制附件 ${r.filename}（${mime}，${r.size_bytes} 字节，只验存在性与类型）`);
@@ -574,7 +582,9 @@ export async function scanPendingVerifications(): Promise<{ verified: number; pa
 async function finalizeVerification(t: Record<string, unknown>, passed: boolean, reason: string): Promise<void> {
   const id = t.id;
   if (passed) {
-    await query(`UPDATE tasks SET status = 'pending_confirm' WHERE id = ? AND status = 'submitted'`, [id]);
+    const updated = await query(`UPDATE tasks SET status = 'pending_confirm' WHERE id = ? AND status = 'submitted'`, [id]);
+    // 并发保护：UPDATE 未命中（0 行）说明已被另一扫描处理过，不再重复回帖
+    if ((updated as { affectedRows?: number }).affectedRows === 0) return;
     await query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `[LLM 验收通过] ${reason}`],
@@ -585,13 +595,15 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
   const maxAttempts = Number(t.max_attempts) || 3;
   const note = `[LLM 验收未通过] ${reason}`;
   if (attempts >= maxAttempts) {
-    await query(`UPDATE tasks SET status='failed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
+    const updated = await query(`UPDATE tasks SET status='failed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
+    if ((updated as { affectedRows?: number }).affectedRows === 0) return;
     await query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
     );
   } else {
-    await query(`UPDATE tasks SET status='claimed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
+    const updated = await query(`UPDATE tasks SET status='claimed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
+    if ((updated as { affectedRows?: number }).affectedRows === 0) return;
     await query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
