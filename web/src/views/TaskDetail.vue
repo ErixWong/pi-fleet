@@ -497,7 +497,7 @@ function scanBadge(s) {
     </div>
     </div>
   <div v-if="chatOpen && task?.assignee_id" class="col-4">
-    <ChatPanel :task="activeTask" @close="toggleChat" />
+    <ChatPanel :target="activeTask" @close="toggleChat" />
   </div>
   </div>
   </div>
