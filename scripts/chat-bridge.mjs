@@ -55,6 +55,7 @@ function killSession(convId) {
   const s = sessions.get(convId);
   if (!s) return;
   clearTimeout(s.idleTimer);
+  clearTimeout(s.timeoutTimer);
   try { s.proc.kill(); } catch { /* already dead */ }
   sessions.delete(convId);
   console.log(`[bridge] 空闲回收 ${convId}`);
@@ -87,10 +88,13 @@ function scheduleIdleKill(convId) {
 function spawnPi(convId, onEvent) {
   const existing = sessions.get(convId);
   const s = existing ?? {
-    proc: null, seq: 1, idleTimer: null, busy: false, buffer: '',
+    proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '',
   };
   if (!existing) sessions.set(convId, s);
-  if (s.busy) return; // 上一条还没回完，忽略并发
+  if (s.busy) {
+    console.log(`[bridge] ${convId} 上一条还在处理中，忽略本次消息`);
+    return; // 上一条还没回完，忽略并发（超时保护会兜底解除）
+  }
   if (!s.proc || s.proc.killed || s.proc.exitCode !== null) {
     const cwd = resolveWorkdir(s.workdir) ?? process.cwd();
     if (!existsSync(cwd)) {
@@ -126,6 +130,17 @@ function sendPrompt(convId) {
   if (!s || !s.proc || s.proc.killed) return;
   s.busy = true;
   clearTimeout(s.idleTimer);
+  // 生成超时保护：busy 超过 PI_TIMEOUT_MS（默认 5 分钟）→ 终止 pi + 解除 busy + 回帖提示
+  clearTimeout(s.timeoutTimer);
+  s.timeoutTimer = setTimeout(() => {
+    const ss = sessions.get(convId);
+    if (!ss || !ss.busy) return;
+    console.log(`[bridge] pi 生成超时（>${PI_TIMEOUT_MS / 1000}s），终止会话 ${convId}`);
+    try { ss.proc?.kill(); } catch { /* already dead */ }
+    ss.busy = false;
+    ss.proc = null;
+    forward({ type: 'conv_stream_end', conversation_id: convId, content: `\n\n⏱️ 回复超时已终止（生成超过 ${PI_TIMEOUT_MS / 60000} 分钟），如需继续请重发消息。` });
+  }, PI_TIMEOUT_MS);
   const msg = buildPrompt(s);
   console.log(`[bridge] prompt → pi ${convId}: ${msg.slice(0, 60)}`);
   s.proc.stdin.write(JSON.stringify({ type: 'prompt', id: String(s.seq++), message: msg }) + '\n');
@@ -163,7 +178,7 @@ function handlePiEvent(convId, evt, onEvent) {
     console.log(`[bridge] pi agent_end ${convId}: ${text.length} 字`);
     if (text.trim()) onEvent({ type: 'conv_stream_end', conversation_id: convId, content: text.trim() });
     const s = sessions.get(convId);
-    if (s) { s.busy = false; scheduleIdleKill(convId); }
+    if (s) { s.busy = false; clearTimeout(s.timeoutTimer); scheduleIdleKill(convId); }
   }
 }
 
@@ -176,7 +191,7 @@ function connect() {
     let evt; try { evt = JSON.parse(String(raw)); } catch { return; }
     if (evt.type === 'conv_new_message' && evt.conversation_id) {
       const s = sessions.get(evt.conversation_id);
-      const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null, workdir: evt.workdir ?? null };
+      const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null, workdir: evt.workdir ?? null };
       if (s) { s.pendingMsg = evt.content; if (evt.task) s.taskCtx = evt.task; if (evt.workdir) s.workdir = evt.workdir; }
       else sessions.set(evt.conversation_id, init);
       console.log(`[bridge] ${new Date().toLocaleTimeString()} 新消息 ${evt.conversation_id}: ${String(evt.content).slice(0, 40)}` + (evt.task ? `（任务 ${evt.task.task_id}）` : '') + (evt.workdir ? `（workdir ${evt.workdir}）` : ''));
@@ -223,7 +238,7 @@ async function startPolling() {
             workdir = hist.conversation?.workdir ?? null;
           } catch { /* 拉不到上下文不影响回复 */ }
           const s = sessions.get(c.conversation_id);
-          const init = { proc: null, seq: 1, idleTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx, workdir };
+          const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx, workdir };
           if (s) { s.pendingMsg = c.last_message ?? '请继续我们的对话。'; if (taskCtx) s.taskCtx = taskCtx; if (workdir) s.workdir = workdir; }
           else sessions.set(c.conversation_id, init);
           spawnPi(c.conversation_id, forward);
