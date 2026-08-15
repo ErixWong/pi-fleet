@@ -127,14 +127,12 @@ function badge(status) {
     <h6 class="mt-3">指派给该 Agent 的任务</h6>
     <div v-if="tasks.length === 0" class="card"><div class="card-body text-secondary">暂无任务。</div></div>
     <table v-else class="table table-hover">
-      <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>下次执行</th><th>结果</th></tr></thead>
+      <thead><tr><th>任务</th><th>状态</th><th>结果</th></tr></thead>
       <tbody>
         <tr v-for="t in tasks" :key="t.task_id">
           <td><router-link :to="`/tasks/${t.task_id}`">{{ t.title }}</router-link>
             <div class="text-secondary small">{{ t.task_id }}</div></td>
-          <td><span class="badge" :class="t.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ t.kind }}</span></td>
           <td><span class="badge badge-status" :class="badge(t.status)">{{ t.status }}</span></td>
-          <td class="text-secondary small">{{ t.next_due_at || '—' }}</td>
           <td>{{ t.result_status || '—' }}</td>
         </tr>
       </tbody>

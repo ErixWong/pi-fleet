@@ -84,7 +84,7 @@ docs/agent-onboarding.md  # agent 接入指南（通用契约 + pi 参考实现�
 - **Windows 端口残留**：`npm run dev`（tsx）停止时子进程可能残留占 3000 端口，
   重启前先 `Get-NetTCPConnection -LocalPort 3000 | 杀进程`；生产用 `node dist` 无此问题
 - **测试数据**：验收脚本会创建 test-agent-* 与 T-* 任务，属正常现象；`npm test`（scripts/test-all.mjs）当前 160 用例 = MCP 101 + REST 38 + Web UI 21（playwright chromium，覆盖编排树表单/树视图/可见性改档/failed 处置/设置页）；跑前自动临时禁用已配置的真实 LLM provider（验收假设未配置环境），跑完恢复；第 9 节覆盖编排全链路（含周期克隆闭环/首实例身份/闸门/plan 上下文分级）；三个脚本各自也带 LLM 禁用/恢复包装
-- **legacy scheduled 并存**：旧入口 `POST /api/tasks kind='scheduled'`（tasks.ts 原地推进 next_due_at，无 plan）与新周期 plan（克隆）**双机制并存**，旧入口已标废弃、后续移除（见 orchestration.md §九迁移口径）
+- **legacy scheduled 已移除**：2026-08-15 表重建后 `kind/schedule_cron/next_due_at` 列与旧入口 `POST /api/tasks kind='scheduled'` 一并删除；定时一律由 stage 的 `recurrence` 属性负责（stage 生成器按期克隆，见编排 §三）
 
 ## 分页组件（web/src/components/Pagination.vue）
 

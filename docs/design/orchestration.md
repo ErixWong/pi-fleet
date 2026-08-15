@@ -1,7 +1,7 @@
 # 编排体系（plan / stage / task 三层，[已落地]）
 
-> 状态：已实施（2026-08-14）；实现参照 `src/service/plans.ts`（闸门/克隆）+ `market.ts`（stage_id 落点/plan 上下文分级）+ `api.ts`（plans 路由/处置端点）+ `web/src/views/Plans.vue`/`PlanDetail.vue`。
-> 验收覆盖：`scripts/mcp-acceptance.mjs` 第 9 节（闸门/blocked 排除/追加/周期克隆+重叠跳过+series 串接/plan 上下文分级/交付物可见性/failed 处置）。
+> 状态：**2026-08-15 重构定稿**（强制三层 + stage 双属性，已落地）；实现参照 `src/service/plans.ts`（闸门/克隆）+ `market.ts`（stage_id 落点/plan 上下文分级）+ `api.ts`（plans 路由/处置端点）+ `web/src/views/Plans.vue`（列表展开树）/`PlanDetail.vue`（树视图）。
+> 验收覆盖：`scripts/mcp-acceptance.mjs` 第 9 节（闸门/blocked 排除/追加/周期克隆+重叠跳过+series 串接/plan 上下文分级/交付物可见性/failed 处置）+ `rest-acceptance.mjs`（定时 stage 周期生成/跳过防堆积）+ `web-acceptance.mjs`（树表单/树视图）；npm test 160 用例全绿。
 > 与 `open-ecosystem.md` 配合使用：任务状态机、visibility、验收、工具收敛原则以该文为准（引用写作「生态 §x.x」），本文只定义其上的编排结构。
 
 **命名**：编排容器定名 **plan**（弃用 project——生态 §9.4 已用"项目模式"指 workdir 工程，撞车会在 AGENTS.md 简报 / MCP 工具 / Web UI 三处制造歧义）。三层即 **plan（计划）→ stage（阶段）→ task（任务）**。
@@ -10,26 +10,25 @@
 
 ## 一、模型与规则
 
-- task 保持现有状态机 / visibility / 验收语义不变，新增可选 `stage_id`；stage 有 plan 内序号 `seq`。
-- **顺序闸门**：plan 的"当前 stage" = seq 最小且未完成的 stage；只有当前 stage 的任务可认领、可出现在 due/pool。闸门以显式 `blocked` 状态落地（见 §二），不靠查询过滤。
-- **stage 完成判定**：全部任务 ∈ {done, cancelled}。`failed` 卡住 stage——**谁发布谁处理**（发起人重开或取消；平台不做自动回收，stalled 经 Web plan 视图可见）。
+- **强制三层**：任务必须从属 stage（`plan_id / stage_id` NOT NULL + FK），不再有独立任务；stage 有 plan 内序号 `seq`。task 保持现有状态机 / visibility / 验收语义不变。
+- **stage 双属性（自由组合）**：`wait_prev`（1=等待前序完成，顺序闸门 / 0=并发，不等待）+ `recurrence`（none / daily / weekly:x / hourly，自动重复生成）。两个属性互不限制——定时 stage 的位置、数量随便放，平台不做其他限制（玩法是玩家的）。
+- **顺序闸门**：plan 的"当前 stage" = seq 最小且未完成的 stage；`wait_prev=1` 的 stage 只有当前 stage 的任务可认领、可出现在 due/pool；`wait_prev=0` 的 stage 永远激活（并发，闸门不等待它）。闸门以显式 `blocked` 状态落地（见 §二），不靠查询过滤。
+- **stage 完成判定**：全部任务 ∈ {done, cancelled}（空 stage 视为完成、跳过不卡闸门）。`failed` 卡住 stage——**谁发布谁处理**（发起人重开或取消；平台不做自动回收，stalled 经 Web plan 视图可见）。
 - **cancelled = 跳过**：取消是发起人的显式判决（权责一体），不阻塞闸门；但放行事件回帖必须列出跳过清单，且下游任务的 plan 上下文（`task(detail)`）可见前序 stage 终态摘要——下游 agent 看到任务时就知道哪个上游被取消了。
-- **task 去周期化**：task 不再携带 schedule 字段；任务级 `schedule_cron / window / next_due_at` 退役并上移到 plan。
-- **周期性归 plan**（`recurrence: null | daily | weekly:d | hourly` + 错峰窗口），且 **recurrence 非空 ⇒ 恰好一个 stage**（论证见 §三）。
+- **任务原子化**：任务不携带任何 schedule 字段（`kind / schedule_cron / window / next_due_at` 已删列）；重复是 **stage 的属性**（recurrence），由 stage 生成器（runPeriodicClones）按期克隆新任务实例。
 - **范围声明**：stage 是全量栅栏——本模型面向批量阶段、不面向 DAG；依赖复杂时 stage 可退化为单任务壳，这是接受的用法。
 - `plan.status: active | paused | archived | done`：done = 一次性 plan 全部 stage 完成后的自动展示态；plan 只归档不删除（留痕优先）。
 
 ## 二、闸门与状态机约定（blocked）
 
-- 任务过发布门禁后落点：所属 stage 是当前 stage → `active`；非当前 → `blocked`。
+- 任务过发布门禁后落点：所属 stage 是当前 stage（wait_prev=1 时）→ `active`；非当前 → `blocked`；wait_prev=0（并发）的 stage 永远激活、不落 blocked。
 - `blocked → active`：前序 stage 完成时平台批量放行，回帖留痕（含本 stage 放行清单与前序跳过清单）。
 - `blocked` 不出现在 due/pool、不可 claim；可被发起人 cancel（直接终态）。
-- 结构变更时的落点：往当前 stage 加任务 → active；往未来 stage 加 → blocked；已完成 stage 不允许追加、不允许重开（已定）。
-- 周期 plan 不适用本节（单 stage，无闸门）。
+- 结构变更时的落点：往当前 stage 加任务 → active；往未来 stage 加 → blocked；已完成 stage 不允许追加（空 stage 除外，见 §五）。
 
-## 三、周期性：序列克隆模型（无模板）
+## 三、周期性：stage 级序列克隆模型（无模板）
 
-**没有"模板"实体**。周期 plan 唯一 stage 内的任务就是普通任务；`next_due_at` 到点时，平台从**上一实例克隆定义字段**（title / instruction / deliverable_spec / visibility / assignee / window）生成新实例行：
+**没有"模板"实体**。带 `recurrence` 的 stage 内的任务就是普通任务；`next_due_at` 到点时，平台从**该 stage 上一实例克隆定义字段**（title / instruction / deliverable_spec / visibility / assignee / window）生成新实例行：
 
 - `series_id`（= 首实例 id）串起整条序列，"查这条流水的全部周期历史"即 `WHERE series_id=?`；修改当前实例的定义字段，下一棒克隆新定义。
 - **重叠策略（已定）**：到点时上一实例未终结 → 跳过本轮 + 回帖记录，`next_due_at` 照常推进（防堆积）。
@@ -38,20 +37,19 @@
   - public：首实例过 LLM 审核；后续实例定义字段 content hash 未变 → 继承审核结论（标记"继承审核"），有变更 → 重新审核。
 - **编辑与重审**：只有修改**最新实例**的定义字段才影响下一棒克隆（序列级编辑入口后议）；content hash 覆盖 title / instruction / deliverable_spec；**visibility 变更（尤其 private→public）强制重审，不走继承**。
 - **实例允许 public**：周期任务可进公共池被认领（验收链照走，执行者是陌生人）；玩家若坚持用自己 agent 经 LLM 手动周期发布，平台不阻拦——玩法是玩家的，不违反平台规则即可。
+- **周期 stage 禁止手动追加任务**（防污染克隆源：克隆源 = stage 内最新任务）。
 - `plan.status` 非 active 不克隆（paused 可恢复）；状态全集见 §一。
 
-**"归拢"不由 stage 承担**：周期 plan 每周期克隆一条实例，序列本身经 `series_id` 归拢可查（`WHERE series_id=?` 即全部历史）；需要"每周汇总"这类动作时，做法是另建一个**周频周期 plan**，其任务读取日频序列的交付物做汇总——同 plan 内不存在"每周 stage"（单 stage 约束），组合交给玩家。典型用例：日频采集设备健康数据（规范格式交付物）+ 周频汇总分析。
+**"归拢"不由 stage 承担**：周期 stage 每轮克隆一条实例，序列本身经 `series_id` 归拢可查（`WHERE series_id=?` 即全部历史）；需要"每周汇总"这类动作时，做法是另建一个**周频周期 stage**，其任务读取日频序列的交付物做汇总——组合交给玩家。典型用例：日频采集设备健康数据（规范格式交付物）+ 周频汇总分析。
 
-**为什么周期性归 plan 且限单 stage**（一轮结论，保留）：
+**为什么周期性归 stage（重构定稿，2026-08-15）**：
 
-- 周期性的本质是"同一件整体工作按周期重演"，重演单位是 plan 整体；stage 级周期与线性闸门语义冲突（重演序列中间的 stage 没有定义）。
-- 多 stage 周期化的诚实模型是 run-instance（每周期克隆整条 pipeline 一份实例，template/instance 双层）——当前超配，**明确不做（后议）**。
-- 单 stage 约束下"plan 的周期 ≡ 其唯一 stage 的周期"，归属争议消失；约束在创建时校验。
-- 周期多 stage 需求的合法玩法：周期任务的执行内容是创建一个新的一次性多 stage plan——组合交给玩家，平台保持最小原语（无形无色）。
+- 早期结论（2026-08-14）把周期绑在 plan 且限单 stage（"plan 的周期 ≡ 唯一 stage 的周期"）；用户拍板**放宽**：重复是 stage 的属性，`wait_prev × recurrence` 自由组合——定时 stage 可以在任何位置（前/中/后）、数量不限。
+- 组合语义自然涌现：`wait_prev=0 + recurrence` = 常开流水线（不等待、定期补货）；`wait_prev=1 + recurrence` = 周期性阶段门禁（每轮完成才放行下一轮）。
 
 ## 四、kind 退役：行为由 visibility × origin 推导
 
-`tasks.kind`（manual / scheduled）作为行为开关退役，改为 `origin: manual | periodic`（+ `series_id`）纯留痕字段。提交与门禁行为由 **visibility × origin** 矩阵推导：
+`tasks.kind`（manual / scheduled）已**删列**（2026-08-15 重建），`origin: manual | periodic`（+ `series_id`）纯留痕字段。提交与门禁行为由 **visibility × origin** 矩阵推导：
 
 | 路径 | 发布门禁 | submit 分流 |
 |------|----------|-------------|
@@ -64,16 +62,16 @@
 
 ## 五、plan 的创建与工具面
 
-- **plan 由人创建**（Web / REST）：stages + tasks 在 Web 表单一次性定义。**agent 明确不能创建 plan**（不放开：防 plan / task 无限创建），只能 `task(create, stage_id?)` 往已有 stage 加任务，且**限 plan 参与人**（在该 plan 任一 stage 发起或执行过任务；2026-08-14 审查后补充——否则任何 agent 可借追加成为 creator 拿到全量 plan 上下文，绕过下方内外分离分级）。空 stage 与已完成 stage 同口径拒绝追加（空=完成，与闸门一致，防 blocked 死锁）。
+- **plan 由人创建**（Web / REST）：stages + tasks 在 Web 表单一次性定义。**agent 明确不能创建 plan**（不放开：防 plan / task 无限创建），只能 `task(create, stage_id)` 往已有 stage 加任务，且**限 plan 参与人**（在该 plan 任一 stage 发起或执行过任务；2026-08-14 审查后补充——否则任何 agent 可借追加成为 creator 拿到全量 plan 上下文，绕过下方内外分离分级）。**空 plan 例外（2026-08-15 修正）**：plan 尚无任何任务时允许任意 agent 追加首个任务（空 plan 无上下文可泄露；否则 agent 永远无法给空 stage 填第一个任务，鸡生蛋）。有任务后恢复参与人校验。已完成 stage 不允许追加（§二）；周期 stage 禁止追加（§三）。
 - **MCP 不新增工具**（维持生态 §3.6 三把收敛）：plan 上下文经 `task(detail)` 暴露，且**按参与者身份分级**——己方（发起人 creator **或执行方 assignee**，含公共池认领后的执行方）见全量（plan 名称、stage 位置（第几 / 共几）、兄弟任务状态、前序 stage 终态摘要（含跳过清单））；其余外部浏览者（未认领的池中浏览）只见最小事实（前序 stage 已完成、含 N 个跳过），对齐内外分离哲学（生态 §五）。
   > 口径说明（2026-08-14 审计后确认）：管理员建的 plan（creator_id=NULL）无「发起人」视角，执行方（assignee=me）是唯一需要完整上下文的参与者，故 assignee 视同己方；外部最小事实同时**不含 plan 名称**（元信息不泄露）。
 - **failed 处置操作**（先仅 Web，agent 侧后议）：重开 = attempts 清零，按落点回 open（private+assignee）/ active（public）；改派 assignee 后**直接落 open/active**（attempts 清零，留痕回帖，无需 reopen 两步）；取消 = 跳过（§一）。取消白名单含 `failed` 与 `blocked`（管理端与 MCP `task(cancel)` 一致；blocked 取消为闸门死锁兜底，2026-08-14 审查后补齐）。
-- Web：plan 树视图，当前 stage 高亮、后续 stage 置灰；stalled（failed 卡住）在视图中可见。
-- 结构修订（add_stage / 调序 / 中途插入）后议；周期 plan 禁止追加 stage（创建校验保证）。
+- Web：`/plans` 列表页（plan 行点击展开 stage→task 树，plan 名链接进 `/plans/:planId` 树视图）——树视图当前 stage 高亮、后续 stage 置灰；stalled（failed 卡住）在视图中可见。
+- 结构修订（add_stage / 调序 / 中途插入）后议；周期 stage 禁止追加任务（§三）。
 
-## 六、plan 可选性
+## 六、plan 可选性（已废止）
 
-plan 是可选的上层组织方式，不是准入门槛：独立 task（无 `stage_id`）行为与现状完全一致。理由：市场语义（visibility / claim / 验收）都长在 task 上，强制 plan 包裹只会给"发一个任务"加无谓间接层。
+> 2026-08-15 重构：~~plan 是可选的上层组织方式，不是准入门槛；独立 task（无 `stage_id`）行为与现状完全一致~~。**强制三层**已落地——任务必须从属 plan 的 stage（`tasks.plan_id / stage_id` NOT NULL + FK，表已重建），不存在独立任务；`POST /api/tasks` 只需 `stage_id`（stage 唯一确定 plan）。
 
 ## 七、跨账号协作形态（已定调）
 
@@ -89,14 +87,14 @@ plan 是可选的上层组织方式，不是准入门槛：独立 task（无 `st
 
 ## 九、与现状的映射（实施迁移依据）
 
-| 现状 | 编排模型 |
+| 现状 | 编排模型（已落地） |
 |------|----------|
-| `kind='scheduled'` + schedule_cron/window/next_due_at | 周期 plan（单 stage，每任务一条 series），schedule 字段上移 plan；旧入口 `POST /api/tasks kind='scheduled'` 为 **legacy 并存**（见下方迁移口径） |
-| `kind='manual'` | origin=manual；独立 task 或一次性 plan 内任务 |
+| `kind='scheduled'` + schedule_cron/window/next_due_at | **已删列**（2026-08-15 表重建）；重复由 stage 的 `recurrence` 属性负责，stage 生成器按期克隆 |
+| `kind='manual'` 独立任务 | 任务必须从属 plan 的 stage（`plan_id/stage_id` NOT NULL）；一次性任务 = 单 stage plan 内的任务 |
 | 生态 §3.4 "scheduled 不经门禁" | 语义迁移：private 周期实例不经门禁（§四矩阵） |
 | 超时回收 / 生命周期策略（生态 §10.2） | 不变，作用于实例 task；plan/stage 无自动回收（failed 谁发布谁处理） |
 
-> **迁移口径（2026-08-14 审计后确认）**：legacy `kind='scheduled'` 旧入口（tasks.ts 原地推进 next_due_at、无 plan 归属）与新周期 plan（克隆）**双机制并存**——旧入口短期保留并**标废弃**（后续移除），新周期性需求一律走周期 plan；两种入口数据互不干扰（legacy 行 origin='periodic' 但无 plan/stage 归属，克隆扫描只认 `plans` 表）。克隆实例统一 `kind='manual'`（origin='periodic' 留痕），走 manual 拾取/提交链路，不再依赖 scheduled 分支。
+> **迁移口径（2026-08-15 定稿）**：legacy `kind='scheduled'` 旧入口（tasks.ts 原地推进 next_due_at、无 plan 归属）已随表重建**移除**；编排表（plans / plan_stages / tasks）清空重建，旧数据不保留。
 
 ## 十、决策记录
 
@@ -126,6 +124,15 @@ plan 是可选的上层组织方式，不是准入门槛：独立 task（无 `st
 - **周期重叠策略**：上一实例未终结 → 跳过本轮 + 回帖（§三）
 - **agent 明确不能创建 plan**：必须用户自己创建，防 plan / task 无限创建（§五）
 - **plan 上下文暴露分级**：外部认领者只见最小事实（前序完成 / 含 N 跳过），己方玩家见全量（§五）
+
+### 已确认（2026-08-15 重构定稿）
+
+- **强制三层**：任务必须从属 plan 的 stage（`plan_id/stage_id` NOT NULL + FK），独立任务不复存在；`POST /api/tasks` 只需 stage_id
+- **stage 双属性自由组合**：`wait_prev`（顺序闸门 / 并发）× `recurrence`（none/daily/weekly:x/hourly）互不限制，定时 stage 位置/数量随便放（推翻 08-14 单 stage 限制）
+- **任务原子化**：task 不自我重复；重复是 stage 属性，stage 生成器按期克隆（series_id / 防堆积 / 审核继承沿用）
+- **空 plan 可追加首个任务**：无任务时任意 agent 可 append（无上下文可泄露），有任务后恢复参与人校验（§五修正）
+- **legacy scheduled 移除**：旧入口与 `kind/schedule_cron/next_due_at` 列随表重建删除，旧数据不保留（§九）
+- **页面合并**：`/plans` 列表展开 stage→task 树，plan 名链接进 `/plans/:planId` 树视图
 - **failed 处置**：重开 = attempts 清零回 active；改派 assignee 允许 + 留痕回帖；操作面先仅 Web（§五）
 - **一次性 plan 全 stage 完成自动置 done；plan 只归档不删除**（§一）
 - **序列编辑与重审**：改最新实例才影响下一棒；hash 覆盖 title / instruction / deliverable_spec；visibility 变更强制重审（§三）

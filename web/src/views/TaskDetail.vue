@@ -268,7 +268,6 @@ function scanBadge(s) {
           <h4 class="mb-0 fw-bold">{{ task.title }}</h4>
           <span class="text-secondary small">{{ task.task_id }}</span>
           <span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span>
-          <span class="badge" :class="task.kind === 'scheduled' ? 'text-bg-info' : 'text-bg-secondary'">{{ task.kind }}</span>
           <span class="badge" :class="task.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
                 :title="task.visibility === 'public' ? '公开：公共池可认领' : '私有：仅发起人及指派主机'">{{ task.visibility }}</span>
         </div>
@@ -276,10 +275,6 @@ function scanBadge(s) {
           <span><i class="bi bi-person-plus me-1"></i>发起方：{{ task.creator_name || '管理员' }} {{ task.creator_agent_id || '' }}</span>
           <span><i class="bi bi-person-check me-1"></i>执行方：{{ task.assignee_name }} ({{ task.assignee }})</span>
           <span v-if="task.workdir"><i class="bi bi-folder2-open me-1"></i>工作目录：<code>{{ task.workdir }}</code></span>
-          <template v-if="task.kind === 'scheduled'">
-            <span><i class="bi bi-arrow-repeat me-1"></i>周期：{{ task.schedule_cron }}</span>
-            <span><i class="bi bi-alarm me-1"></i>下次：{{ task.next_due_at }}</span>
-          </template>
           <span><i class="bi bi-clock me-1"></i>创建：{{ task.created_at }}</span>
           <span v-if="task.status === 'resolved' || task.status === 'done'">
             <i class="bi bi-check2-circle me-1"></i>完成：{{ task.resolved_by_name || '管理员' }} · {{ task.result_at }}
