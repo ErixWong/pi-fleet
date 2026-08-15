@@ -76,6 +76,7 @@ docs/agent-onboarding.md  # agent 接入指南（通用契约 + pi 参考实现�
 
 ## 关键约定
 
+- **及时提交 + 提醒 push**：完成一个功能/修复（跑完验收后）就 git commit（message 用中文详细概括：`feat:`/`fix:` 前缀 + 要点列表），并**明确提醒用户 push 到远程仓库**；不要攒一堆改动到最后才提交
 - **业务逻辑只写一份**：新功能先放 `src/service/tasks.ts` / `market.ts`，REST 和 MCP 都调它
 - **时间**：Node 侧生成本地字符串，数据库不做时间判断
 - **BIGINT 是字符串**：连接池配置了 bigNumberStrings，id 字段是字符串类型
