@@ -187,13 +187,20 @@ export async function createTask(
       if (!place.ok) return { ok: false, error: place.error };
       if (place.stageDone) return { ok: false, error: '该 stage 已完成（或为空 stage 已被跳过），不允许追加任务（§编排二）' };
       // 参与者校验（§编排五 内外分离）：非 plan 参与人追加会借 creator 身份拿到全量 plan 上下文（含他人私有任务）
-      const participant = (await conn.query(
-        `SELECT 1 FROM tasks t JOIN plan_stages s ON s.id = t.stage_id
-          WHERE s.plan_id = ? AND (t.creator_id = ? OR t.assignee_id = ?) LIMIT 1`,
-        [place.planId, agent.id, agent.id],
+      // 例外：plan 尚空（无任何任务）时允许追加首个任务（空 plan 无上下文可泄露）
+      const anyTask = (await conn.query(
+        `SELECT 1 FROM tasks t JOIN plan_stages s ON s.id = t.stage_id WHERE s.plan_id = ? LIMIT 1`,
+        [place.planId],
       )) as unknown[];
-      if (participant.length === 0) {
-        return { ok: false, error: '仅 plan 参与人（发起或执行过该 plan 任务）可追加任务' };
+      if (anyTask.length > 0) {
+        const participant = (await conn.query(
+          `SELECT 1 FROM tasks t JOIN plan_stages s ON s.id = t.stage_id
+            WHERE s.plan_id = ? AND (t.creator_id = ? OR t.assignee_id = ?) LIMIT 1`,
+          [place.planId, agent.id, agent.id],
+        )) as unknown[];
+        if (participant.length === 0) {
+          return { ok: false, error: '仅 plan 参与人（发起或执行过该 plan 任务）可追加任务' };
+        }
       }
       stageId = Number(opts.stage_id);
       if (!place.current) statusBase = 'blocked'; // 未来 stage 落 blocked

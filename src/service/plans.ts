@@ -199,7 +199,7 @@ export async function stagePlacement(stageId: number): Promise<{
   planId?: number; seq?: number; current?: boolean; stageDone?: boolean;
 }> {
   const rows = (await query(
-    `SELECT s.id AS stage_id, s.plan_id, s.seq, p.status AS plan_status, p.recurrence
+    `SELECT s.id AS stage_id, s.plan_id, s.seq, s.recurrence, p.status AS plan_status
        FROM plan_stages s JOIN plans p ON p.id = s.plan_id
       WHERE s.id = ? LIMIT 1`,
     [stageId],
@@ -221,7 +221,14 @@ export async function stagePlacement(stageId: number): Promise<{
     [planId],
   )) as Array<Record<string, unknown>>;
   const currentSeq = stages.find((s) => Number(s.pending_n) > 0)?.seq ?? stages.length;
-  const stageDoneFlag = await isStageComplete(stageId);
+  // 追加场景：空 stage 不算完成（可追加第一个任务）；有任务且全部 done/cancelled 才算完成（闸门的空 stage 跳过语义不用于追加）
+  const stCnt = (await query(
+    `SELECT COUNT(*) AS total, SUM(CASE WHEN status IN ('done','cancelled') THEN 1 ELSE 0 END) AS fin FROM tasks WHERE stage_id = ?`,
+    [stageId],
+  )) as Array<Record<string, unknown>>;
+  const total = Number(stCnt[0]?.total ?? 0);
+  const fin = Number(stCnt[0]?.fin ?? 0);
+  const stageDoneFlag = total > 0 && fin === total;
   return { ok: true, planId, seq, current: seq === Number(currentSeq), stageDone: stageDoneFlag };
 }
 

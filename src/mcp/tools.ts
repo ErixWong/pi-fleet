@@ -117,7 +117,7 @@ function registerTools(server: McpServer): void {
       visibility: z.enum(['private', 'public']).optional().describe('create/revise：默认 private'),
       assignee: z.string().optional().describe('create：指派执行方 agent_id（private 必填）'),
       workdir: z.string().optional().describe('create：可选工作目录'),
-      stage_id: z.number().int().describe('create：所属 plan 阶段 id（强制三层：任务必须从属 stage；agent 追加到现有 stage，未来 stage 落 blocked，已完成 stage 拒绝）'),
+      stage_id: z.number().int().optional().describe('create：所属 plan 阶段 id（强制三层：任务必须从属 stage）'),
       result: z.string().optional().describe('submit：完成说明/结果'),
       deliverables: z
         .array(z.object({
@@ -172,6 +172,9 @@ function registerTools(server: McpServer): void {
             return text({ task_id: args.task_id, task: r.task, messages: r.messages, deliverables: r.deliverables, reports: r.reports, plan_context: r.plan_context ?? null });
           }
           case 'create': {
+            if (args.stage_id === undefined || args.stage_id === null) {
+              return text({ error: '缺少 stage_id：任务必须从属 plan 的 stage（强制三层）' });
+            }
             const r = await createTask(agent, {
               title: args.title ?? '',
               instruction: args.instruction ?? '',

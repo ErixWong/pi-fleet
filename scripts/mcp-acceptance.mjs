@@ -52,6 +52,20 @@ try {
   // 1. 管理员登录 + 创建两个 agent（A 执行方 / B 发起方）
   console.log('== 1. 管理员 API ==');
   await api('POST', '/api/login', { password: PASSWORD });
+  // 验收假设 LLM 未配置（门禁降级路径）：临时禁用真实 provider，跑完恢复
+  const savedProviders = [];
+  {
+    const { providers } = await api('GET', '/api/settings/llm-providers');
+    for (const p of providers ?? []) {
+      if (p.enabled) { savedProviders.push(p.id); await api('PUT', '/api/settings/llm-providers', { ...p, api_key: undefined, enabled: false }); }
+    }
+  }
+  // 测试 plan 基建：任务必须从属 stage（强制三层）
+  const testPlan = await api('POST', '/api/plans', {
+    name: 'MCP 验收计划', stages: [{ name: '阶段1', wait_prev: 1, recurrence: 'none', tasks: [] }],
+  });
+  const testTree = await api('GET', `/api/plans/${testPlan.plan_id}`);
+  const TEST_STAGE = testTree.plan.stages[0].id;
   const agentA = await api('POST', '/api/agents', { name: 'sess-A', hostname: '10.0.0.1' });
   const agentB = await api('POST', '/api/agents', { name: 'sess-B', hostname: '10.0.0.2' });
   check('创建 agent A/B（key 带 pd- 前缀）', !!agentA.key?.startsWith('pd-') && !!agentB.key?.startsWith('pd-'));
@@ -64,13 +78,14 @@ try {
     title: '帮忙开启代理',
     instruction: '请开启代理服务供我下载，地址告诉我。',
     assignee: agentA.agent.agent_id,
+    stage_id: TEST_STAGE,
   });
   check('task(create) 发起成功', req.ok === true && !!req.task_id, JSON.stringify(req));
   const collabTaskId = req.task_id;
 
   const dueA = await task(clientA, 'list', { scope: 'due' });
   const collab = dueA.due_tasks.find((t) => t.task_id === collabTaskId);
-  check('A 领到协作回合', !!collab && collab.kind === 'manual', JSON.stringify(dueA.due_tasks));
+  check('A 领到协作回合', !!collab && collab.messages?.length >= 1, JSON.stringify(dueA.due_tasks));
   check('回合附完整消息流', collab?.messages?.length >= 1 && collab.messages[0].sender_role === 'agent', JSON.stringify(collab?.messages));
 
   const reply1 = await task(clientA, 'reply', { task_id: collabTaskId, content: '代理已开启 http://vps:7890' });
@@ -128,7 +143,7 @@ try {
 
   // 引用 submit：管理员建带 spec 任务派给 A，A 上传并引用提交
   await api('POST', '/api/tasks', {
-    kind: 'manual', title: '交付物测试任务', assignee_id: agentA.agent.id,
+    title: '交付物测试任务', stage_id: TEST_STAGE, assignee_id: agentA.agent.id,
     instruction: '实现登录模块',
     deliverable_spec: [
       { name: '代码变更', type: '.ts' },
@@ -176,7 +191,7 @@ try {
 
   // 引用即授权：B 是任务 creator？否（管理员建的）。管理员建的任务 creator=NULL → B 仍无权。
   // 换 B 建私有任务派给 A，A 引用 attLogin 提交 → B 成为参与人 → B 可下载
-  const privTask = await task(clientB, 'create', { title: '引用授权验证', instruction: '用我上传的文件', assignee: agentA.agent.agent_id });
+  const privTask = await task(clientB, 'create', { title: '引用授权验证', instruction: '用我上传的文件', assignee: agentA.agent.agent_id, stage_id: TEST_STAGE });
   const subPriv = await task(clientA, 'submit', {
     task_id: privTask.task_id, result: '交付',
     deliverables: [{ name: '文件', attachment_id: attLogin }],
@@ -188,33 +203,6 @@ try {
   const privDone = await task(clientB, 'approve', { task_id: privTask.task_id, opinion: 'ok' });
   check('私有任务验收通过 → done', privDone.ok === true && privDone.status === 'done', JSON.stringify(privDone));
   const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
-  // 4. 定时任务单轮（scheduled 不经门禁）
-  console.log('== 4. 定时任务（单轮） ==');
-  await api('POST', '/api/tasks', {
-    kind: 'scheduled', title: '磁盘检查单轮', assignee_id: agentA.agent.id,
-    schedule_cron: 'daily', window_start: '00:00', window_end: '23:59', topic_name: 'sess-topic',
-    instruction: '检查磁盘并投递报告',
-  });
-  const list = await api('GET', '/api/tasks');
-  const sched = list.tasks.find((t) => t.title === '磁盘检查单轮');
-  check('scheduled 已建', sched?.status === 'pending');
-
-  await pool.query(`UPDATE tasks SET next_due_at = DATE_SUB(NOW(), INTERVAL 30 MINUTE) WHERE task_id = ?`, [sched.task_id]);
-  const dueA2 = await task(clientA, 'list', { scope: 'due' });
-  const schedDue = dueA2.due_tasks.find((t) => t.task_id === sched.task_id);
-  check('scheduled 放行（running）', schedDue?.kind === 'scheduled', JSON.stringify(dueA2.due_tasks));
-
-  const prog = await task(clientA, 'reply', { task_id: sched.task_id, content: '50%', type: 'progress' });
-  check('reply(progress) 续期/记录', prog.ok === true, JSON.stringify(prog));
-  const sub = await task(clientA, 'submit', { task_id: sched.task_id, result: '磁盘正常，/ 42%' });
-  check('task(submit) scheduled 直接记录 → done', sub.ok === true && sub.status === 'done', JSON.stringify(sub));
-  const subAgain = await task(clientA, 'submit', { task_id: sched.task_id, result: '重复' });
-  check('重复提交被拒', !!subAgain.error, JSON.stringify(subAgain));
-  const pub = await task(clientA, 'reply', { task_id: sched.task_id, content: '磁盘正常', type: 'report' });
-  check('reply(report) 归档到任务', pub.ok === true, JSON.stringify(pub));
-  const schedDetail = await api('GET', `/api/tasks/${sched.task_id}`);
-  check('任务详情含报告消息（type=report）', schedDetail.messages.some((m) => m.type === 'report' && m.content === '磁盘正常'), JSON.stringify(schedDetail.messages));
-
   // 5. 开放生态：公共池 / 原子认领 / 验收链路（全部附件引用）
   console.log('== 5. 开放生态：公共池 + 认领 + 验收 ==');
   const agentC = await api('POST', '/api/agents', { name: 'sess-C', hostname: '10.0.0.3', accept_external: true });
@@ -226,6 +214,7 @@ try {
     title: '帮忙生成调研报告',
     instruction: '需要 Windows + Office，帮我把材料整理成 Markdown 报告。',
     visibility: 'public',
+    stage_id: TEST_STAGE,
     deliverable_spec: [{ name: '报告', min_count: 1, type: '.md' }],
   });
   check('task(create) 公开任务入池（active）', pubTask.ok === true && pubTask.status === 'active', JSON.stringify(pubTask));
@@ -273,7 +262,7 @@ try {
 
   // 5.7 预检不合格 → 续做回路；打回 → 续做；补齐 → 验收通过
   const poolTask2 = await task(clientB, 'create', {
-    title: '缺交付物的任务', instruction: '需要两份交付物', visibility: 'public',
+    title: '缺交付物的任务', instruction: '需要两份交付物', visibility: 'public', stage_id: TEST_STAGE,
     deliverable_spec: [{ name: 'A', min_count: 1, type: '.md' }, { name: 'B', min_count: 1, type: '.md' }],
   });
   await task(clientC, 'claim', { task_id: poolTask2.task_id });
@@ -317,7 +306,7 @@ try {
   const s = await api('GET', '/api/settings/llm-providers');
   check('provider 可读写（api_key 掩码回显）', s.providers.some((p) => p.id === 'fake' && p.base_url === 'http://127.0.0.1:1/v1' && p.api_key === '******'), JSON.stringify(s.providers));
   const pendingTask = await task(clientB, 'create', {
-    title: '审核队列测试', instruction: '需要一份 md 报告', visibility: 'public',
+    title: '审核队列测试', instruction: '需要一份 md 报告', visibility: 'public', stage_id: TEST_STAGE,
     deliverable_spec: [{ name: 'a', type: '.md' }],
   });
   check('配置 LLM 后发布 → pending_audit', pendingTask.ok === true && pendingTask.status === 'pending_audit', JSON.stringify(pendingTask));
@@ -347,7 +336,7 @@ try {
 
   // 8.2 含图片任务：发布 → 审核降级 → 认领 → 上传 png → submit → submitted → 验收（按图自动选 vision）→ 故障降级
   const imgTask = await task(clientB, 'create', {
-    title: '识图验收测试', instruction: '交付一张图', visibility: 'public',
+    title: '识图验收测试', instruction: '交付一张图', visibility: 'public', stage_id: TEST_STAGE,
     deliverable_spec: [{ name: '图', type: '.png' }],
   });
   check('配置模型后发布 → pending_audit', imgTask.status === 'pending_audit', JSON.stringify(imgTask));
@@ -479,8 +468,8 @@ try {
 
   // 9.4 周期 plan：克隆 + series_id + 重叠跳过
   const per = await api('POST', '/api/plans', {
-    name: '每日健康检查', recurrence: 'daily', window_start: '00:00', window_end: '23:59',
-    stages: [{ name: '例行', tasks: [
+    name: '每日健康检查',
+    stages: [{ name: '例行', recurrence: 'daily', window_start: '00:00', window_end: '23:59', tasks: [
       { title: '磁盘检查', instruction: '检查磁盘健康', assignee: agentE.agent.agent_id },
     ]}],
   });
@@ -496,7 +485,7 @@ try {
   const perAppend = await task(clientE, 'create', { title: '劫持序列', instruction: 'x', visibility: 'public', stage_id: Number(perTree.plan.stages[0].id) });
   check('周期 plan stage 追加被拒（防污染克隆源）', !perAppend.ok && String(perAppend.error).includes('周期'), JSON.stringify(perAppend));
   // 重叠：首实例未终结 → 到点扫描 → 跳过本轮 + 回帖
-  await pool.query(`UPDATE plans SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = ?`, [per.plan_id]);
+  await pool.query(`UPDATE plan_stages SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)`, [per.plan_id]);
   await api('POST', '/api/settings/llm-scan', {}, undefined);
   const perTree2 = await api('GET', `/api/plans/${per.plan_id}`);
   check('上一实例未终结 → 跳过本轮（不克隆）', perTree2.plan.stages[0].tasks.length === 1, JSON.stringify(perTree2.plan.stages[0].tasks.length));
@@ -506,7 +495,7 @@ try {
   await task(clientE, 'claim', { task_id: firstInst.task_id });
   const firstSubmit = await task(clientE, 'submit', { task_id: firstInst.task_id, result: '磁盘正常' });
   check('周期首实例 claim → submit 直接记录 → done', firstSubmit.ok === true && firstSubmit.status === 'done', JSON.stringify(firstSubmit));
-  await pool.query(`UPDATE plans SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = ?`, [per.plan_id]);
+  await pool.query(`UPDATE plan_stages SET next_due_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE plan_id = (SELECT id FROM plans WHERE plan_id = ?)`, [per.plan_id]);
   await api('POST', '/api/settings/llm-scan', {}, undefined);
   const perTree3 = await api('GET', `/api/plans/${per.plan_id}`);
   const insts = perTree3.plan.stages[0].tasks;
