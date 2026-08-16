@@ -32,6 +32,7 @@ export const api = {
   toggleAgent: (id) => req('POST', `/api/agents/${id}/toggle`),
   toggleAgentAccept: (id) => req('POST', `/api/agents/${id}/accept-toggle`),
   resetAgentKey: (id) => req('POST', `/api/agents/${id}/reset-key`),
+  deleteAgent: (id) => req('POST', `/api/agents/${id}/delete`),
   tasks: (params = {}) => req('GET', `/api/tasks?${new URLSearchParams(params)}`),
   createTask: (payload) => req('POST', '/api/tasks', payload),
   task: (id, params = {}) => req('GET', `/api/tasks/${id}?${new URLSearchParams(params)}`),

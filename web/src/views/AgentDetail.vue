@@ -89,6 +89,55 @@ function openCreate() {
   showCreate.value = true;
 }
 
+/** 禁用/启用（既有按钮，重构时函数丢失一并补回） */
+async function toggle() {
+  try {
+    await api.toggleAgent(agent.value.id);
+    await loadTasks();
+    await loadConversations();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+/** 重置 API key（既有按钮补回：新 key 一次性展示） */
+async function resetKey() {
+  if (!confirm('重置 API Key？旧 key 立即失效，新 key 只显示一次。')) return;
+  try {
+    const data = await api.resetAgentKey(agent.value.id);
+    newKey.value = data.key;
+    alert(`新 API Key（只显示一次）：\n\n${data.key}`);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+/** 接单开关（既有按钮补回） */
+async function toggleAccept() {
+  try {
+    await api.toggleAgentAccept(agent.value.id);
+    await loadTasks();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+/** 删除 agent：无关联物理删除；有关联软删除（visible=0 + disabled，不再显示，历史保留） */
+async function removeAgent() {
+  if (!confirm(`确定删除主机「${agent.value.name}」？\n\n无关联数据将直接删除；有任务/会话等历史数据则软删除（不再显示、不再接活，历史保留）。`)) return;
+  try {
+    const data = await api.deleteAgent(agent.value.id);
+    if (data.mode === 'soft') {
+      alert(`已软删除（有 ${Object.values(data.refs ?? {}).reduce((a, b) => a + b, 0)} 条关联数据）：不再显示、不再接活，历史记录保留。`);
+    } else {
+      alert('已删除（无关联数据，物理删除）。');
+    }
+    router.push('/agents');
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function submitCreate() {
   createBusy.value = true;
   createMsg.value = '';
@@ -263,6 +312,7 @@ function badge(status) {
               {{ agent.status === 'active' ? '禁用此 Agent' : '启用此 Agent' }}
             </button>
             <button class="btn btn-sm btn-outline-warning mt-3 ms-2" @click="resetKey">重置 API Key</button>
+            <button class="btn btn-sm btn-outline-danger mt-3 ms-2" @click="removeAgent">删除此 Agent</button>
           </div>
         </div>
       </div>

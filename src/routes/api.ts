@@ -140,7 +140,7 @@ apiRouter.get('/me', (req, res) => {
 apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   const [agents, tasks, recentReports, activeAgents] = await Promise.all([
-    query(`SELECT status, COUNT(*) AS cnt FROM agents GROUP BY status`),
+    query(`SELECT status, COUNT(*) AS cnt FROM agents WHERE visible = 1 GROUP BY status`),
     query(`SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status`),
     query(
       `SELECT r.content, r.created_at, a.agent_id, t.task_id
@@ -149,7 +149,7 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
          LEFT JOIN tasks t ON t.id = r.task_id
         ORDER BY r.created_at DESC LIMIT 5`,
     ),
-    query(`SELECT id, last_seen_at FROM agents WHERE status = 'active'`),
+    query(`SELECT id, last_seen_at FROM agents WHERE status = 'active' AND visible = 1`),
   ]);
   const offline = (activeAgents as Array<Record<string, unknown>>).filter((a) => agentOffline(a.last_seen_at, offlineAfterMin)).length;
   res.json({
@@ -167,8 +167,8 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   // 标签过滤（?tag=linux,arm 逗号分隔，any 语义：命中任意一个即可）
   const tagNames = String(req.query.tag ?? '').trim().split(',').map((s) => s.trim()).filter(Boolean);
   const where = tagNames.length
-    ? ` WHERE t.name IN (${tagNames.map(() => '?').join(',')}) OR t.label IN (${tagNames.map(() => '?').join(',')})`
-    : '';
+    ? ` WHERE (t.name IN (${tagNames.map(() => '?').join(',')}) OR t.label IN (${tagNames.map(() => '?').join(',')})) AND a.visible = 1`
+    : ' WHERE a.visible = 1';
   const join = tagNames.length ? ' JOIN agent_tags at ON at.agent_id = a.id JOIN tags t ON t.id = at.tag_id' : '';
   const filterParams = tagNames.length ? [...tagNames, ...tagNames] : [];
   const totalRows = (await query(
@@ -244,7 +244,7 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   const rows = await query(
     `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, status,
             last_seen_at, created_at
-       FROM agents WHERE id = ?`,
+       FROM agents WHERE id = ? AND visible = 1`,
     [id],
   );
   if (rows.length === 0) {
@@ -290,6 +290,42 @@ apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
     return;
   }
   res.json({ ok: true, key: newKey });
+});
+
+/** 删除 agent（2026-08-16）：无外键关联 → 物理删除；有关联数据 → 软删除（visible=0 + disabled，不再显示） */
+apiRouter.post('/agents/:id/delete', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (exists.length === 0) {
+    res.status(404).json({ error: 'agent 不存在' });
+    return;
+  }
+  // 统计引用（agent 参与过的所有业务数据）
+  const refChecks: Array<[string, string]> = [
+    ['conversations', 'agent_id'],
+    ['plans', 'creator_agent_id'],
+    ['agent_tags', 'agent_id'],
+    ['agent_projects', 'agent_id'],
+    ['tasks', 'creator_id'],
+    ['tasks', 'assignee_id'],
+    ['deliverables', 'agent_id'],
+    ['reports', 'agent_id'],
+  ];
+  const refs: Record<string, number> = {};
+  for (const [table, col] of refChecks) {
+    const r = (await query(`SELECT COUNT(*) AS c FROM ${table} WHERE ${col} = ?`, [id])) as Array<Record<string, unknown>>;
+    refs[`${table}.${col}`] = Number(r[0]?.c ?? 0);
+  }
+  const totalRefs = Object.values(refs).reduce((a, b) => a + b, 0);
+  if (totalRefs === 0) {
+    // 物理删除：无任何关联（agent_projects 是缓存无业务价值，也算引用但为 0 才走到这）
+    await query(`DELETE FROM agents WHERE id = ?`, [id]);
+    res.json({ ok: true, mode: 'physical', refs: {} });
+    return;
+  }
+  // 软删除：保留历史数据（任务/会话/报告等仍显示归属名字），主机不再显示、不再接活
+  await query(`UPDATE agents SET visible = 0, status = 'disabled' WHERE id = ?`, [id]);
+  res.json({ ok: true, mode: 'soft', refs, message: '该主机有关联数据（任务/会话/报告等），已软删除：不再显示、不再接活，历史记录保留' });
 });
 
 /** 接单开关（§3.2/§五）：是否允许该主机认领公共池外单 */
@@ -370,7 +406,7 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
      ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
   const tasks = await query(sql, [...params, pageSize, offset]);
   const agents = await query(
-    `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' ORDER BY name`,
+    `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' AND visible = 1 ORDER BY name`,
   );
   res.json({ tasks, agents, total, page, page_size: pageSize });
 });

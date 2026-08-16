@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS agents (
   accept_external TINYINT(1) NOT NULL DEFAULT 0 COMMENT '接单开关：是否允许认领公共池(pool)外单',
   key_hash CHAR(64) NOT NULL UNIQUE,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  visible TINYINT(1) NOT NULL DEFAULT 1 COMMENT '软删除标记：有关联数据时置 0 不再显示',
   last_seen_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -259,6 +260,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliver_attempts INT NOT NULL DEFAULT
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3 AFTER deliver_attempts;
 -- 开放生态：agent 接单开关（默认关，safer default）
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS accept_external TINYINT(1) NOT NULL DEFAULT 0 AFTER tags;
+-- 主机删除：软删除标记（有关联数据时置 0 不再显示；物理删除直接删行）
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS visible TINYINT(1) NOT NULL DEFAULT 1 AFTER status;
 -- 消息类型（§10.3：报告/进度并入消息流）与来源标记（§3.4 验收回帖）
 ALTER TABLE task_messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','report','verdict','system') NOT NULL DEFAULT 'chat' AFTER sender_role;
 ALTER TABLE task_messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
