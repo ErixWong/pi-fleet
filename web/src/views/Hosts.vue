@@ -22,6 +22,7 @@ const selectedAgent = ref(null); // 当前选中主机
 const mode = ref('empty');       // empty | detail | chat
 const tabs = ref([]);            // [{ id: convId|'__host__', title }]
 const activeTab = ref('');       // 当前激活 tab
+const sidebarCollapsed = ref(false); // 左侧主机面板收起
 
 // 详情数据
 const agent = ref(null);
@@ -117,8 +118,12 @@ function ensureHostTab() {
 }
 
 /** 点 💬：进入会话视图，打开该主机第一个会话（无会话则主机会话） */
-async function openChat() {
-  if (!selectedAgent.value) return;
+async function openChat(a) {
+  const agent = a || selectedAgent.value;
+  if (!agent) return;
+  if (!selectedAgent.value || String(selectedAgent.value.id) !== String(agent.id)) {
+    selectedAgent.value = agent;
+  }
   mode.value = 'chat';
   ensureHostTab();
   await loadConversations();
@@ -317,11 +322,19 @@ function badge(status) {
 
 <template>
   <div class="hosts-workspace d-flex" style="height: calc(100vh - 88px)">
-    <!-- ========== 左侧：主机列表（4/12） ========== -->
-    <aside class="hosts-side col-4 border-end d-flex flex-column" style="min-width: 280px">
+    <!-- ========== 左侧：主机列表（4/12），可收起 ========== -->
+    <div v-if="sidebarCollapsed" class="hosts-rail d-flex flex-column align-items-center py-2 border-end"
+         title="展开主机列表" role="button" @click="sidebarCollapsed = false">
+      <i class="bi bi-chevron-double-right"></i>
+      <i class="bi bi-pc-display mt-2" style="opacity: .6"></i>
+    </div>
+    <aside v-else class="hosts-side col-4 border-end d-flex flex-column" style="min-width: 280px">
       <div class="d-flex justify-content-between align-items-center px-3 py-2 border-bottom">
         <span class="fw-bold small"><i class="bi bi-pc-display me-1 text-primary"></i>主机</span>
-        <button class="btn btn-sm btn-primary" @click="openRegister"><i class="bi bi-plus-lg me-1"></i>注册</button>
+        <div class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-secondary" title="收起侧边栏" @click="sidebarCollapsed = true"><i class="bi bi-chevron-left"></i></button>
+          <button class="btn btn-sm btn-primary" @click="openRegister"><i class="bi bi-plus-lg me-1"></i>注册</button>
+        </div>
       </div>
       <div v-if="newKey" class="alert alert-warning m-2 py-2 small mb-0">
         <div class="fw-bold mb-1"><i class="bi bi-key-fill me-1"></i>新 API Key（只显示这一次，请立即保存）— {{ newKey.name }}</div>
@@ -341,7 +354,7 @@ function badge(status) {
               <span v-if="a.offline" class="badge text-bg-danger" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${a.last_seen_at || '从未连接'}）`">失联</span>
             </div>
           </div>
-          <button class="btn btn-sm btn-outline-primary flex-shrink-0" title="会话" @click.stop="openChat">
+          <button class="btn btn-sm btn-outline-primary flex-shrink-0" title="会话" @click.stop="openChat(a)">
             <i class="bi bi-chat-dots"></i>
           </button>
         </div>
@@ -351,8 +364,8 @@ function badge(status) {
       </div>
     </aside>
 
-    <!-- ========== 右侧：内容区（8/12） ========== -->
-    <section class="col-8 d-flex flex-column" style="min-width: 0">
+    <!-- ========== 右侧：内容区（8/12，收起侧栏后占满 12/12） ========== -->
+    <section :class="sidebarCollapsed ? 'col-12' : 'col-8'" class="d-flex flex-column" style="min-width: 0">
 
       <!-- 空状态 -->
       <div v-if="mode === 'empty'" class="flex-grow-1 d-flex align-items-center justify-content-center">
@@ -592,6 +605,18 @@ function badge(status) {
   border: 1px solid var(--border-soft, rgba(0, 0, 0, 0.1));
   border-radius: 0.5rem;
   overflow: hidden;
+}
+.hosts-rail {
+  width: 44px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--bs-secondary);
+  transition: color 0.1s;
+  justify-content: center;
+}
+.hosts-rail:hover {
+  color: var(--bs-primary);
+  background: var(--bs-tertiary-bg, rgba(0, 0, 0, 0.03));
 }
 .host-item {
   cursor: pointer;
