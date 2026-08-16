@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import ChatPanel from '../components/ChatPanel.vue';
 
@@ -9,6 +9,7 @@ import ChatPanel from '../components/ChatPanel.vue';
  *  /chat/:agentId/:convId → 直接打开指定会话（会话管理跳转）
  */
 const route = useRoute();
+const router = useRouter();
 const agentId = route.params.agentId;
 const convId = route.params.convId ?? '';
 const agent = ref(null);
@@ -36,6 +37,6 @@ onMounted(async () => {
       <span v-if="error" class="text-danger small">{{ error }}</span>
       <span></span>
     </div>
-    <ChatPanel v-if="agent" :target="{ agent_id: agent.id, agent_name: agent.name }" :conversation-id="convId" fullscreen />
+    <ChatPanel v-if="agent" :target="{ agent_id: agent.id, agent_name: agent.name }" :conversation-id="convId" fullscreen @close="router.push('/agents')" />
   </div>
 </template>
