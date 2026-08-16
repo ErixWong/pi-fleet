@@ -279,6 +279,57 @@ apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
   res.json({ ok: true });
 });
 
+/** 更新 agent 基础信息（2026-08-16）：name/hostname/description/system_prompt/tags/accept_external，仅更新传入字段 */
+apiRouter.put('/agents/:id', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const body = (req.body ?? {}) as {
+    name?: string;
+    hostname?: string;
+    description?: string;
+    system_prompt?: string;
+    tags?: string;
+    accept_external?: boolean;
+  };
+  const exists = (await query(`SELECT id, name, system_prompt FROM agents WHERE id = ? AND visible = 1`, [id])) as Array<
+    Record<string, unknown>
+  >;
+  if (exists.length === 0) {
+    res.status(404).json({ error: 'agent 不存在' });
+    return;
+  }
+  const cur = exists[0];
+  const name = body.name !== undefined ? (String(body.name).trim() || '') : String(cur.name);
+  if (!name) {
+    res.status(400).json({ error: '名称不能为空' });
+    return;
+  }
+  // 提示词：传入非空则用传入值；传入空字符串 = 清空为自动生成；未传则保持原样
+  let systemPrompt: string | undefined;
+  if (body.system_prompt !== undefined) {
+    const sp = String(body.system_prompt).trim();
+    systemPrompt =
+      sp ||
+      `你是主机「${name}」的 agent（agent_id: ${cur.agent_id ?? ''}）。${(String(body.hostname ?? '').trim() ? `位于 ${String(body.hostname).trim()}。` : '')}${String(body.description ?? '').trim() ? `职责：${String(body.description).trim()}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
+  }
+  const fields: string[] = [];
+  const vals: unknown[] = [];
+  if (body.name !== undefined) { fields.push('name = ?'); vals.push(name); }
+  if (body.hostname !== undefined) { fields.push('hostname = ?'); vals.push(String(body.hostname).trim()); }
+  if (body.description !== undefined) { fields.push('description = ?'); vals.push(String(body.description).trim()); }
+  if (systemPrompt !== undefined) { fields.push('system_prompt = ?'); vals.push(systemPrompt); }
+  if (body.tags !== undefined) { fields.push('tags = ?'); vals.push(String(body.tags).trim()); }
+  if (body.accept_external !== undefined) { fields.push('accept_external = ?'); vals.push(body.accept_external ? 1 : 0); }
+  if (fields.length > 0) {
+    await query(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`, [...vals, id]);
+  }
+  const rows = await query(
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, status, last_seen_at, created_at
+       FROM agents WHERE id = ? AND visible = 1`,
+    [id],
+  );
+  res.json({ agent: rows[0] });
+});
+
 /** 重置 agent key：吊销旧 key，生成新 key（一次性返回） */
 apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
   const id = Number(req.params.id);

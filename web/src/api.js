@@ -30,6 +30,7 @@ export const api = {
   createAgent: (payload) => req('POST', '/api/agents', payload),
   agent: (id, params = {}) => req('GET', `/api/agents/${id}?${new URLSearchParams(params)}`),
   toggleAgent: (id) => req('POST', `/api/agents/${id}/toggle`),
+  updateAgent: (id, payload) => req('PUT', `/api/agents/${id}`, payload),
   toggleAgentAccept: (id) => req('POST', `/api/agents/${id}/accept-toggle`),
   resetAgentKey: (id) => req('POST', `/api/agents/${id}/reset-key`),
   deleteAgent: (id) => req('POST', `/api/agents/${id}/delete`),

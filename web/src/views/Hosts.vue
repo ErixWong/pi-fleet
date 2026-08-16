@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
@@ -24,6 +25,22 @@ const tabs = ref([]);            // [{ id: convId|'__host__', title }]
 const activeTab = ref('');       // 当前激活 tab
 const sidebarCollapsed = ref(false); // 左侧主机面板收起
 
+const route = useRoute();
+const router = useRouter();
+
+/** 把当前工作台状态同步到 URL query（对话界面可直达/刷新保持/分享） */
+function syncUrl() {
+  const q = {};
+  if (selectedAgent.value) q.agent = String(selectedAgent.value.id);
+  if (mode.value === 'chat') {
+    q.mode = 'chat';
+    if (activeTab.value && activeTab.value !== HOST_TAB) q.conv = activeTab.value;
+  } else if (mode.value === 'detail') {
+    q.mode = 'detail';
+  }
+  router.replace({ path: '/hosts', query: q });
+}
+
 // 详情数据
 const agent = ref(null);
 const tasks = ref([]);
@@ -44,6 +61,12 @@ const createRunUser = ref('');
 const createMsg = ref('');
 const createBusy = ref(false);
 
+// 编辑主机弹窗（名称/标识/描述/提示词/接外单）
+const showEdit = ref(false);
+const editForm = ref({ name: '', hostname: '', description: '', system_prompt: '', accept_external: false });
+const editBusy = ref(false);
+const editMsg = ref('');
+
 // 注册主机弹窗
 const tagGroups = ref([]);
 const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false });
@@ -61,14 +84,33 @@ async function loadTags() {
   try { tagGroups.value = (await api.tags()).groups || []; } catch { /* 静默 */ }
 }
 
-onMounted(() => { load(); loadTags(); });
+onMounted(async () => { await load(); loadTags(); await restoreFromUrl(); });
 onBeforeUnmount(() => { registerModal?.dispose(); });
+
+/** 从 URL query 恢复状态（对话界面独立路由：/hosts?mode=chat&agent=13&conv=conv-xxx） */
+async function restoreFromUrl() {
+  const q = route.query;
+  if (!q.agent) return;
+  const a = agents.value.find((x) => String(x.id) === String(q.agent));
+  if (!a) return;
+  if (q.mode === 'chat') {
+    await openChat(a);
+    if (q.conv) {
+      // 目标会话可能不在第一页列表，尝试直接打开（标题从会话列表匹配，找不到用 convId）
+      const conv = conversations.value.find((c) => c.conversation_id === q.conv);
+      openConvTab(String(q.conv), conv?.name || String(q.conv));
+    }
+  } else {
+    await selectAgent(a);
+  }
+}
 
 /** 选中主机 → 显示详情 */
 async function selectAgent(a) {
   selectedAgent.value = a;
   mode.value = 'detail';
   activeTab.value = '';
+  syncUrl();
   await loadAgent();
 }
 
@@ -133,6 +175,7 @@ async function openChat(a) {
   } else {
     activeTab.value = HOST_TAB;
   }
+  syncUrl();
 }
 
 /** 打开（或激活）某个会话 tab */
@@ -142,6 +185,7 @@ function openConvTab(convId, title) {
   }
   activeTab.value = convId;
   mode.value = 'chat';
+  syncUrl();
 }
 
 /** 关闭会话 tab（主机 tab 保留） */
@@ -153,6 +197,13 @@ function closeTab(id) {
   if (activeTab.value === id) {
     activeTab.value = tabs.value.length ? tabs.value[Math.max(0, i - 1)].id : HOST_TAB;
   }
+  syncUrl();
+}
+
+/** 从会话视图返回主机详情（同步 URL） */
+function backToDetail() {
+  mode.value = 'detail';
+  syncUrl();
 }
 
 /** 从详情会话列表打开会话 */
@@ -256,6 +307,45 @@ async function toggleAccept() {
     await loadAgent();
   } catch (e) {
     alert(e.message);
+  }
+}
+
+/** 打开编辑主机弹窗（从当前 agent 详情回填） */
+function openEdit() {
+  const a = agent.value ?? selectedAgent.value;
+  if (!a) return;
+  editForm.value = {
+    name: a.name ?? '',
+    hostname: a.hostname ?? '',
+    description: a.description ?? '',
+    system_prompt: a.system_prompt ?? '',
+    accept_external: !!a.accept_external,
+  };
+  editMsg.value = '';
+  showEdit.value = true;
+}
+
+/** 保存编辑：调 PUT /api/agents/:id（仅传非空字段；提示词可清空=自动生成） */
+async function submitEdit() {
+  if (!selectedAgent.value) return;
+  editBusy.value = true;
+  editMsg.value = '';
+  try {
+    const payload = {
+      name: editForm.value.name.trim(),
+      hostname: editForm.value.hostname.trim(),
+      description: editForm.value.description.trim(),
+      system_prompt: editForm.value.system_prompt,
+      accept_external: editForm.value.accept_external,
+    };
+    await api.updateAgent(selectedAgent.value.id, payload);
+    showEdit.value = false;
+    await loadAgent(); // 刷新详情（含提示词/接外单）
+    await load();      // 刷新左侧列表（名称可能改了）
+  } catch (e) {
+    editMsg.value = e.message;
+  } finally {
+    editBusy.value = false;
   }
 }
 
@@ -381,7 +471,7 @@ function badge(status) {
           <h5 class="mb-0 fw-bold">{{ agent.name }} <span class="text-secondary small fw-normal">{{ agent.agent_id }}</span></h5>
           <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-primary" @click="openChat"><i class="bi bi-chat-dots me-1"></i>会话</button>
-            <button class="btn btn-sm btn-primary" @click="openCreate"><i class="bi bi-plus-lg me-1"></i>新建会话</button>
+            <button class="btn btn-sm btn-outline-secondary" @click="openEdit"><i class="bi bi-pencil me-1"></i>编辑</button>
           </div>
         </div>
 
@@ -498,7 +588,7 @@ function badge(status) {
       <!-- 会话模式：tab 条 + 对话面板 -->
       <div v-else-if="mode === 'chat'" class="flex-grow-1 d-flex flex-column" style="min-height: 0">
         <div class="d-flex align-items-center gap-1 border-bottom px-2 pt-1 chat-tabs">
-          <button class="btn btn-sm btn-outline-secondary flex-shrink-0" title="返回主机详情" @click="mode = 'detail'">
+          <button class="btn btn-sm btn-outline-secondary flex-shrink-0" title="返回主机详情" @click="backToDetail">
             <i class="bi bi-arrow-left"></i>
           </button>
           <div v-for="t in tabs" :key="t.id" class="chat-tab d-flex align-items-center gap-1 px-2 py-1 rounded small border"
@@ -507,9 +597,7 @@ function badge(status) {
             <span class="text-truncate" style="max-width: 160px">{{ t.title }}</span>
             <i v-if="t.id !== HOST_TAB" class="bi bi-x-lg chat-tab-close" role="button" @click.stop="closeTab(t.id)"></i>
           </div>
-          <button class="btn btn-sm btn-outline-primary flex-shrink-0 ms-auto" title="新建会话" @click="openCreate">
-            <i class="bi bi-plus-lg"></i>
-          </button>
+          <button class="btn btn-sm btn-primary flex-shrink-0 ms-auto" title="新建对话" @click="openCreate"><i class="bi bi-plus-lg me-1"></i>新建对话</button>
         </div>
         <div v-if="!activeTab" class="flex-grow-1 d-flex align-items-center justify-content-center text-secondary small">
           没有打开的会话，从左侧会话列表或「新建会话」开始。
@@ -517,7 +605,7 @@ function badge(status) {
         <ChatPanel v-else :key="activeTab" class="flex-grow-1"
           :target="{ agent_id: selectedAgent.id, agent_name: selectedAgent.name }"
           :conversation-id="activeTab === HOST_TAB ? '' : activeTab"
-          fullscreen @close="mode = 'detail'" />
+          fullscreen @close="backToDetail" />
       </div>
     </section>
 
@@ -559,6 +647,41 @@ function badge(status) {
       </div>
     </div>
     <div v-if="showCreate" class="modal-backdrop show" @click="showCreate = false"></div>
+
+    <!-- 编辑主机弹窗 -->
+    <div v-if="showEdit" class="modal show d-block" tabindex="-1">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header py-2">
+            <h6 class="modal-title">编辑主机 — {{ selectedAgent?.name }}</h6>
+            <button type="button" class="btn-close" @click="showEdit = false"></button>
+          </div>
+          <div class="modal-body">
+            <label class="form-label small mb-1">名称 *</label>
+            <input v-model="editForm.name" class="form-control form-control-sm mb-2" placeholder="如 web-01 / db-agent">
+            <label class="form-label small mb-1">主机标识（在哪）</label>
+            <input v-model="editForm.hostname" class="form-control form-control-sm mb-2" placeholder="hostname / IP">
+            <label class="form-label small mb-1">描述</label>
+            <input v-model="editForm.description" class="form-control form-control-sm mb-2" placeholder="这台机器负责什么">
+            <div class="form-check form-switch mb-2">
+              <input v-model="editForm.accept_external" type="checkbox" class="form-check-input" id="editAcceptExternal">
+              <label class="form-check-label small" for="editAcceptExternal">允许接外单（认领公共池公开任务）</label>
+            </div>
+            <label class="form-label small mb-1">默认提示词（agent 启动时加载；清空=自动生成）</label>
+            <textarea v-model="editForm.system_prompt" class="form-control form-control-sm" rows="5"
+              placeholder="你是 web-01 的运维 agent，负责..."></textarea>
+            <div v-if="editMsg" class="small text-danger mt-2">{{ editMsg }}</div>
+          </div>
+          <div class="modal-footer py-2">
+            <button class="btn btn-sm btn-outline-secondary" @click="showEdit = false">取消</button>
+            <button class="btn btn-sm btn-primary" :disabled="editBusy" @click="submitEdit">
+              {{ editBusy ? '保存中…' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="showEdit" class="modal-backdrop show" @click="showEdit = false"></div>
 
     <!-- 注册主机弹窗 -->
     <div ref="registerModalEl" class="modal fade" tabindex="-1">
