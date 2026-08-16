@@ -417,9 +417,9 @@ function badge(status) {
       <button v-if="sidebarCollapsed" class="btn btn-sm btn-outline-primary" title="展开主机列表" @click="sidebarCollapsed = false">
         <i class="bi bi-chevron-double-right me-1"></i>展开
       </button>
+      <button v-if="!sidebarCollapsed" class="btn btn-sm btn-outline-secondary" title="收起侧边栏" @click="sidebarCollapsed = true"><i class="bi bi-chevron-left"></i></button>
       <span class="fw-bold small"><i class="bi bi-pc-display me-1 text-primary"></i>主机</span>
       <div class="ms-auto d-flex gap-1">
-        <button v-if="!sidebarCollapsed" class="btn btn-sm btn-outline-secondary" title="收起侧边栏" @click="sidebarCollapsed = true"><i class="bi bi-chevron-left"></i></button>
         <button v-if="!sidebarCollapsed" class="btn btn-sm btn-primary" @click="openRegister"><i class="bi bi-plus-lg me-1"></i>注册</button>
       </div>
     </div>
