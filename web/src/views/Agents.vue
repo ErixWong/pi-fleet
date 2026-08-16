@@ -3,6 +3,8 @@ import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
+import TagBadge from '../components/TagBadge.vue';
+import TagPicker from '../components/TagPicker.vue';
 
 const agents = ref([]);
 const error = ref('');
@@ -10,22 +12,34 @@ const page = ref(1);
 const total = ref(0);
 const offlineMin = ref(30);
 const newKey = ref(null); // 注册成功后的 key（仅内存，刷新即失 = 只展示一次）
-const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false });
+const tagGroups = ref([]); // 标签目录（分组）
+const tagFilter = ref(''); // 按标签过滤（name）
+const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false });
 
 let modal = null;
 const modalEl = ref(null);
+// 行内标签编辑 modal
+const editModalEl = ref(null);
+let editModal = null;
+const editAgent = ref(null);
+const editTags = ref([]);
 
 async function load() {
-  const data = await api.agents(page.value, 10);
+  const data = await api.agents(page.value, 10, tagFilter.value);
   agents.value = data.agents;
   total.value = data.total ?? 0;
   offlineMin.value = data.offline_after_min ?? 30;
 }
 
-onMounted(load);
+async function loadTags() {
+  try { tagGroups.value = (await api.tags()).groups || []; } catch { /* 静默 */ }
+}
+
+onMounted(() => { load(); loadTags(); });
 
 function open() {
   error.value = '';
+  form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false };
   modal = new Modal(modalEl.value);
   modal.show();
 }
@@ -33,9 +47,9 @@ function open() {
 async function submit() {
   error.value = '';
   try {
-    const data = await api.createAgent(form.value);
+    const data = await api.createAgent({ ...form.value, tags: form.value.tags.join(', ') });
     modal.hide();
-    form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: '', accept_external: false };
+    form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false };
     newKey.value = { name: data.agent.name, key: data.key };
     window.scrollTo(0, 0);
     await load();
@@ -54,7 +68,33 @@ async function toggleAccept(a) {
   await load();
 }
 
-onBeforeUnmount(() => modal?.dispose());
+/** 行内编辑标签 */
+function openEditTags(a) {
+  error.value = '';
+  editAgent.value = a;
+  editTags.value = (a.tags_detail || []).map((t) => t.name);
+  editModal = new Modal(editModalEl.value);
+  editModal.show();
+}
+async function saveEditTags() {
+  if (!editAgent.value) return;
+  try {
+    await api.setAgentTags(editAgent.value.id, editTags.value);
+    editModal?.hide();
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+/** 点击徽标 → 按该标签过滤 */
+function filterBy(tag) {
+  tagFilter.value = tagFilter.value === tag.name ? '' : tag.name;
+  page.value = 1;
+  load();
+}
+
+onBeforeUnmount(() => { modal?.dispose(); editModal?.dispose(); });
 </script>
 
 <template>
@@ -73,6 +113,18 @@ onBeforeUnmount(() => modal?.dispose());
     <button class="btn btn-sm btn-outline-secondary mt-2" @click="newKey = null"><i class="bi bi-check2 me-1"></i>我已保存</button>
   </div>
 
+  <!-- 标签过滤 -->
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <span class="text-secondary small">按标签过滤：</span>
+    <select v-model="tagFilter" class="form-select form-select-sm" style="max-width: 200px" @change="page = 1; load()">
+      <option value="">全部</option>
+      <optgroup v-for="g in tagGroups" :key="g.category" :label="g.title">
+        <option v-for="t in g.tags" :key="t.id" :value="t.name">{{ t.label }}</option>
+      </optgroup>
+    </select>
+    <span v-if="tagFilter" class="badge text-bg-primary">{{ tagFilter }} <i class="bi bi-x" role="button" @click="tagFilter = ''; page = 1; load()"></i></span>
+  </div>
+
   <div v-if="agents.length === 0" class="card"><div class="card-body empty-state">
     <i class="bi bi-pc-display"></i>还没有主机，先注册一个。
   </div></div>
@@ -85,7 +137,13 @@ onBeforeUnmount(() => modal?.dispose());
           <div class="text-secondary small">{{ a.agent_id }}</div>
         </td>
         <td>{{ a.hostname }}</td>
-        <td>{{ a.tags }}</td>
+        <td style="max-width: 320px">
+          <template v-if="(a.tags_detail || []).length">
+            <TagBadge v-for="t in a.tags_detail" :key="t.id" :tag="t" />
+          </template>
+          <span v-else class="text-secondary small">—</span>
+          <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="编辑标签" @click="openEditTags(a)"><i class="bi bi-pencil"></i></button>
+        </td>
         <td>
           <span class="badge" :class="a.accept_external ? 'text-bg-warning' : 'text-bg-secondary'" role="button"
                 :title="a.accept_external ? '开启中：可认领公共池外单' : '关闭（默认）：只做内部指派任务'" @click="toggleAccept(a)">
@@ -124,8 +182,10 @@ onBeforeUnmount(() => modal?.dispose());
             <input v-model="form.hostname" class="form-control mb-2" placeholder="hostname / IP，如 10.0.0.5">
             <label class="form-label">描述</label>
             <input v-model="form.description" class="form-control mb-2" placeholder="这台机器负责什么">
-            <label class="form-label">角色标签（逗号分隔）</label>
-            <input v-model="form.tags" class="form-control mb-2" placeholder="web, prod">
+            <label class="form-label">角色标签</label>
+            <div class="border rounded p-2 mb-2">
+              <TagPicker v-model="form.tags" :groups="tagGroups" entity-scope="host" />
+            </div>
             <div class="form-check form-switch mb-2">
               <input v-model="form.accept_external" type="checkbox" class="form-check-input" id="acceptExternal">
               <label class="form-check-label" for="acceptExternal">允许接外单（认领公共池公开任务）</label>
@@ -141,6 +201,26 @@ onBeforeUnmount(() => modal?.dispose());
             <button type="submit" class="btn btn-primary">注册并生成 Key</button>
           </div>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 行内标签编辑 modal -->
+  <div ref="editModalEl" class="modal fade" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-tags me-1"></i>编辑标签 — {{ editAgent?.name }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div v-if="error" class="alert alert-danger py-2">{{ error }}</div>
+          <TagPicker v-model="editTags" :groups="tagGroups" entity-scope="host" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="button" class="btn btn-primary" @click="saveEditTags">保存</button>
+        </div>
       </div>
     </div>
   </div>

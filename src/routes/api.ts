@@ -31,6 +31,16 @@ import {
   setConversationWorkdir,
 } from '../service/chat.js';
 import { chatHub } from '../ws-server.js';
+import {
+  agentsByTags,
+  getAgentTags,
+  getTaskTags,
+  listTags,
+  setAgentTags,
+  setTaskTags,
+  taskIdByBusiness,
+  type TagView,
+} from '../service/tags.js';
 import { sendAttachmentFile } from './attach-shared.js';
 
 export const apiRouter = Router();
@@ -118,14 +128,31 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
 apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
-  const totalRows = (await query(`SELECT COUNT(*) AS c FROM agents`)) as Array<Record<string, unknown>>;
+  // 标签过滤（?tag=linux,arm 逗号分隔，any 语义：命中任意一个即可）
+  const tagNames = String(req.query.tag ?? '').trim().split(',').map((s) => s.trim()).filter(Boolean);
+  const where = tagNames.length
+    ? ` WHERE t.name IN (${tagNames.map(() => '?').join(',')}) OR t.label IN (${tagNames.map(() => '?').join(',')})`
+    : '';
+  const join = tagNames.length ? ' JOIN agent_tags at ON at.agent_id = a.id JOIN tags t ON t.id = at.tag_id' : '';
+  const filterParams = tagNames.length ? [...tagNames, ...tagNames] : [];
+  const totalRows = (await query(
+    tagNames.length
+      ? `SELECT COUNT(DISTINCT a.id) AS c FROM agents a${join}${where}`
+      : `SELECT COUNT(*) AS c FROM agents`,
+    filterParams,
+  )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT id, agent_id, name, hostname, description, tags, accept_external, status, last_seen_at, created_at
-       FROM agents ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    [pageSize, offset],
+    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.status, a.last_seen_at, a.created_at
+       FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
+    [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
-  const list = agents.map((a) => ({ ...a, offline: agentOffline(a.last_seen_at, offlineAfterMin) }));
+  const tagsByAgent = await tagsDetailForAgents(agents.map((a) => Number(a.id)));
+  const list = agents.map((a) => ({
+    ...a,
+    offline: agentOffline(a.last_seen_at, offlineAfterMin),
+    tags_detail: tagsByAgent.get(Number(a.id)) ?? [],
+  }));
   res.json({ agents: list, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
@@ -191,6 +218,7 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   const agent = rows[0] as Record<string, unknown>;
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   agent.offline = agentOffline(agent.last_seen_at, offlineAfterMin);
+  agent.tags_detail = await getAgentTags(Number(agent.id));
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks WHERE assignee_id = ?`, [id])) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
@@ -241,6 +269,39 @@ apiRouter.post('/agents/:id/accept-toggle', requireAdminJson, async (req, res) =
   }
   const rows = await query(`SELECT accept_external FROM agents WHERE id = ?`, [Number(req.params.id)]);
   res.json({ ok: true, accept_external: rows.length > 0 ? Number((rows[0] as Record<string, unknown>).accept_external) : 0 });
+});
+
+// ─────────────────────────── 标签系统（tags 目录 + agent/task 打标） ───────────────────────────
+
+/** 标签目录（分组：环境/部署/OS/架构/运行环境/任务类型/自定义） */
+apiRouter.get('/tags', requireAdminJson, async (_req, res) => {
+  const groups = await listTags();
+  res.json({ groups });
+});
+
+/** 设置主机标签（全量覆盖；未匹配内置的自动建自定义） */
+apiRouter.post('/agents/:id/tags', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const names = Array.isArray((req.body ?? {}).tags) ? (req.body as { tags?: unknown[] }).tags!.map(String) : [];
+  const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (exists.length === 0) {
+    res.status(404).json({ error: 'agent 不存在' });
+    return;
+  }
+  const tags = await setAgentTags(id, names);
+  res.json({ ok: true, tags });
+});
+
+/** 设置任务标签（全量覆盖） */
+apiRouter.post('/tasks/:taskId/tags', requireAdminJson, async (req, res) => {
+  const names = Array.isArray((req.body ?? {}).tags) ? (req.body as { tags?: unknown[] }).tags!.map(String) : [];
+  const tid = await taskIdByBusiness(req.params.taskId);
+  if (tid === null) {
+    res.status(404).json({ error: '任务不存在' });
+    return;
+  }
+  const tags = await setTaskTags(tid, names);
+  res.json({ ok: true, tags });
 });
 
 // ─────────────────────────── 任务 ───────────────────────────
@@ -409,7 +470,7 @@ apiRouter.get('/tasks/:taskId', requireAdminJson, async (req, res) => {
   // 交付物：约定（解析为数组）+ 版本记录
   const { listDeliverables } = await import('../service/tasks.js');
   const deliverables = await listDeliverables(String(task.task_id));
-  res.json({ task, reports, messages, deliverables, messages_total: messagesTotal, messages_page: mPage, messages_page_size: mPageSize });
+  res.json({ task, reports, messages, deliverables, task_tags: await getTaskTags(Number(task.id)), messages_total: messagesTotal, messages_page: mPage, messages_page_size: mPageSize });
 });
 
 // 管理员回复协作任务
@@ -955,3 +1016,34 @@ apiRouter.post('/conversations/:id/archive', requireAdminJson, async (req, res) 
   const ok = await archiveConversation(req.params.id);
   res.json({ ok });
 });
+
+// ─────────────────────────── 标签 helper ───────────────────────────
+
+/** 批量查询多个主机的标签（agent_id → TagView[]），避免列表 N+1 */
+async function tagsDetailForAgents(agentIds: number[]): Promise<Map<number, TagView[]>> {
+  const map = new Map<number, TagView[]>();
+  const ids = [...new Set(agentIds.filter((n) => n > 0))];
+  if (ids.length === 0) return map;
+  const rows = (await query(
+    `SELECT at.agent_id, t.id, t.category, t.name, t.label, t.scope, t.sort, t.builtin, t.color
+       FROM agent_tags at JOIN tags t ON t.id = at.tag_id
+      WHERE at.agent_id IN (${ids.map(() => '?').join(',')})
+      ORDER BY FIELD(t.category, 'env','deploy','os','arch','runtime','type','custom'), t.sort, t.id`,
+    ids,
+  )) as Array<Record<string, unknown>>;
+  for (const r of rows) {
+    const aid = Number(r.agent_id);
+    if (!map.has(aid)) map.set(aid, []);
+    map.get(aid)!.push({
+      id: Number(r.id),
+      category: String(r.category),
+      name: String(r.name),
+      label: String(r.label),
+      scope: (r.scope as TagView['scope']) ?? 'host',
+      sort: Number(r.sort),
+      builtin: Number(r.builtin) === 1,
+      color: String(r.color ?? ''),
+    });
+  }
+  return map;
+}

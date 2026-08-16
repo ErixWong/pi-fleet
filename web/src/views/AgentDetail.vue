@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
+import TagBadge from '../components/TagBadge.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -90,7 +91,14 @@ function badge(status) {
               <tbody>
                 <tr><th class="text-secondary" style="width:110px">主机标识</th><td>{{ agent.hostname }}</td></tr>
                 <tr><th class="text-secondary">描述</th><td>{{ agent.description }}</td></tr>
-                <tr><th class="text-secondary">角色标签</th><td>{{ agent.tags }}</td></tr>
+                <tr><th class="text-secondary">角色标签</th>
+                  <td>
+                    <template v-if="(agent.tags_detail || []).length">
+                      <TagBadge v-for="t in agent.tags_detail" :key="t.id" :tag="t" />
+                    </template>
+                    <span v-else class="text-secondary small">—</span>
+                  </td>
+                </tr>
                 <tr><th class="text-secondary">接外单（公共池）</th>
                   <td>
                     <span class="badge" :class="agent.accept_external ? 'text-bg-warning' : 'text-bg-secondary'"

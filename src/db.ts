@@ -315,6 +315,40 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(created_at);
+
+-- ─── 标签系统（tags 目录 + agent/task 多对多；内置种子见 seedBuiltinTags） ───
+CREATE TABLE IF NOT EXISTS tags (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  category VARCHAR(20) NOT NULL COMMENT '二级分类：env|deploy|os|arch|runtime|type|custom',
+  name VARCHAR(64) NOT NULL COMMENT '内部标识（小写）',
+  label VARCHAR(64) NOT NULL COMMENT '显示名',
+  scope ENUM('host','task','both') NOT NULL DEFAULT 'host' COMMENT '适用：host=仅主机 / task=仅任务 / both=运行环境双向复用',
+  sort INT NOT NULL DEFAULT 0,
+  builtin TINYINT(1) NOT NULL DEFAULT 1 COMMENT '内置（1）或自定义（0）',
+  color VARCHAR(16) NOT NULL DEFAULT '' COMMENT '徽标色（按 category 默认）',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_cat_name (category, name)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS agent_tags (
+  agent_id BIGINT NOT NULL,
+  tag_id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (agent_id, tag_id),
+  KEY idx_agent_tags_tag (tag_id),
+  CONSTRAINT fk_agent_tags_agent FOREIGN KEY (agent_id) REFERENCES agents(id),
+  CONSTRAINT fk_agent_tags_tag FOREIGN KEY (tag_id) REFERENCES tags(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS task_tags (
+  task_id BIGINT NOT NULL,
+  tag_id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (task_id, tag_id),
+  KEY idx_task_tags_tag (tag_id),
+  CONSTRAINT fk_task_tags_task FOREIGN KEY (task_id) REFERENCES tasks(id),
+  CONSTRAINT fk_task_tags_tag FOREIGN KEY (tag_id) REFERENCES tags(id)
+) ENGINE=InnoDB;
 `;
 
 /** 初始化数据库 schema（幂等） */
@@ -380,6 +414,8 @@ export async function initDb(): Promise<void> {
       await conn.query(stmt);
     }
     await migrateLlmProviders(conn);
+    await seedBuiltinTags(conn);
+    await migrateLegacyAgentTags(conn);
   } finally {
     conn.release();
   }
@@ -436,4 +472,110 @@ function safeHost(baseUrl: string): string {
   } catch {
     return '';
   }
+}
+
+// ─────────────────────────── 标签系统（tags/agent_tags/task_tags） ───────────────────────────
+
+type DbConn = { query(sql: string, params?: unknown[]): Promise<unknown> };
+
+/** 内置标签种子（幂等 INSERT IGNORE；runtime 分类 scope=both = 主机运行环境 ↔ 任务技术栈双向复用） */
+async function seedBuiltinTags(conn: DbConn): Promise<void> {
+  const rows: Array<[string, string, string, string, number, string]> = [
+    // 环境（host）
+    ['env', 'dev_env', '开发环境', 'host', 10, '#0d6efd'],
+    ['env', 'test_env', '测试环境', 'host', 20, '#6f42c1'],
+    ['env', 'prod_env', '生产环境', 'host', 30, '#dc3545'],
+    // 部署形态（host）
+    ['deploy', 'vps', 'VPS', 'host', 10, '#20c997'],
+    ['deploy', 'nas', 'NAS', 'host', 20, '#20c997'],
+    ['deploy', 'bare_metal', '物理机', 'host', 30, '#20c997'],
+    // 操作系统（host）
+    ['os', 'win', 'Windows', 'host', 10, '#198754'],
+    ['os', 'linux', 'Linux', 'host', 20, '#198754'],
+    ['os', 'macos', 'macOS', 'host', 30, '#198754'],
+    // 架构（host）
+    ['arch', 'x86-64', 'x86-64', 'host', 10, '#fd7e14'],
+    ['arch', 'arm64', 'ARM64', 'host', 20, '#fd7e14'],
+    ['arch', 'arm', 'ARM', 'host', 30, '#fd7e14'],
+    ['arch', 'riscv', 'RISC-V', 'host', 40, '#fd7e14'],
+    // 运行环境/技术栈（both：主机可打、任务可打，同一 tag_id 即匹配键）
+    ['runtime', 'docker', 'Docker', 'both', 10, '#0dcaf0'],
+    ['runtime', 'nodejs', 'Node.js', 'both', 20, '#0dcaf0'],
+    ['runtime', 'php', 'PHP', 'both', 30, '#0dcaf0'],
+    ['runtime', 'python', 'Python', 'both', 40, '#0dcaf0'],
+    ['runtime', 'java', 'Java', 'both', 50, '#0dcaf0'],
+    ['runtime', 'go', 'Go', 'both', 60, '#0dcaf0'],
+    ['runtime', 'mysql', 'MySQL', 'both', 70, '#0dcaf0'],
+    ['runtime', 'redis', 'Redis', 'both', 80, '#0dcaf0'],
+    ['runtime', 'nginx', 'Nginx', 'both', 90, '#0dcaf0'],
+    ['runtime', 'gpu', 'GPU', 'both', 100, '#0dcaf0'],
+    ['runtime', 'ffmpeg', 'FFmpeg', 'both', 110, '#0dcaf0'],
+    ['runtime', 'chrome', 'Chrome 浏览器自动化', 'both', 120, '#0dcaf0'],
+    // 任务类型（task）
+    ['type', 'data_collect', '数据采集', 'task', 10, '#6f42c1'],
+    ['type', 'frontend', '前端开发', 'task', 20, '#6f42c1'],
+    ['type', 'backend', '后端开发', 'task', 30, '#6f42c1'],
+    ['type', 'fullstack', '全栈开发', 'task', 40, '#6f42c1'],
+    ['type', 'database', '数据库', 'task', 50, '#6f42c1'],
+    ['type', 'testing', '测试', 'task', 60, '#6f42c1'],
+    ['type', 'doc', '文档', 'task', 70, '#6f42c1'],
+    ['type', 'design', '设计', 'task', 80, '#6f42c1'],
+    ['type', 'ops', '运维', 'task', 90, '#6f42c1'],
+    ['type', 'ai', 'AI 任务', 'task', 100, '#6f42c1'],
+    ['type', 'crawler', '爬虫', 'task', 110, '#6f42c1'],
+  ];
+  for (const [category, name, label, scope, sort, color] of rows) {
+    await conn.query(
+      `INSERT IGNORE INTO tags (category, name, label, scope, sort, builtin, color) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+      [category, name, label, scope, sort, color],
+    );
+  }
+}
+
+/** 旧 tags 字符串归一化：小写 + 常见别名映射（幂等） */
+function normalizeTagName(raw: string): string {
+  const s = raw.trim().toLowerCase().replace(/\s+/g, '-');
+  const map: Record<string, string> = {
+    windows: 'win',
+    mac: 'macos',
+    x86_64: 'x86-64',
+    x86: 'x86-64',
+    dev: 'dev_env',
+    prod: 'prod_env',
+    test: 'test_env',
+  };
+  return map[s] ?? s;
+}
+
+/** 迁移旧 agents.tags 逗号字符串 → agent_tags（一次性语义；幂等：INSERT IGNORE + 自建 custom 受唯一键保护） */
+async function migrateLegacyAgentTags(conn: DbConn): Promise<void> {
+  const rows = (await conn.query(`SELECT id, tags FROM agents WHERE TRIM(tags) <> ''`)) as Array<Record<string, unknown>>;
+  if (rows.length === 0) return;
+  const allTags = (await conn.query(`SELECT id, category, name, label, scope FROM tags`)) as Array<Record<string, unknown>>;
+  const byName = new Map<string, Record<string, unknown>>();
+  const byLabel = new Map<string, Record<string, unknown>>();
+  for (const t of allTags) {
+    byName.set(String(t.name).toLowerCase(), t);
+    byLabel.set(String(t.label).toLowerCase(), t);
+  }
+  let linked = 0;
+  for (const r of rows) {
+    const agentId = Number(r.id);
+    for (const raw of String(r.tags).split(',')) {
+      const name = normalizeTagName(raw);
+      if (!name) continue;
+      let tag = byName.get(name) ?? byLabel.get(name) ?? byLabel.get(raw.trim().toLowerCase());
+      if (!tag) {
+        // 识别不了 → 自建 custom（host 适用），唯一键防重复
+        await conn.query(`INSERT IGNORE INTO tags (category, name, label, scope, sort, builtin, color) VALUES ('custom', ?, ?, 'host', 999, 0, '#adb5bd')`, [name, name]);
+        const created = (await conn.query(`SELECT id FROM tags WHERE category='custom' AND name=? LIMIT 1`, [name])) as Array<Record<string, unknown>>;
+        if (created.length === 0) continue;
+        tag = created[0];
+        byName.set(name, tag);
+      }
+      const r2 = await conn.query(`INSERT IGNORE INTO agent_tags (agent_id, tag_id) VALUES (?, ?)`, [agentId, Number(tag.id)]);
+      linked += (r2 as { affectedRows?: number }).affectedRows ?? 0;
+    }
+  }
+  if (linked > 0) console.log(`[db] 标签迁移：旧 agents.tags → agent_tags 建立 ${linked} 条关联`);
 }

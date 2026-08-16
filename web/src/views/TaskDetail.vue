@@ -6,12 +6,15 @@ import { api } from '../api';
 import { renderMd, renderMdWithAttachments } from '../md';
 import Pagination from '../components/Pagination.vue';
 import ChatPanel from '../components/ChatPanel.vue';
+import TagBadge from '../components/TagBadge.vue';
+import TagPicker from '../components/TagPicker.vue';
 
 const route = useRoute();
 const task = ref(null);
 const reports = ref([]);
 const messages = ref([]);
 const deliverables = ref({ spec: [], versions: [] });
+const taskTags = ref([]); // 任务标签（展示 + 编辑）
 const replyText = ref('');
 const error = ref('');
 const msgPage = ref(1);
@@ -66,6 +69,7 @@ async function load() {
   // 消息接口按倒序分页（最新在前），反转成正序供帖子流渲染（最新在底部）
   messages.value = [...(data.messages || [])].reverse();
   deliverables.value = data.deliverables || { spec: [], versions: [] };
+  taskTags.value = data.task_tags || [];
   messagesTotal.value = data.messages_total ?? 0;
   await loadPlan();
 }
@@ -99,6 +103,11 @@ const attMap = computed(() => {
 const previewModalEl = ref(null);
 let previewModal = null;
 const preview = ref(null); // { attachment, mode, content?, error? }
+// 任务标签编辑
+const tagGroups = ref([]);
+const taskTagModalEl = ref(null);
+let taskTagModal = null;
+const editTaskTags = ref([]);
 const previewLoading = ref(false);
 
 const TEXT_LIKE_MIMES = ['text/', 'application/json', 'application/xml', 'application/yaml', 'application/x-yaml', 'application/markdown', 'application/javascript', 'application/x-sh'];
@@ -140,7 +149,30 @@ function closePreview() {
   preview.value = null;
 }
 
-onBeforeUnmount(() => previewModal?.dispose());
+/** 打开任务标签编辑 modal */
+async function openEditTags() {
+  try {
+    if (!tagGroups.value.length) tagGroups.value = (await api.tags()).groups || [];
+  } catch { /* 静默 */ }
+  editTaskTags.value = taskTags.value.map((t) => t.name);
+  taskTagModal = new Modal(taskTagModalEl.value);
+  taskTagModal.show();
+}
+async function saveTaskTags() {
+  if (!task.value) return;
+  try {
+    await api.setTaskTags(task.value.task_id, editTaskTags.value);
+    taskTagModal?.hide();
+    await load();
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+onBeforeUnmount(() => {
+  previewModal?.dispose();
+  taskTagModal?.dispose();
+});
 
 /** 帖子流：首帖=任务要求，随后消息+报告按时间正序合并（论坛式） */
 const posts = computed(() => {
@@ -337,6 +369,10 @@ function scanBadge(s) {
           <span class="badge badge-status" :class="badge(task.status)">{{ task.status }}</span>
           <span class="badge" :class="task.visibility === 'public' ? 'text-bg-primary' : 'text-bg-secondary'"
                 :title="task.visibility === 'public' ? '公开：公共池可认领' : '私有：仅发起人及指派主机'">{{ task.visibility }}</span>
+          <span v-if="taskTags.length" class="d-inline-flex gap-1 flex-wrap">
+            <TagBadge v-for="t in taskTags" :key="t.id" :tag="t" />
+          </span>
+          <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="编辑任务标签" @click="openEditTags"><i class="bi bi-tags"></i></button>
           <span class="ms-auto text-secondary small text-end">
             <span class="d-block"><i class="bi bi-calendar-plus me-1"></i>创建：{{ task.created_at }}</span>
             <span v-if="task.status === 'resolved' || task.status === 'done'" class="d-block">
@@ -500,6 +536,25 @@ function scanBadge(s) {
     <ChatPanel :target="activeTask" @close="toggleChat" />
   </div>
   </div>
+  </div>
+
+  <!-- 任务标签编辑 modal -->
+  <div ref="taskTagModalEl" class="modal fade" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-tags me-1"></i>编辑任务标签 — {{ task?.task_id }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <TagPicker v-model="editTaskTags" :groups="tagGroups" entity-scope="task" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="button" class="btn btn-primary" @click="saveTaskTags">保存</button>
+        </div>
+      </div>
+    </div>
   </div>
   </div>
 </template>
