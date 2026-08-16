@@ -1,5 +1,5 @@
 // REST 端点验收：heartbeat / info / poll / tasks/result / renew / reports（Bearer key）
-const BASE = 'http://127.0.0.1:3000';
+const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
 let cookie = '';
 

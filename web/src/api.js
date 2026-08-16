@@ -58,9 +58,15 @@ export const api = {
   saveLlmModel: (payload) => req('PUT', '/api/settings/llm-models', payload),
   deleteLlmModel: (id) => req('DELETE', `/api/settings/llm-models/${id}`),
   llmCalls: (page = 1, pageSize = 10) => req('GET', `/api/settings/llm-calls?page=${page}&page_size=${pageSize}`),
-  // 对话通道（管理员 ↔ agent 独立对话）
+  // 对话通道（管理员 ↔ agent 独立对话；多会话：主机会话可新建/重命名/设运行用户，目录从主机 projects 列表选择）
   conversations: (page = 1, pageSize = 10) => req('GET', `/api/conversations?page=${page}&page_size=${pageSize}`),
   createConversation: (payload) => req('POST', '/api/conversations', payload),
+  conversation: (id) => req('GET', `/api/conversations/${id}`),
+  agentConversations: (id, page = 1, pageSize = 20) => req('GET', `/api/agents/${id}/conversations?page=${page}&page_size=${pageSize}`),
+  agentProjects: (id) => req('GET', `/api/agents/${id}/projects`),
+  rescanAgentProjects: (id) => req('POST', `/api/agents/${id}/projects-rescan`),
+  renameConversation: (id, name) => req('POST', `/api/conversations/${id}/rename`, { name }),
+  setConversationRunUser: (id, runUser) => req('POST', `/api/conversations/${id}/run-user`, { run_user: runUser }),
   conversationMessages: (id, page = 1, pageSize = 20) => req('GET', `/api/conversations/${id}/messages?page=${page}&page_size=${pageSize}`),
   conversationSince: (id, sinceId) => req('GET', `/api/conversations/${id}/messages/since?since_id=${sinceId}`),
   sendChatMessage: (id, content) => req('POST', `/api/conversations/${id}/messages`, { content }),

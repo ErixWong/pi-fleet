@@ -23,11 +23,16 @@ import {
   addChatMessage,
   archiveConversation,
   chatMessagesSince,
+  createHostConversation,
+  getAgentProjects,
   getConversation,
   getOrCreateConversation,
   getTaskContext,
+  listAgentConversations,
   listChatMessages,
   listConversations,
+  renameConversation,
+  setConversationRunUser,
   setConversationWorkdir,
 } from '../service/chat.js';
 import { chatHub } from '../ws-server.js';
@@ -950,14 +955,28 @@ apiRouter.get('/activity', requireAdminJson, async (req, res) => {
 });
 
 // ─────────────────────────── 对话通道（管理员 ↔ agent 独立对话） ───────────────────────────
-/** 对话列表 */
+/** 会话列表 */
 apiRouter.get('/conversations', requireAdminJson, async (req, res) => {
   const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
   const r = await listConversations(page, pageSize);
   res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
 });
 
-/** 发起对话（同 agent 已有 open 对话 → 返回现有，幂等；task_id 可选：从任务发起时关联上下文；workdir 可选：远程 pi 在该路径下运行，须为 ~ 开头限制在 home 下） */
+/** 单个会话详情（会话管理页直接打开指定会话） */
+apiRouter.get('/conversations/:id', requireAdminJson, async (req, res) => {
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  res.json({ conversation: conv });
+});
+
+/** 发起对话：
+ *  带 task_id → 任务对话：复用该任务的 open 对话（没有就新建，任务独立上下文，固定 conv-task-{taskId}）
+ *  不带 task_id → **创建新主机会话**（多会话：每次调用新建一个，不固定 conv-host-{id}）；
+ *  可传 name（会话名）、workdir（~/projects 下目录）、run_user（运行 pi 的用户，空=bridge 当前用户）
+ */
 apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   const agentId = Number((req.body ?? {}).agent_id);
   if (!agentId) {
@@ -965,29 +984,147 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
     return;
   }
   const body = req.body as Record<string, unknown>;
-  const taskIdRaw = body.task_id;
-  const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
-  const workdirRaw = body.workdir;
-  const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
-  if (workdir !== undefined && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验是否在 home 内）' });
-    return;
-  }
   const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
     res.status(404).json({ error: '主机不存在' });
     return;
   }
-  const conversation = await getOrCreateConversation(agentId, taskId, workdir);
-  res.json({ conversation });
+  const taskIdRaw = body.task_id;
+  const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
+  if (taskId) {
+    const workdirRaw = body.workdir;
+    const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
+    if (workdir !== undefined && !isSafeWorkdir(workdir)) {
+      res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
+      return;
+    }
+    const conversation = await getOrCreateConversation(agentId, taskId, workdir);
+    res.json({ conversation });
+    return;
+  }
+  // 主机会话（多会话）：
+  //  未指定 name/workdir/run_user（纯「对话」入口）→ 复用最近 open 主机会话（保持聊天连续性）
+  //  指定了任一（显式新建）→ 创建新会话（每个会话绑定不同目录/用户）
+  const workdirRaw = body.workdir;
+  const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? null : String(workdirRaw);
+  if (workdir !== null && !isSafeWorkdir(workdir)) {
+    res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
+    return;
+  }
+  const runUserRaw = body.run_user;
+  const runUser = runUserRaw === undefined || runUserRaw === null || String(runUserRaw).trim() === '' ? null : String(runUserRaw).trim();
+  if (runUser !== null && !/^[a-z_][a-z0-9_-]*$/i.test(runUser)) {
+    res.status(400).json({ error: '运行用户格式不合法（Linux 用户名）' });
+    return;
+  }
+  const nameRaw = body.name;
+  const name = nameRaw === undefined || nameRaw === null ? '' : String(nameRaw);
+  if (name.length > 128) {
+    res.status(400).json({ error: '会话名过长（≤128）' });
+    return;
+  }
+  if (!name.trim() && workdir === null && runUser === null) {
+    // 纯「对话」入口：复用最近主机会话（无则新建默认会话）
+    const recent = (await query(
+      `SELECT conversation_id FROM conversations WHERE agent_id = ? AND status = 'open' AND task_id IS NULL ORDER BY updated_at DESC LIMIT 1`,
+      [agentId],
+    )) as Array<Record<string, unknown>>;
+    if (recent.length > 0) {
+      const conv = await getConversation(String(recent[0].conversation_id));
+      if (conv) {
+        res.json({ conversation: conv });
+        return;
+      }
+    }
+  }
+  const conversation = await createHostConversation(agentId, { name, workdir, run_user: runUser });
+  res.status(201).json({ conversation });
 });
 
-/** 更新对话工作目录（远程 pi 下次回复在该路径下运行；限制在主机 home 下） */
+/** 校验工作目录：仅允许 ~/projects/ 开头（目录约定：主机会话的工作目录限定为主机 ~/projects 下的子目录）；其余拒绝 */
+function isSafeWorkdir(workdir: string): boolean {
+  return /^~[\/]projects[\/]/.test(workdir);
+}
+
+/** 列某主机所有 open 会话（多会话管理） */
+apiRouter.get('/agents/:id/conversations', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
+  const r = await listAgentConversations(id, page, pageSize);
+  res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
+});
+
+/** 读主机 ~/projects 目录列表缓存（bridge 上报） */
+apiRouter.get('/agents/:id/projects', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const r = await getAgentProjects(id);
+  res.json({ dirs: r.dirs, updated_at: r.updated_at });
+});
+
+/** 请求主机重新扫描 ~/projects（WS 推给 bridge；bridge 上报后缓存更新） */
+apiRouter.post('/agents/:id/projects-rescan', requireAdminJson, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const online = chatHub.agentOnline(id);
+  if (online) {
+    chatHub.publishToAgent(id, { type: 'projects_rescan' });
+  }
+  res.json({ ok: true, online });
+});
+
+/** 重命名会话（多会话管理） */
+apiRouter.post('/conversations/:id/rename', requireAdminJson, async (req, res) => {
+  const name = String((req.body ?? {}).name ?? '').trim();
+  if (!name || name.length > 128) {
+    res.status(400).json({ error: '会话名不能为空且 ≤128' });
+    return;
+  }
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  await renameConversation(req.params.id, name);
+  res.json({ ok: true });
+});
+
+/** 设置会话运行用户（空=bridge 当前用户；非当前用户需远端 sudoers 白名单） */
+apiRouter.post('/conversations/:id/run-user', requireAdminJson, async (req, res) => {
+  const raw = (req.body ?? {}).run_user;
+  const runUser = raw === undefined || raw === null || String(raw).trim() === '' ? null : String(raw).trim();
+  if (runUser !== null && !/^[a-z_][a-z0-9_-]*$/i.test(runUser)) {
+    res.status(400).json({ error: '运行用户格式不合法（Linux 用户名）' });
+    return;
+  }
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  await setConversationRunUser(req.params.id, runUser);
+  res.json({ ok: true, run_user: runUser });
+});
+
+/** 更新对话工作目录（远程 pi 下次回复在该路径下运行；约定 ~/projects/ 下，绝对路径由主机校验） */
 apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) => {
   const raw = (req.body ?? {}).workdir;
   const workdir = raw === undefined || raw === null || raw === '' ? null : String(raw);
-  if (workdir !== null && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径' });
+  if (workdir !== null && !isSafeWorkdir(workdir)) {
+    res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
     return;
   }
   const conv = await getConversation(req.params.id);
@@ -1036,9 +1173,9 @@ apiRouter.post('/conversations/:id/messages', requireAdminJson, async (req, res)
     return;
   }
   const message = await addChatMessage(req.params.id, 'admin', content);
-  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文 + 工作目录
+  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文 + 工作目录 + 运行用户 + 会话名
   const task = conv.task_id ? await getTaskContext(conv.task_id) : null;
-  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task, workdir: conv.workdir });
+  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task, workdir: conv.workdir, run_user: conv.run_user, name: conv.name });
   res.json({ message });
 });
 

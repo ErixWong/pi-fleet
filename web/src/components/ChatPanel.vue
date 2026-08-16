@@ -6,9 +6,11 @@ import { renderMd } from '../md';
 /** 管理员 ↔ agent 对话面板（4/12 侧栏，任务页/主机详情页复用）
  *  props.target：{ agent_id, agent_name, task_id?, task_title? }——任务对话带 task_id/task_title
  *  （头部显示任务上下文）；主机对话只传 agent 信息（无任务上下文）。
+ *  props.conversationId：直接打开指定会话（会话管理页跳转用）；否则按 target 新建/复用。
  *  300ms 轮询增量（since_id）渲染打字机；消息 markdown 渲染 */
 const props = defineProps({
   target: { type: Object, default: null }, // { agent_id, agent_name, task_id?, task_title? }
+  conversationId: { type: String, default: '' }, // 直接打开指定会话（优先于 target）
   fullscreen: { type: Boolean, default: false }, // 全屏对话页模式（高度撑满视口，输入框贴底）
 });
 const emit = defineEmits(['close']);
@@ -26,11 +28,14 @@ const loading = ref(false);
 const workdirInput = ref('');
 const workdirMsg = ref('');
 const workdirSaving = ref(false);
+const projects = ref([]); // 主机 ~/projects 目录列表（bridge 上报）
+const projectsLoaded = ref(false);
 let pollTimer = null;
 
 onMounted(async () => {
   await loadAgents();
-  if (props.target) await openConversation();
+  if (props.conversationId) await openConversationById(props.conversationId);
+  else if (props.target) await openConversation();
 });
 
 onBeforeUnmount(stopPolling);
@@ -38,7 +43,13 @@ onBeforeUnmount(stopPolling);
 watch(
   () => props.target,
   async (t) => {
-    if (t) await openConversation();
+    if (t && !props.conversationId) await openConversation();
+  },
+);
+watch(
+  () => props.conversationId,
+  async (id) => {
+    if (id && id !== conversation.value?.conversation_id) await openConversationById(id);
   },
 );
 
@@ -57,6 +68,26 @@ async function refreshAgentInfo() {
   agentInfo.value = agents.value.find((a) => String(a.id) === String(conversation.value?.agent_id)) ?? null;
 }
 
+/** 直接打开指定会话（会话管理跳转） */
+async function openConversationById(convId) {
+  panelError.value = '';
+  loading.value = true;
+  try {
+    const data = await api.conversation(convId);
+    conversation.value = data.conversation;
+    await loadHistory();
+    await refreshAgentInfo();
+    startPolling();
+    await loadProjectsIfNeeded();
+    await nextTick();
+    inputEl.value?.focus();
+  } catch (e) {
+    panelError.value = e.message;
+  } finally {
+    loading.value = false;
+  }
+}
+
 async function openConversation() {
   panelError.value = '';
   const t = props.target;
@@ -70,12 +101,25 @@ async function openConversation() {
     await loadHistory();
     await refreshAgentInfo();
     startPolling();
+    await loadProjectsIfNeeded();
     await nextTick();
     inputEl.value?.focus();
   } catch (e) {
     panelError.value = e.message;
   } finally {
     loading.value = false;
+  }
+}
+
+/** 拉主机 ~/projects 目录列表（供工作目录下拉选择；仅全屏主机对话页） */
+async function loadProjectsIfNeeded() {
+  if (projectsLoaded.value || !conversation.value || conversation.value.task_id) return;
+  try {
+    const data = await api.agentProjects(conversation.value.agent_id);
+    projects.value = data.dirs ?? [];
+    projectsLoaded.value = true;
+  } catch {
+    /* 静默：拉不到目录不影响对话 */
   }
 }
 
@@ -182,12 +226,12 @@ async function archive() {
   stopPolling();
 }
 
-/** 保存工作目录（远程 pi 下次回复在该路径下运行；限制在主机 home 下） */
+/** 保存工作目录（远程 pi 下次回复在该路径下运行；约定 ~/projects/ 下） */
 async function saveWorkdir() {
   if (!conversation.value) return;
   const wd = workdirInput.value.trim();
-  if (wd && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(wd)) {
-    workdirMsg.value = '须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验）';
+  if (wd && !/^~[\/]projects[\/]|^\/|^[A-Za-z]:[\/\\]/.test(wd)) {
+    workdirMsg.value = '工作目录须为 ~/projects/ 下（限制在主机 home 内）';
     return;
   }
   workdirSaving.value = true;
@@ -195,11 +239,35 @@ async function saveWorkdir() {
   try {
     const r = await api.updateConversationWorkdir(conversation.value.conversation_id, wd || null);
     conversation.value.workdir = r.workdir;
-    workdirMsg.value = '已保存，下次回复在该目录下运行';
+    workdirMsg.value = '已保存，下次回复在该目录下运行（远端 pi 按目录续接会话）';
   } catch (e) {
     workdirMsg.value = e.message;
   } finally {
     workdirSaving.value = false;
+  }
+}
+
+/** 从主机目录列表选择工作目录 */
+async function pickProject(name) {
+  workdirInput.value = `~/projects/${name}`;
+  await saveWorkdir();
+}
+
+/** 重新扫描主机 ~/projects（WS 推 bridge 立即上报，随后重拉列表） */
+async function rescanProjects() {
+  if (!conversation.value) return;
+  try {
+    await api.rescanAgentProjects(conversation.value.agent_id);
+    workdirMsg.value = '已请求主机重新扫描目录，稍后刷新…';
+    setTimeout(async () => {
+      try {
+        const data = await api.agentProjects(conversation.value.agent_id);
+        projects.value = data.dirs ?? [];
+        workdirMsg.value = '目录列表已刷新';
+      } catch { /* 静默 */ }
+    }, 1500);
+  } catch (e) {
+    workdirMsg.value = e.message;
   }
 }
 </script>
@@ -237,7 +305,7 @@ async function saveWorkdir() {
       </div>
     </div>
 
-    <!-- 工作目录（全屏对话页：指定后远程 pi 在该路径下运行，限制在主机 home 下） -->
+    <!-- 工作目录（全屏对话页：指定后远程 pi 在该路径下运行；约定 ~/projects/ 下） -->
     <div v-if="props.fullscreen && conversation" class="px-2 py-1 chat-wd">
       <div class="input-group input-group-sm">
         <span class="input-group-text"><i class="bi bi-folder2-open"></i></span>
@@ -245,6 +313,16 @@ async function saveWorkdir() {
                :disabled="workdirSaving" @keydown.enter.exact.prevent="saveWorkdir">
         <button class="btn btn-outline-primary" :disabled="workdirSaving" @click="saveWorkdir">
           {{ workdirSaving ? '保存中…' : '设置' }}
+        </button>
+      </div>
+      <div v-if="projects.length" class="d-flex flex-wrap gap-1 mt-1 align-items-center">
+        <span class="text-secondary small">主机目录：</span>
+        <button v-for="p in projects" :key="p" class="btn btn-sm btn-outline-secondary py-0 project-chip"
+                :class="{ 'text-primary border-primary': workdirInput === `~/projects/${p}` }" @click="pickProject(p)">
+          {{ p }}
+        </button>
+        <button class="btn btn-sm btn-outline-secondary py-0" title="重新扫描主机 ~/projects" @click="rescanProjects">
+          <i class="bi bi-arrow-clockwise"></i>
         </button>
       </div>
       <div v-if="workdirMsg" class="small" :class="workdirMsg.startsWith('已') ? 'text-success' : 'text-danger'">{{ workdirMsg }}</div>
@@ -340,6 +418,13 @@ async function saveWorkdir() {
 .chat-input {
   resize: none;
   line-height: 1.35;
+}
+.project-chip {
+  font-size: 0.75rem;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-cursor {
   display: inline-block;

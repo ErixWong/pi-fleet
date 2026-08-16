@@ -9,11 +9,26 @@ const route = useRoute();
 const router = useRouter();
 const agent = ref(null);
 const tasks = ref([]);
+const conversations = ref([]);
+const convTotal = ref(0);
+const convPage = ref(1);
+const convLoading = ref(false);
 const newKey = ref(null); // 重置后的新 key（一次性展示）
 const error = ref('');
 const page = ref(1);
 const total = ref(0);
 const offlineMin = ref(30);
+
+// 新建会话弹窗
+const showCreate = ref(false);
+const createName = ref('');
+const createWorkdir = ref('');
+const createRunUser = ref('');
+const createMsg = ref('');
+const createBusy = ref(false);
+const projects = ref([]);
+const projectsLoaded = ref(false);
+const projectsUpdated = ref(null);
 
 async function loadTasks() {
   const data = await api.agent(route.params.id, { page: page.value, page_size: 10 });
@@ -23,34 +38,117 @@ async function loadTasks() {
   offlineMin.value = data.offline_after_min ?? 30;
 }
 
-onMounted(loadTasks);
+async function loadConversations() {
+  convLoading.value = true;
+  try {
+    const data = await api.agentConversations(route.params.id, convPage.value, 20);
+    conversations.value = data.conversations ?? [];
+    convTotal.value = data.total ?? 0;
+  } finally {
+    convLoading.value = false;
+  }
+}
 
-/** 跳转全屏专门对话页 */
+async function loadProjects(force) {
+  try {
+    const data = await api.agentProjects(route.params.id);
+    projects.value = data.dirs ?? [];
+    projectsUpdated.value = data.updated_at ?? null;
+    if (force) {
+      // 重新扫描：WS 推 bridge 立即上报，稍后重拉
+      const r = await api.rescanAgentProjects(route.params.id);
+      if (!r.online) createMsg.value = '主机未在线（bridge 未连接），目录列表可能不是最新的';
+      setTimeout(loadProjects, 1500);
+    }
+  } catch (e) {
+    createMsg.value = e.message;
+  }
+}
+
+onMounted(() => {
+  loadTasks();
+  loadConversations();
+  loadProjects();
+});
+
+/** 跳转全屏专门对话页（默认主机对话） */
 function openChat() {
   router.push(`/chat/${agent.value.id}`);
 }
 
-async function toggle() {
-  await api.toggleAgent(agent.value.id);
-  await loadTasks();
+/** 打开指定会话 */
+function openConv(convId) {
+  router.push(`/chat/${agent.value.id}/${convId}`);
 }
 
-async function resetKey() {
-  if (!confirm('确定重置 API Key？旧 key 将立即失效，需要更新到 agent 机器上。')) return;
-  error.value = '';
+function openCreate() {
+  createName.value = '';
+  createWorkdir.value = '';
+  createRunUser.value = '';
+  createMsg.value = '';
+  showCreate.value = true;
+}
+
+async function submitCreate() {
+  createBusy.value = true;
+  createMsg.value = '';
   try {
-    const data = await api.resetAgentKey(agent.value.id);
-    newKey.value = data.key;
-    window.scrollTo(0, 0);
+    const payload = { agent_id: Number(route.params.id) };
+    if (createName.value.trim()) payload.name = createName.value.trim();
+    if (createWorkdir.value.trim()) payload.workdir = createWorkdir.value.trim();
+    if (createRunUser.value.trim()) payload.run_user = createRunUser.value.trim();
+    const data = await api.createConversation(payload);
+    showCreate.value = false;
+    await loadConversations();
+    router.push(`/chat/${route.params.id}/${data.conversation.conversation_id}`);
   } catch (e) {
-    error.value = e.message;
+    createMsg.value = e.message;
+  } finally {
+    createBusy.value = false;
   }
 }
 
-async function toggleAccept() {
-  await api.toggleAgentAccept(agent.value.id);
-  const data = await api.agent(agent.value.id);
-  agent.value = data.agent;
+async function renameConv(conv) {
+  const name = prompt('会话名：', conv.name || '');
+  if (name === null) return;
+  try {
+    await api.renameConversation(conv.conversation_id, name.trim() || conv.name || '会话');
+    await loadConversations();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function setRunUser(conv) {
+  const name = prompt('运行 pi 的用户（空=bridge 当前用户；非当前用户需远端 sudoers 白名单）：', conv.run_user || '');
+  if (name === null) return;
+  try {
+    await api.setConversationRunUser(conv.conversation_id, name.trim() || null);
+    await loadConversations();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function archiveConv(conv) {
+  if (!confirm(`归档会话「${conv.name || conv.conversation_id}」？（归档后从列表隐藏，历史保留）`)) return;
+  try {
+    await api.archiveConversation(conv.conversation_id);
+    await loadConversations();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+function pickProject(name) {
+  createWorkdir.value = `~/projects/${name}`;
 }
 
 function badge(status) {
@@ -68,9 +166,14 @@ function badge(status) {
 <template>
   <div class="d-flex justify-content-between align-items-center mb-3">
     <router-link to="/agents" class="btn btn-sm btn-outline-secondary">← Agent 列表</router-link>
-    <button v-if="agent" class="btn btn-sm btn-primary" @click="openChat">
-      <i class="bi bi-chat-dots me-1"></i>对话
-    </button>
+    <div class="d-flex gap-2">
+      <button v-if="agent" class="btn btn-sm btn-outline-primary" @click="openChat">
+        <i class="bi bi-chat-dots me-1"></i>对话
+      </button>
+      <button v-if="agent" class="btn btn-sm btn-primary" @click="openCreate">
+        <i class="bi bi-plus-lg me-1"></i>新建会话
+      </button>
+    </div>
   </div>
   <div v-if="agent">
     <h4 class="mb-3">{{ agent.name }} <span class="text-secondary small">{{ agent.agent_id }}</span></h4>
@@ -81,6 +184,46 @@ function badge(status) {
       <div class="key-box">{{ newKey }}</div>
       <div class="small mt-2 text-secondary">请更新到 agent 机器的 <code>/etc/pi-agent/env</code>（PI_AGENT_KEY）。</div>
       <button class="btn btn-sm btn-outline-secondary mt-2" @click="newKey = null">我已保存</button>
+    </div>
+
+    <!-- 会话管理（多会话：每个会话绑定 ~/projects 下的工作目录，远端 pi 按目录续接） -->
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span class="fw-bold small"><i class="bi bi-chat-square-text me-1 text-primary"></i>会话管理</span>
+        <span class="text-secondary small">远端 pi 在会话指定目录下运行（<code>~/projects/xxx</code>），再次进入先进入目录再 <code>pi -r</code> 续接</span>
+      </div>
+      <div class="card-body py-2">
+        <div v-if="convLoading" class="text-center text-secondary small py-3">加载中…</div>
+        <div v-else-if="conversations.length === 0" class="text-center text-secondary small py-3">
+          暂无会话。点击右上角「新建会话」创建（选择一个 ~/projects 目录作为起点）。
+        </div>
+        <table v-else class="table table-sm table-hover align-middle mb-0">
+          <thead><tr><th>会话名</th><th>工作目录</th><th>运行用户</th><th>最后消息</th><th>更新时间</th><th class="text-end">操作</th></tr></thead>
+          <tbody>
+            <tr v-for="c in conversations" :key="c.conversation_id">
+              <td>
+                <a href="javascript:void(0)" class="fw-bold text-decoration-none" @click="openConv(c.conversation_id)">
+                  {{ c.name || '(未命名会话)' }}
+                </a>
+                <div class="text-secondary small">{{ c.conversation_id }}</div>
+              </td>
+              <td><code class="small">{{ c.workdir || '—（默认目录）' }}</code></td>
+              <td>{{ c.run_user || '当前用户' }}</td>
+              <td class="small text-truncate" style="max-width: 240px">{{ c.last_message || '—' }}</td>
+              <td class="small text-secondary">{{ fmtTime(c.updated_at) }}</td>
+              <td class="text-end text-nowrap">
+                <button class="btn btn-sm btn-outline-primary py-0" title="打开会话" @click="openConv(c.conversation_id)"><i class="bi bi-chat-dots"></i></button>
+                <button class="btn btn-sm btn-outline-secondary py-0 ms-1" title="重命名" @click="renameConv(c)"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-outline-secondary py-0 ms-1" title="运行用户" @click="setRunUser(c)"><i class="bi bi-person-gear"></i></button>
+                <button class="btn btn-sm btn-outline-danger py-0 ms-1" title="归档" @click="archiveConv(c)"><i class="bi bi-archive"></i></button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="convTotal > 20" class="mt-2">
+          <Pagination :total="convTotal" v-model:page="convPage" :page-size="20" @change="loadConversations" />
+        </div>
+      </div>
     </div>
 
     <div class="row">
@@ -149,5 +292,49 @@ function badge(status) {
   <div class="mt-2">
     <Pagination :total="total" v-model:page="page" :page-size="10" @change="loadTasks" />
   </div>
+
+  <!-- 新建会话弹窗 -->
+  <div v-if="showCreate" class="modal show d-block" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h6 class="modal-title">新建会话</h6>
+          <button type="button" class="btn-close" @click="showCreate = false"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">
+            <label class="form-label small mb-1">会话名（可选）</label>
+            <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-1">工作目录（~/projects 下，远端 pi 在该目录运行）</label>
+            <input v-model="createWorkdir" class="form-control form-control-sm" placeholder="~/projects/xxx"
+                   @keydown.enter.exact.prevent="submitCreate">
+            <div v-if="projects.length" class="d-flex flex-wrap gap-1 mt-1">
+              <button v-for="p in projects" :key="p" type="button" class="btn btn-sm btn-outline-secondary py-0"
+                      :class="{ 'text-primary border-primary': createWorkdir === `~/projects/${p}` }" @click="pickProject(p)">
+                {{ p }}
+              </button>
+            </div>
+            <div v-else class="text-secondary small mt-1">主机目录列表为空{{ projectsUpdated ? '（缓存 ' + fmtTime(projectsUpdated) + '）' : '' }}，可手动输入或刷新。
+              <button class="btn btn-sm btn-link py-0" @click="loadProjects(true)"><i class="bi bi-arrow-clockwise"></i>刷新</button>
+            </div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-1">运行 pi 的用户（可选；空=主机 bridge 当前用户）</label>
+            <input v-model="createRunUser" class="form-control form-control-sm" placeholder="如 pi-agent（非当前用户需远端 sudoers 白名单）">
+          </div>
+          <div v-if="createMsg" class="small text-danger">{{ createMsg }}</div>
+        </div>
+        <div class="modal-footer py-2">
+          <button class="btn btn-sm btn-outline-secondary" @click="showCreate = false">取消</button>
+          <button class="btn btn-sm btn-primary" :disabled="createBusy" @click="submitCreate">
+            {{ createBusy ? '创建中…' : '创建并进入' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div v-if="showCreate" class="modal-backdrop show" @click="showCreate = false"></div>
   </div>
 </template>

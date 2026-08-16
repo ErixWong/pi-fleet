@@ -11,6 +11,7 @@ const routes = [
   { path: '/agents', component: () => import('./views/Agents.vue'), meta: { auth: true } },
   { path: '/agents/:id', component: () => import('./views/AgentDetail.vue'), meta: { auth: true } },
   { path: '/chat/:agentId', component: () => import('./views/ChatPage.vue'), meta: { auth: true } },
+  { path: '/chat/:agentId/:convId', component: () => import('./views/ChatPage.vue'), meta: { auth: true } },
   { path: '/settings', component: () => import('./views/Settings.vue'), meta: { auth: true } },
 ];
 

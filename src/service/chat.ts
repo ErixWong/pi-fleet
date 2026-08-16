@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { query } from '../db.js';
 import { nowString } from '../scheduler.js';
 
@@ -16,7 +17,9 @@ export interface ConversationView {
   task_id: string | null;
   task_title: string | null;
   task_status: string | null;
+  name: string;
   workdir: string | null;
+  run_user: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -41,7 +44,7 @@ export async function listConversations(page = 1, pageSize = 10): Promise<{ item
   const total = Number(totalRows[0]?.c ?? 0);
   const rows = (await query(
     `SELECT c.id, c.conversation_id, c.agent_id, a.name AS agent_name, c.task_id, t.title AS task_title, t.status AS task_status,
-            c.workdir, c.status, c.created_at, c.updated_at,
+            c.name, c.workdir, c.run_user, c.status, c.created_at, c.updated_at,
             lm.content AS last_message, lm.sender_role AS last_sender
        FROM conversations c
        LEFT JOIN agents a ON a.id = c.agent_id
@@ -65,7 +68,9 @@ function toConv(r: Record<string, unknown>): ConversationView {
     task_id: r.task_id === null || r.task_id === undefined ? null : String(r.task_id),
     task_title: r.task_title === null || r.task_title === undefined ? null : String(r.task_title),
     task_status: r.task_status === null || r.task_status === undefined ? null : String(r.task_status),
+    name: String(r.name ?? ''),
     workdir: r.workdir === null || r.workdir === undefined ? null : String(r.workdir),
+    run_user: r.run_user === null || r.run_user === undefined ? null : String(r.run_user),
     status: String(r.status),
     created_at: String(r.created_at ?? ''),
     updated_at: String(r.updated_at ?? ''),
@@ -78,12 +83,80 @@ function toConv(r: Record<string, unknown>): ConversationView {
 export async function getConversation(convId: string, agentId?: number): Promise<ConversationView | null> {
   const rows = (await query(
     `SELECT c.id, c.conversation_id, c.agent_id, a.name AS agent_name, c.task_id, t.title AS task_title,
-            c.workdir, c.status, c.created_at, c.updated_at
+            c.name, c.workdir, c.run_user, c.status, c.created_at, c.updated_at
        FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id LEFT JOIN tasks t ON t.task_id = c.task_id
       WHERE c.conversation_id = ?${agentId ? ' AND c.agent_id = ?' : ''} LIMIT 1`,
     agentId ? [convId, agentId] : [convId],
   )) as Array<Record<string, unknown>>;
   return rows.length > 0 ? toConv(rows[0]) : null;
+}
+
+/** 列某主机所有 open 会话（多会话：含主机会话与任务会话；管理端会话管理用） */
+export async function listAgentConversations(agentId: number, page = 1, pageSize = 20): Promise<{ items: ConversationView[]; total: number }> {
+  const pageNum = Math.max(1, Math.floor(page));
+  const size = Math.min(100, Math.max(1, Math.floor(pageSize)));
+  const totalRows = (await query(`SELECT COUNT(*) AS c FROM conversations WHERE agent_id = ? AND status = 'open'`, [agentId])) as Array<Record<string, unknown>>;
+  const total = Number(totalRows[0]?.c ?? 0);
+  const rows = (await query(
+    `SELECT c.id, c.conversation_id, c.agent_id, a.name AS agent_name, c.task_id, t.title AS task_title, t.status AS task_status,
+            c.name, c.workdir, c.run_user, c.status, c.created_at, c.updated_at,
+            lm.content AS last_message, lm.sender_role AS last_sender
+       FROM conversations c
+       LEFT JOIN agents a ON a.id = c.agent_id
+       LEFT JOIN tasks t ON t.task_id = c.task_id
+       LEFT JOIN (
+         SELECT conversation_id, content, sender_role FROM chat_messages m1
+          WHERE m1.id = (SELECT MAX(m2.id) FROM chat_messages m2 WHERE m2.conversation_id = m1.conversation_id)
+       ) lm ON lm.conversation_id = c.conversation_id
+      WHERE c.agent_id = ? AND c.status = 'open'
+      ORDER BY c.updated_at DESC LIMIT ? OFFSET ?`,
+    [agentId, size, (pageNum - 1) * size],
+  )) as Array<Record<string, unknown>>;
+  return { items: rows.map(toConv), total };
+}
+
+/** 创建主机会话（多会话：每次新建一个独立会话；name/workdir/run_user 各自记录） */
+export async function createHostConversation(agentId: number, opts: { name?: string; workdir?: string | null; run_user?: string | null }): Promise<ConversationView> {
+  const convId = `conv-${randomBytes(4).toString('hex')}`;
+  await query(
+    `INSERT INTO conversations (conversation_id, agent_id, name, workdir, run_user) VALUES (?, ?, ?, ?, ?)`,
+    [convId, agentId, (opts.name ?? '').trim(), opts.workdir ?? null, opts.run_user ?? null],
+  );
+  const c = await getConversation(convId);
+  if (!c) throw new Error('会话创建失败');
+  return c;
+}
+
+/** 更新会话名称 */
+export async function renameConversation(convId: string, name: string): Promise<boolean> {
+  const r = (await query(`UPDATE conversations SET name = ? WHERE conversation_id = ?`, [name.trim(), convId])) as unknown as { affectedRows?: number };
+  return Number(r.affectedRows ?? 0) > 0;
+}
+
+/** 更新会话运行用户（空=bridge 当前用户；非当前用户需 sudoers 白名单） */
+export async function setConversationRunUser(convId: string, runUser: string | null): Promise<boolean> {
+  const r = (await query(`UPDATE conversations SET run_user = ? WHERE conversation_id = ?`, [runUser, convId])) as unknown as { affectedRows?: number };
+  return Number(r.affectedRows ?? 0) > 0;
+}
+
+/** 读取主机 ~/projects 目录列表缓存（bridge 上报） */
+export async function getAgentProjects(agentId: number): Promise<{ dirs: string[]; updated_at: string | null }> {
+  const rows = (await query(`SELECT projects, updated_at FROM agent_projects WHERE agent_id = ? LIMIT 1`, [agentId])) as Array<Record<string, unknown>>;
+  if (rows.length === 0) return { dirs: [], updated_at: null };
+  let dirs: string[] = [];
+  try {
+    const parsed = JSON.parse(String(rows[0].projects ?? '[]'));
+    dirs = Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch { /* 损坏缓存按空处理 */ }
+  return { dirs, updated_at: rows[0].updated_at === null || rows[0].updated_at === undefined ? null : String(rows[0].updated_at) };
+}
+
+/** 写入主机 ~/projects 目录列表（bridge 上报；UPSERT） */
+export async function setAgentProjects(agentId: number, dirs: string[]): Promise<void> {
+  await query(
+    `INSERT INTO agent_projects (agent_id, projects) VALUES (?, ?) ON DUPLICATE KEY UPDATE projects = VALUES(projects)`,
+    [agentId, JSON.stringify([...new Set(dirs.map((d) => d.trim()).filter(Boolean))])],
+  );
 }
 
 /** 发起对话：带 task_id → 只复用该任务的 open 对话（没有就新建，任务独立上下文）；不带 → 复用同 agent 的 open 对话 */
