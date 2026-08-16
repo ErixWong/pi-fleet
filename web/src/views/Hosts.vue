@@ -476,7 +476,7 @@ function badge(status) {
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0 fw-bold">{{ agent.name }} <span class="text-secondary small fw-normal">{{ agent.agent_id }}</span></h5>
           <div class="d-flex gap-2">
-            <button class="btn btn-sm btn-outline-primary" @click="openChat"><i class="bi bi-chat-dots me-1"></i>会话</button>
+            <button class="btn btn-sm btn-outline-primary" @click="openChat()"><i class="bi bi-chat-dots me-1"></i>会话</button>
             <button class="btn btn-sm btn-outline-secondary" @click="openEdit"><i class="bi bi-pencil me-1"></i>编辑</button>
           </div>
         </div>

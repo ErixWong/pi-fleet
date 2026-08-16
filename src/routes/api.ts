@@ -79,6 +79,16 @@ function requireAdminJson(req: Request, res: Response, next: NextFunction): void
   res.status(401).json({ error: 'unauthorized' });
 }
 
+/** :id 路由参数守卫：非正整数（含 NaN/0/负数）直接 400，防 NaN 落入 SQL 崩进程 */
+function agentIdGuard(req: Request, res: Response, next: NextFunction): void {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: '非法的 agent_id' });
+    return;
+  }
+  next();
+}
+
 // ─────────────────────────── 登录 / 会话 ───────────────────────────
 /** 登录失败限速（内存计数）：同 IP 1 分钟内连续失败 ≥5 次 → 429，防暴力破解 */
 const loginFailures = new Map<string, { count: number; windowStart: number }>();
@@ -241,7 +251,7 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
   res.status(201).json({ agent: rows[0], key });
 });
 
-apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
+apiRouter.get('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const rows = await query(
     `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status,
@@ -268,7 +278,7 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   res.json({ agent, tasks, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
-apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/toggle', requireAdminJson, agentIdGuard, async (req, res) => {
   const result = await query(
     `UPDATE agents SET status = IF(status='active','disabled','active') WHERE id = ?`,
     [Number(req.params.id)],
@@ -282,7 +292,7 @@ apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
 });
 
 /** 更新 agent 基础信息（2026-08-16）：name/hostname/description/system_prompt/tags/accept_external，仅更新传入字段 */
-apiRouter.put('/agents/:id', requireAdminJson, async (req, res) => {
+apiRouter.put('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const body = (req.body ?? {}) as {
     name?: string;
@@ -340,7 +350,7 @@ apiRouter.put('/agents/:id', requireAdminJson, async (req, res) => {
 });
 
 /** 重置 agent key：吊销旧 key，生成新 key（一次性返回） */
-apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/reset-key', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const newKey = generateApiKey();
   const result = await query(`UPDATE agents SET key_hash = ? WHERE id = ?`, [hashApiKey(newKey), id]);
@@ -353,7 +363,7 @@ apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
 });
 
 /** 删除 agent（2026-08-16）：无外键关联 → 物理删除；有关联数据 → 软删除（visible=0 + disabled，不再显示） */
-apiRouter.post('/agents/:id/delete', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/delete', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
   if (exists.length === 0) {
@@ -389,7 +399,7 @@ apiRouter.post('/agents/:id/delete', requireAdminJson, async (req, res) => {
 });
 
 /** 接单开关（§3.2/§五）：是否允许该主机认领公共池外单 */
-apiRouter.post('/agents/:id/accept-toggle', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/accept-toggle', requireAdminJson, agentIdGuard, async (req, res) => {
   const result = await query(
     `UPDATE agents SET accept_external = IF(accept_external=1, 0, 1) WHERE id = ?`,
     [Number(req.params.id)],
@@ -412,7 +422,7 @@ apiRouter.get('/tags', requireAdminJson, async (_req, res) => {
 });
 
 /** 设置主机标签（全量覆盖；未匹配内置的自动建自定义） */
-apiRouter.post('/agents/:id/tags', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/tags', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const names = Array.isArray((req.body ?? {}).tags) ? (req.body as { tags?: unknown[] }).tags!.map(String) : [];
   const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
@@ -1175,7 +1185,7 @@ function isSafeWorkdir(workdir: string): boolean {
 }
 
 /** 列某主机所有 open 会话（多会话管理） */
-apiRouter.get('/agents/:id/conversations', requireAdminJson, async (req, res) => {
+apiRouter.get('/agents/:id/conversations', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
@@ -1188,7 +1198,7 @@ apiRouter.get('/agents/:id/conversations', requireAdminJson, async (req, res) =>
 });
 
 /** 读主机 ~/projects 目录列表缓存（bridge 上报） */
-apiRouter.get('/agents/:id/projects', requireAdminJson, async (req, res) => {
+apiRouter.get('/agents/:id/projects', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
@@ -1200,7 +1210,7 @@ apiRouter.get('/agents/:id/projects', requireAdminJson, async (req, res) => {
 });
 
 /** 请求主机重新扫描 ~/projects（WS 推给 bridge；bridge 上报后缓存更新） */
-apiRouter.post('/agents/:id/projects-rescan', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/projects-rescan', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
