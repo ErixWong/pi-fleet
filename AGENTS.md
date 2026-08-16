@@ -133,6 +133,17 @@ async function load() {
 - **失联判定（只读标记，不自动禁用）**：`last_seen_at` 为空（从未连接）或超过 `agent_offline_after_min` 分钟（settings KV，默认 30）未心跳 → 后端在 `/api/agents`、`/api/agents/:id`、`/api/stats` 响应中附 `offline` 标记（列表/详情/仪表盘同时返回 `offline_after_min` 供前端提示）
 - 前端：Agent 列表/详情显示红色「失联」徽标（title 提示阈值与最近活跃时间）；仪表盘「启用主机」卡显示 `· N 失联`；agent 恢复心跳后自动变回在线（无需手动操作）
 
+## docker 多主机测试环境（/docker/pi-hosts，2026-08-16）
+
+本地多主机测试：3 个 docker 容器模拟 3 台远端主机（node + pi + chat-bridge + sshd），用于多会话/多主机/run_user 端到端验证。**不进仓库，属本地基础设施**（/docker 约定）。
+
+- **镜像**：`pi-market/pi-host:0.1`（Dockerfile 在 `/docker/pi-hosts/build/`）——node:22-slim + pi CLI（COPY 自本机 npm 全局包）+ openssh-server + sudo；用户 `app`（bridge 运行者，uid 1000）+ `pi-agent`（run_user 测试）；sudoers 允许 app 无密码 sudo（测试 run_user 切换）
+- **编排**：`/docker/pi-hosts/docker-compose.yml`——3 个 service（host-1/2/3），端口 **2201/2202/2203 → 22**（SSH）；bridge 脚本与 node_modules 挂载自 `~/projects/pi-market`（改代码即生效，无需重建镜像）；`~/projects` 各挂 `/docker/pi-hosts/host-N/projects`（持久化，各 3 个子目录：web-app/blog/api-gateway、data-etl/reports/warehouse、ml-pipeline/docs/experiments）
+- **pi 模型配置**：`/docker/pi-hosts/conf/{models,settings}.json`（含 relay key，从本机 ~/.pi/agent 拷出），容器 entrypoint 拷到 app/pi-agent 的 ~/.pi/agent/
+- **启动**：`cd /docker/pi-hosts && docker compose up -d`（先注册 3 个 agent 拿 key 填 .env）；SSH 登录 `ssh app@127.0.0.1 -p 2201`（root/app 密码 `pi-host`）
+- **平台 agent**：docker主机-1（id 13）/ docker主机-2（id 14）/ docker主机-3（id 15），各上报 3 个目录；**bridge 的 run_user 修复**（spawnPiProcess→piInvocation 绝对路径解析）由此环境实测（pi-agent 用户回复验证）
+- **改 bridge 后**：`docker restart pi-host-N`（脚本 ro 挂载实时生效）
+
 ## 配置（.env）
 
 ```
