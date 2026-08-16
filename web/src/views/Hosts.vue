@@ -411,21 +411,22 @@ function badge(status) {
 </script>
 
 <template>
-  <div class="hosts-workspace d-flex" style="height: calc(100vh - 88px)">
-    <!-- ========== 左侧：主机列表（4/12），可收起 ========== -->
-    <div v-if="sidebarCollapsed" class="hosts-rail d-flex flex-column align-items-center py-2 border-end"
-         title="展开主机列表" role="button" @click="sidebarCollapsed = false">
-      <i class="bi bi-chevron-double-right"></i>
-      <i class="bi bi-pc-display mt-2" style="opacity: .6"></i>
-    </div>
-    <aside v-else class="hosts-side col-4 border-end d-flex flex-column" style="min-width: 280px">
-      <div class="d-flex justify-content-between align-items-center px-3 py-2 border-bottom">
-        <span class="fw-bold small"><i class="bi bi-pc-display me-1 text-primary"></i>主机</span>
-        <div class="d-flex gap-1">
-          <button class="btn btn-sm btn-outline-secondary" title="收起侧边栏" @click="sidebarCollapsed = true"><i class="bi bi-chevron-left"></i></button>
-          <button class="btn btn-sm btn-primary" @click="openRegister"><i class="bi bi-plus-lg me-1"></i>注册</button>
-        </div>
+  <div class="hosts-workspace d-flex flex-column" style="height: calc(100vh - 88px)">
+    <!-- ========== 顶部横条：主机标题 + 展开/收起/注册 ========== -->
+    <div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom flex-shrink-0">
+      <button v-if="sidebarCollapsed" class="btn btn-sm btn-outline-primary" title="展开主机列表" @click="sidebarCollapsed = false">
+        <i class="bi bi-chevron-double-right me-1"></i>展开
+      </button>
+      <span class="fw-bold small"><i class="bi bi-pc-display me-1 text-primary"></i>主机</span>
+      <div class="ms-auto d-flex gap-1">
+        <button v-if="!sidebarCollapsed" class="btn btn-sm btn-outline-secondary" title="收起侧边栏" @click="sidebarCollapsed = true"><i class="bi bi-chevron-left"></i></button>
+        <button v-if="!sidebarCollapsed" class="btn btn-sm btn-primary" @click="openRegister"><i class="bi bi-plus-lg me-1"></i>注册</button>
       </div>
+    </div>
+
+    <!-- ========== 主体：左侧主机列表（4/12，可收起）+ 右侧内容（8/12） ========== -->
+    <div class="d-flex flex-grow-1" style="min-height: 0">
+    <aside v-if="!sidebarCollapsed" class="hosts-side col-3 border-end d-flex flex-column" style="min-width: 240px">
       <div v-if="newKey" class="alert alert-warning m-2 py-2 small mb-0">
         <div class="fw-bold mb-1"><i class="bi bi-key-fill me-1"></i>新 API Key（只显示这一次，请立即保存）— {{ newKey.name }}</div>
         <div class="key-box">{{ newKey.key }}</div>
@@ -455,7 +456,7 @@ function badge(status) {
     </aside>
 
     <!-- ========== 右侧：内容区（8/12，收起侧栏后占满 12/12） ========== -->
-    <section :class="sidebarCollapsed ? 'col-12' : 'col-8'" class="d-flex flex-column" style="min-width: 0">
+    <section :class="sidebarCollapsed ? 'col-12' : 'col-9'" class="d-flex flex-column" style="min-width: 0">
 
       <!-- 空状态 -->
       <div v-if="mode === 'empty'" class="flex-grow-1 d-flex align-items-center justify-content-center">
@@ -608,6 +609,7 @@ function badge(status) {
           fullscreen @close="backToDetail" />
       </div>
     </section>
+    </div>
 
     <!-- 新建会话弹窗 -->
     <div v-if="showCreate" class="modal show d-block" tabindex="-1">
@@ -728,18 +730,6 @@ function badge(status) {
   border: 1px solid var(--border-soft, rgba(0, 0, 0, 0.1));
   border-radius: 0.5rem;
   overflow: hidden;
-}
-.hosts-rail {
-  width: 44px;
-  cursor: pointer;
-  user-select: none;
-  color: var(--bs-secondary);
-  transition: color 0.1s;
-  justify-content: center;
-}
-.hosts-rail:hover {
-  color: var(--bs-primary);
-  background: var(--bs-tertiary-bg, rgba(0, 0, 0, 0.03));
 }
 .host-item {
   cursor: pointer;
