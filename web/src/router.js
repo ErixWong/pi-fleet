@@ -9,6 +9,7 @@ const routes = [
   { path: '/plans', component: () => import('./views/Plans.vue'), meta: { auth: true } },
   { path: '/plans/:planId', component: () => import('./views/PlanDetail.vue'), meta: { auth: true } },
   { path: '/agents', component: () => import('./views/Agents.vue'), meta: { auth: true } },
+  { path: '/hosts', component: () => import('./views/Hosts.vue'), meta: { auth: true } },
   { path: '/agents/:id', component: () => import('./views/AgentDetail.vue'), meta: { auth: true } },
   { path: '/chat/:agentId', component: () => import('./views/ChatPage.vue'), meta: { auth: true } },
   { path: '/chat/:agentId/:convId', component: () => import('./views/ChatPage.vue'), meta: { auth: true } },

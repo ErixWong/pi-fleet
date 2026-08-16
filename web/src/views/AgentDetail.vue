@@ -280,7 +280,7 @@ function badge(status) {
                   </td></tr>
                 <tr><th class="text-secondary">状态</th>
                   <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span>
-                    <span v-if="agent.offline" class="badge text-bg-danger ms-1" title="超过 {{ offlineMin }} 分钟无心跳（最近活跃：{{ agent.last_seen_at || '从未连接' }}）">失联</span>
+                    <span v-if="agent.offline" class="badge text-bg-danger ms-1" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${agent.last_seen_at || '从未连接'}）`">失联</span>
                   </td></tr>
                 <tr><th class="text-secondary">最近活跃</th><td>{{ agent.last_seen_at || '从未连接' }}</td></tr>
                 <tr><th class="text-secondary">创建时间</th><td>{{ agent.created_at }}</td></tr>

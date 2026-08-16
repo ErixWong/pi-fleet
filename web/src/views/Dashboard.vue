@@ -40,7 +40,7 @@ function taskBadge(status) {
             <div>
               <div class="num">{{ stats.agents.active ?? 0 }}</div>
               <div class="lbl">启用主机
-                <span v-if="(stats.agents.offline ?? 0) > 0" class="text-danger fw-semibold" title="超过 {{ stats.offline_after_min ?? 30 }} 分钟无心跳">· {{ stats.agents.offline }} 失联</span>
+                <span v-if="(stats.agents.offline ?? 0) > 0" class="text-danger fw-semibold" :title="`超过 ${stats.offline_after_min ?? 30} 分钟无心跳`">· {{ stats.agents.offline }} 失联</span>
               </div>
             </div>
           </div>

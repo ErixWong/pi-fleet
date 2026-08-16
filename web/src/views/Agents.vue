@@ -151,7 +151,7 @@ onBeforeUnmount(() => { modal?.dispose(); editModal?.dispose(); });
           </span>
         </td>
         <td><span class="badge" :class="a.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ a.status }}</span>
-          <span v-if="a.offline" class="badge text-bg-danger ms-1" title="超过 {{ offlineMin }} 分钟无心跳（最近活跃：{{ a.last_seen_at || '从未连接' }}）">失联</span>
+          <span v-if="a.offline" class="badge text-bg-danger ms-1" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${a.last_seen_at || '从未连接'}）`">失联</span>
         </td>
         <td class="text-secondary small">{{ a.last_seen_at || '—' }}</td>
         <td>
