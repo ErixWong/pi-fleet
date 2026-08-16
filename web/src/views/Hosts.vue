@@ -220,13 +220,18 @@ function openCreate() {
 
 async function submitCreate() {
   if (!selectedAgent.value) return;
+  // 工作目录固定以 ~/projects/ 为前缀：输入只填子目录名（或留空=~/projects 根）；总是显式提交，创建后不可修改
+  const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
+  if (rel && (!/^[A-Za-z0-9._-]+([\/][A-Za-z0-9._-]+)*$/.test(rel) || /(^|\/)\.{1,2}(\/|$)/.test(rel))) {
+    createMsg.value = '工作目录只允许字母数字/点/下划线/连字符组成的子目录名（如 mini-mes 或 mis/crm），禁 .. / . 段';
+    return;
+  }
   createBusy.value = true;
   createMsg.value = '';
   try {
     const payload = { agent_id: Number(selectedAgent.value.id) };
     if (createName.value.trim()) payload.name = createName.value.trim();
-    const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
-    if (rel) payload.workdir = `~/projects/${rel}`;
+    payload.workdir = rel ? `~/projects/${rel}` : '~/projects';
     // 运行用户不在此处填写：部署时在主机上指定（agent.run_user），会话继承
     const data = await api.createConversation(payload);
     showCreate.value = false;
@@ -627,13 +632,13 @@ function badge(status) {
               <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
             </div>
             <div class="mb-2">
-              <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；留空=~/projects 根目录，不存在自动创建）</label>
+              <label class="form-label small mb-1">工作目录（只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；留空=~/projects 根目录，不存在自动创建）</label>
               <div class="input-group input-group-sm">
                 <span class="input-group-text" title="工作目录限定在主机 ~/projects 下">~/projects/</span>
                 <input v-model="createWorkdir" class="form-control" placeholder="mini-mes"
                        @keydown.enter.exact.prevent="submitCreate">
               </div>
-              <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
+              <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；<b>创建后固定，不可修改</b>。</div>
             </div>
             <div class="text-secondary small">运行 pi 的用户在主机上部署时指定（编辑主机可修改），会话自动继承。</div>
             <div v-if="createMsg" class="small text-danger">{{ createMsg }}</div>

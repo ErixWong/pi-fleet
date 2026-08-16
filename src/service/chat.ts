@@ -317,12 +317,6 @@ export async function chatMessagesSince(convId: string, sinceId: number): Promis
 
 export { nowString };
 
-/** 更新对话工作目录（远程 pi 下次回复在该路径下运行） */
-export async function setConversationWorkdir(convId: string, workdir: string | null): Promise<boolean> {
-  const r = (await query(`UPDATE conversations SET workdir = ? WHERE conversation_id = ?`, [workdir, convId])) as unknown as { affectedRows?: number };
-  return Number(r.affectedRows ?? 0) > 0;
-}
-
 /** 任务上下文（对话绑定任务时，供 agent/桥接器注入 prompt：明确讨论的是哪个任务） */
 export async function getTaskContext(taskId: string): Promise<{
   task_id: string;

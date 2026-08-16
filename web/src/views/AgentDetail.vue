@@ -117,14 +117,18 @@ async function removeAgent() {
 }
 
 async function submitCreate() {
+  // 工作目录固定以 ~/projects/ 为前缀：输入只填子目录名（或留空=~/projects 根）；总是显式提交，创建后不可修改
+  const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
+  if (rel && (!/^[A-Za-z0-9._-]+([\/][A-Za-z0-9._-]+)*$/.test(rel) || /(^|\/)\.{1,2}(\/|$)/.test(rel))) {
+    createMsg.value = '工作目录只允许字母数字/点/下划线/连字符组成的子目录名（如 mini-mes 或 mis/crm），禁 .. / . 段';
+    return;
+  }
   createBusy.value = true;
   createMsg.value = '';
   try {
     const payload = { agent_id: Number(route.params.id) };
     if (createName.value.trim()) payload.name = createName.value.trim();
-    // 输入框只填子目录名（~/projects/ 前缀在 UI 上固定展示）；提交时拼全路径
-    const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
-    if (rel) payload.workdir = `~/projects/${rel}`;
+    payload.workdir = rel ? `~/projects/${rel}` : '~/projects';
     // 运行用户不在此处填写：部署时在主机上指定（agent.run_user），会话继承
     const data = await api.createConversation(payload);
     showCreate.value = false;
@@ -339,7 +343,7 @@ function badge(status) {
               <input v-model="createWorkdir" class="form-control" placeholder="mini-mes"
                      @keydown.enter.exact.prevent="submitCreate">
             </div>
-            <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；留空=~/projects 根目录（不存在自动创建）。</div>
+            <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；留空=~/projects 根目录（不存在自动创建）。<b>创建后固定，不可修改</b>。</div>
           </div>
           <div class="text-secondary small">运行 pi 的用户在主机上部署时指定（编辑主机可修改），会话自动继承。</div>
           <div v-if="createMsg" class="small text-danger">{{ createMsg }}</div>

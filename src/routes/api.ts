@@ -33,7 +33,6 @@ import {
   listConversations,
   renameConversation,
   setConversationRunUser,
-  setConversationWorkdir,
 } from '../service/chat.js';
 import { chatHub } from '../ws-server.js';
 import {
@@ -1160,6 +1159,9 @@ async function validateWorkdir(agentId: number, workdir: string | null | undefin
     return '工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转';
   }
   const rel = workdir.slice('~/projects/'.length);
+  if (/(^|\/)\.{1,2}(\/|$)/.test(rel)) {
+    return '工作目录不允许 .. 或 . 段（禁止目录跳转）';
+  }
   const { dirs } = await getAgentProjects(agentId);
   if (!dirs.includes(rel)) {
     return `目录「${rel}」不在主机上报的 ~/projects 列表中（主机可能离线或目录未上报；目录须为主机真实存在的 ~/projects 子目录，不确定可先问 agent）`;
@@ -1243,24 +1245,6 @@ apiRouter.post('/conversations/:id/run-user', requireAdminJson, async (req, res)
   }
   await setConversationRunUser(req.params.id, runUser);
   res.json({ ok: true, run_user: runUser });
-});
-
-/** 更新对话工作目录（远程 pi 下次回复在该路径下运行；约定 ~/projects/ 下，绝对路径由主机校验） */
-apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) => {
-  const raw = (req.body ?? {}).workdir;
-  const workdir = raw === undefined || raw === null || raw === '' ? null : String(raw);
-  const conv = await getConversation(req.params.id);
-  if (!conv) {
-    res.status(404).json({ error: '对话不存在' });
-    return;
-  }
-  const wdErr = await validateWorkdir(Number(conv.agent_id), workdir);
-  if (wdErr) {
-    res.status(400).json({ error: wdErr });
-    return;
-  }
-  await setConversationWorkdir(req.params.id, workdir);
-  res.json({ ok: true, workdir });
 });
 
 /** 对话历史（正序分页） */

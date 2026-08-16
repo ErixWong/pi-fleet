@@ -25,9 +25,6 @@ const bodyEl = ref(null);
 const inputEl = ref(null);
 const sinceId = ref(0);
 const loading = ref(false);
-const workdirInput = ref('');
-const workdirMsg = ref('');
-const workdirSaving = ref(false);
 let pollTimer = null;
 
 onMounted(async () => {
@@ -111,7 +108,6 @@ async function loadHistory() {
   const data = await api.conversationMessages(conversation.value.conversation_id, 1, 100);
   messages.value = data.messages ?? [];
   sinceId.value = messages.value.length ? Number(messages.value[messages.value.length - 1].id) : 0;
-  workdirInput.value = (conversation.value.workdir ?? '').replace(/^~[\/]projects[\/]/, '');
   await scrollBottom();
 }
 
@@ -209,28 +205,6 @@ async function archive() {
   messages.value = [];
   stopPolling();
 }
-
-/** 保存工作目录（远程 pi 下次回复在该路径下运行；输入框只填子目录名，提交时拼 ~/projects/ 前缀，后端严格校验存在性） */
-async function saveWorkdir() {
-  if (!conversation.value) return;
-  const rel = workdirInput.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
-  if (rel && !/^[A-Za-z0-9._-]+([\/][A-Za-z0-9._-]+)*$/.test(rel)) {
-    workdirMsg.value = '只填 ~/projects/ 下的子目录名（如 mini-mes 或 mis/crm），禁绝对路径/.. /特殊字符';
-    return;
-  }
-  const wd = rel ? `~/projects/${rel}` : null;
-  workdirSaving.value = true;
-  workdirMsg.value = '';
-  try {
-    const r = await api.updateConversationWorkdir(conversation.value.conversation_id, wd);
-    conversation.value.workdir = r.workdir;
-    workdirMsg.value = '已保存，下次回复在该目录下运行（远端 pi 按目录续接会话）';
-  } catch (e) {
-    workdirMsg.value = e.message;
-  } finally {
-    workdirSaving.value = false;
-  }
-}
 </script>
 
 <template>
@@ -266,17 +240,11 @@ async function saveWorkdir() {
       </div>
     </div>
 
-    <!-- 工作目录（全屏对话页：只填 ~/projects/ 下子目录名，空=默认目录；后端严格校验） -->
+    <!-- 工作目录只读展示（创建时固定，不可修改） -->
     <div v-if="props.fullscreen && conversation" class="px-2 py-1 chat-wd">
-      <div class="input-group input-group-sm">
-        <span class="input-group-text" title="工作目录限定在主机 ~/projects 下"><i class="bi bi-folder2-open me-1"></i>~/projects/</span>
-        <input v-model="workdirInput" class="form-control" placeholder="mini-mes（只允许主机真实存在的子目录，空=默认目录）"
-               :disabled="workdirSaving" @keydown.enter.exact.prevent="saveWorkdir">
-        <button class="btn btn-outline-primary" :disabled="workdirSaving" @click="saveWorkdir">
-          {{ workdirSaving ? '保存中…' : '设置' }}
-        </button>
+      <div class="text-secondary small">
+        <i class="bi bi-folder2-open me-1"></i>工作目录：<code class="small">{{ conversation.workdir || '~/projects（默认根目录）' }}</code>
       </div>
-      <div v-if="workdirMsg" class="small" :class="workdirMsg.startsWith('已') ? 'text-success' : 'text-danger'">{{ workdirMsg }}</div>
     </div>
 
     <!-- 消息流 -->

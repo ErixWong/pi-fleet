@@ -72,6 +72,5 @@ export const api = {
   conversationMessages: (id, page = 1, pageSize = 20) => req('GET', `/api/conversations/${id}/messages?page=${page}&page_size=${pageSize}`),
   conversationSince: (id, sinceId) => req('GET', `/api/conversations/${id}/messages/since?since_id=${sinceId}`),
   sendChatMessage: (id, content) => req('POST', `/api/conversations/${id}/messages`, { content }),
-  updateConversationWorkdir: (id, workdir) => req('POST', `/api/conversations/${id}/workdir`, { workdir }),
   archiveConversation: (id) => req('POST', `/api/conversations/${id}/archive`),
 };
