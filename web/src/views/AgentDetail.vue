@@ -124,7 +124,9 @@ async function submitCreate() {
   try {
     const payload = { agent_id: Number(route.params.id) };
     if (createName.value.trim()) payload.name = createName.value.trim();
-    if (createWorkdir.value.trim()) payload.workdir = createWorkdir.value.trim();
+    // 输入框只填子目录名（~/projects/ 前缀在 UI 上固定展示）；提交时拼全路径
+    const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
+    if (rel) payload.workdir = `~/projects/${rel}`;
     if (createRunUser.value.trim()) payload.run_user = createRunUser.value.trim();
     const data = await api.createConversation(payload);
     showCreate.value = false;
@@ -333,9 +335,12 @@ function badge(status) {
             <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
           </div>
           <div class="mb-2">
-            <label class="form-label small mb-1">工作目录（可选；只允许 ~/projects/ 下目录，如 ~/projects/mini-mes 或 ~/projects/mis/crm；不填=默认目录）</label>
-            <input v-model="createWorkdir" class="form-control form-control-sm" placeholder="~/projects/xxx"
-                   @keydown.enter.exact.prevent="submitCreate">
+            <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；不填=默认目录）</label>
+            <div class="input-group input-group-sm">
+              <span class="input-group-text" title="工作目录限定在主机 ~/projects 下">~/projects/</span>
+              <input v-model="createWorkdir" class="form-control" placeholder="mini-mes"
+                     @keydown.enter.exact.prevent="submitCreate">
+            </div>
             <div class="text-secondary small mt-1">目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
           </div>
           <div class="mb-2">

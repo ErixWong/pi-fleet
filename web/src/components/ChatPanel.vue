@@ -111,7 +111,7 @@ async function loadHistory() {
   const data = await api.conversationMessages(conversation.value.conversation_id, 1, 100);
   messages.value = data.messages ?? [];
   sinceId.value = messages.value.length ? Number(messages.value[messages.value.length - 1].id) : 0;
-  workdirInput.value = conversation.value.workdir ?? '';
+  workdirInput.value = (conversation.value.workdir ?? '').replace(/^~[\/]projects[\/]/, '');
   await scrollBottom();
 }
 
@@ -210,18 +210,19 @@ async function archive() {
   stopPolling();
 }
 
-/** 保存工作目录（远程 pi 下次回复在该路径下运行；只允许 ~/projects/ 下，后端严格校验存在性） */
+/** 保存工作目录（远程 pi 下次回复在该路径下运行；输入框只填子目录名，提交时拼 ~/projects/ 前缀，后端严格校验存在性） */
 async function saveWorkdir() {
   if (!conversation.value) return;
-  const wd = workdirInput.value.trim();
-  if (wd && !/^~[\/]projects[\/]/.test(wd)) {
-    workdirMsg.value = '工作目录须为 ~/projects/ 下（如 ~/projects/mini-mes）';
+  const rel = workdirInput.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
+  if (rel && !/^[A-Za-z0-9._-]+([\/][A-Za-z0-9._-]+)*$/.test(rel)) {
+    workdirMsg.value = '只填 ~/projects/ 下的子目录名（如 mini-mes 或 mis/crm），禁绝对路径/.. /特殊字符';
     return;
   }
+  const wd = rel ? `~/projects/${rel}` : null;
   workdirSaving.value = true;
   workdirMsg.value = '';
   try {
-    const r = await api.updateConversationWorkdir(conversation.value.conversation_id, wd || null);
+    const r = await api.updateConversationWorkdir(conversation.value.conversation_id, wd);
     conversation.value.workdir = r.workdir;
     workdirMsg.value = '已保存，下次回复在该目录下运行（远端 pi 按目录续接会话）';
   } catch (e) {
@@ -265,11 +266,11 @@ async function saveWorkdir() {
       </div>
     </div>
 
-    <!-- 工作目录（全屏对话页：只允许 ~/projects/ 下目录，空=默认目录；后端严格校验） -->
+    <!-- 工作目录（全屏对话页：只填 ~/projects/ 下子目录名，空=默认目录；后端严格校验） -->
     <div v-if="props.fullscreen && conversation" class="px-2 py-1 chat-wd">
       <div class="input-group input-group-sm">
-        <span class="input-group-text"><i class="bi bi-folder2-open"></i></span>
-        <input v-model="workdirInput" class="form-control" placeholder="~/projects/xxx（只允许主机真实存在的 ~/projects 子目录，空=默认目录）"
+        <span class="input-group-text" title="工作目录限定在主机 ~/projects 下"><i class="bi bi-folder2-open me-1"></i>~/projects/</span>
+        <input v-model="workdirInput" class="form-control" placeholder="mini-mes（只允许主机真实存在的子目录，空=默认目录）"
                :disabled="workdirSaving" @keydown.enter.exact.prevent="saveWorkdir">
         <button class="btn btn-outline-primary" :disabled="workdirSaving" @click="saveWorkdir">
           {{ workdirSaving ? '保存中…' : '设置' }}
