@@ -176,15 +176,32 @@ function spawnPi(convId, onEvent) {
   }
 }
 
-/** spawn pi 子进程：支持指定运行用户（sudo -n -u 切换，需 sudoers 白名单）；--name 让远端 pi -r 列表可识别 */
+/** spawn pi 子进程：支持指定运行用户（sudo -n -u 切换，需 sudoers 白名单）；--name 让远端 pi -r 列表可识别
+ * 注意：CLI 可能为 null（pi 不在 node 全局里，直接靠 PATH 的 `pi` 命令）；sudo 场景 PATH 受 secure_path 限制，
+ * 优先用绝对路径（PI_CLI 或 node 全局解析），实在没有才回退 `pi` 命令名 */
+function piInvocation() {
+  if (CLI) return { cmd: process.execPath, args: [CLI] };
+  // CLI null：优先常见绝对路径（node 镜像 /usr/local/bin/pi，npm 全局）
+  const candidates = [
+    '/usr/local/bin/pi',
+    '/usr/bin/pi',
+    path.join(os.homedir(), '.npm-global', 'bin', 'pi'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return { cmd: p, args: [] };
+  }
+  return { cmd: 'pi', args: [] }; // 最后回退：靠 PATH
+}
+
 function spawnPiProcess(convId, s, cwd) {
   const args = ['--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING];
   if (s.name) args.push('--name', String(s.name).slice(0, 120));
   const nodeExe = process.execPath;
   const runUser = s.runUser && s.runUser !== (process.env.USER || os.userInfo().username) ? s.runUser : null;
   if (runUser) {
-    // 指定用户：sudo -n -u <user> -H -- node CLI ...（-H 让 HOME 指向目标用户，pi 配置/sessions 随该用户）
-    const sudoArgs = ['-n', '-u', runUser, '-H', '--', nodeExe, CLI, ...args];
+    // 指定用户：sudo -n -u <user> -H -- <pi> ...（-H 让 HOME 指向目标用户，pi 配置/sessions 随该用户）
+    const { cmd, args: invArgs } = piInvocation();
+    const sudoArgs = ['-n', '-u', runUser, '-H', '--', cmd, ...invArgs, ...args];
     return spawn('sudo', sudoArgs, { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   }
   if (CLI) {
