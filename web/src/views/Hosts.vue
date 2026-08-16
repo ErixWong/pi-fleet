@@ -57,19 +57,18 @@ const newKey = ref(null);
 const showCreate = ref(false);
 const createName = ref('');
 const createWorkdir = ref('');
-const createRunUser = ref('');
 const createMsg = ref('');
 const createBusy = ref(false);
 
 // 编辑主机弹窗（名称/标识/描述/提示词/接外单）
 const showEdit = ref(false);
-const editForm = ref({ name: '', hostname: '', description: '', system_prompt: '', accept_external: false });
+const editForm = ref({ name: '', hostname: '', description: '', system_prompt: '', accept_external: false, run_user: '' });
 const editBusy = ref(false);
 const editMsg = ref('');
 
 // 注册主机弹窗
 const tagGroups = ref([]);
-const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false });
+const form = ref({ name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false, run_user: '' });
 const registerModalEl = ref(null);
 let registerModal = null;
 
@@ -215,7 +214,6 @@ function openConvFromList(c) {
 function openCreate() {
   createName.value = '';
   createWorkdir.value = '';
-  createRunUser.value = '';
   createMsg.value = '';
   showCreate.value = true;
 }
@@ -229,7 +227,7 @@ async function submitCreate() {
     if (createName.value.trim()) payload.name = createName.value.trim();
     const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
     if (rel) payload.workdir = `~/projects/${rel}`;
-    if (createRunUser.value.trim()) payload.run_user = createRunUser.value.trim();
+    // 运行用户不在此处填写：部署时在主机上指定（agent.run_user），会话继承
     const data = await api.createConversation(payload);
     showCreate.value = false;
     await loadConversations();
@@ -320,6 +318,7 @@ function openEdit() {
     description: a.description ?? '',
     system_prompt: a.system_prompt ?? '',
     accept_external: !!a.accept_external,
+    run_user: a.run_user ?? '',
   };
   editMsg.value = '';
   showEdit.value = true;
@@ -337,6 +336,7 @@ async function submitEdit() {
       description: editForm.value.description.trim(),
       system_prompt: editForm.value.system_prompt,
       accept_external: editForm.value.accept_external,
+      run_user: editForm.value.run_user.trim(),
     };
     await api.updateAgent(selectedAgent.value.id, payload);
     showEdit.value = false;
@@ -373,7 +373,7 @@ async function removeAgent() {
 /** 注册主机 */
 function openRegister() {
   error.value = '';
-  form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false };
+  form.value = { name: '', hostname: '', description: '', system_prompt: '', tags: [], accept_external: false, run_user: '' };
   registerModal = new Modal(registerModalEl.value);
   registerModal.show();
 }
@@ -499,7 +499,7 @@ function badge(status) {
                     </a>
                     <div class="text-secondary small">{{ c.conversation_id }}</div>
                   </td>
-                  <td><code class="small">{{ c.workdir || '—（默认目录）' }}</code></td>
+                  <td><code class="small">{{ c.workdir || '—（默认 ~/projects）' }}</code></td>
                   <td>{{ c.run_user || '当前用户' }}</td>
                   <td class="small text-truncate" style="max-width: 220px">{{ c.last_message || '—' }}</td>
                   <td class="small text-secondary">{{ fmtTime(c.updated_at) }}</td>
@@ -543,6 +543,8 @@ function badge(status) {
                         </span>
                         <span class="text-secondary small ms-1">内外分离：接外单的主机应为隔离环境</span>
                       </td></tr>
+                    <tr><th class="text-secondary">运行用户</th>
+                      <td class="small">{{ agent.run_user || 'bridge 当前用户（未指定）' }}</td></tr>
                     <tr><th class="text-secondary">状态</th>
                       <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span>
                         <span v-if="agent.offline" class="badge text-bg-danger ms-1" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${agent.last_seen_at || '从未连接'}）`">失联</span>
@@ -625,18 +627,15 @@ function badge(status) {
               <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
             </div>
             <div class="mb-2">
-              <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；不填=默认目录）</label>
+              <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；留空=~/projects 根目录，不存在自动创建）</label>
               <div class="input-group input-group-sm">
                 <span class="input-group-text" title="工作目录限定在主机 ~/projects 下">~/projects/</span>
                 <input v-model="createWorkdir" class="form-control" placeholder="mini-mes"
                        @keydown.enter.exact.prevent="submitCreate">
               </div>
-              <div class="text-secondary small mt-1">目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
+              <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
             </div>
-            <div class="mb-2">
-              <label class="form-label small mb-1">运行 pi 的用户（可选；空=主机 bridge 当前用户）</label>
-              <input v-model="createRunUser" class="form-control form-control-sm" placeholder="如 pi-agent（非当前用户需远端 sudoers 白名单）">
-            </div>
+            <div class="text-secondary small">运行 pi 的用户在主机上部署时指定（编辑主机可修改），会话自动继承。</div>
             <div v-if="createMsg" class="small text-danger">{{ createMsg }}</div>
           </div>
           <div class="modal-footer py-2">
@@ -669,6 +668,8 @@ function badge(status) {
               <input v-model="editForm.accept_external" type="checkbox" class="form-check-input" id="editAcceptExternal">
               <label class="form-check-label small" for="editAcceptExternal">允许接外单（认领公共池公开任务）</label>
             </div>
+            <label class="form-label small mb-1">运行 pi 的用户（部署时指定；空=bridge 当前用户；非当前用户需远端 sudoers 白名单）</label>
+            <input v-model="editForm.run_user" class="form-control form-control-sm mb-2" placeholder="如 pi-agent">
             <label class="form-label small mb-1">默认提示词（agent 启动时加载；清空=自动生成）</label>
             <textarea v-model="editForm.system_prompt" class="form-control form-control-sm" rows="5"
               placeholder="你是 web-01 的运维 agent，负责..."></textarea>
@@ -710,6 +711,8 @@ function badge(status) {
                 <div class="text-secondary small">默认关闭（safer default）。开启后本主机可自主浏览公共池并认领公开任务；
                   按内外分离原则，接外单的主机应为隔离环境（不持有内部数据与凭据）。</div>
               </div>
+              <label class="form-label">运行 pi 的用户（部署时指定；空=bridge 当前用户；非当前用户需远端 sudoers 白名单）</label>
+              <input v-model="form.run_user" class="form-control mb-2" placeholder="如 pi-agent">
               <label class="form-label">默认提示词（agent 启动时加载，告知身份与职责）</label>
               <textarea v-model="form.system_prompt" class="form-control" rows="4"
                 placeholder="你是 web-01 的运维 agent，负责..."></textarea>

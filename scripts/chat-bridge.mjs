@@ -137,7 +137,7 @@ function spawnPi(convId, onEvent) {
     return; // 上一条还没回完，忽略并发（超时保护会兜底解除）
   }
   if (!s.proc || s.proc.killed || s.proc.exitCode !== null) {
-    const cwd = resolveWorkdir(s.workdir) ?? process.cwd();
+    const cwd = resolveWorkdir(s.workdir) ?? path.join(os.homedir(), 'projects');
     if (!existsSync(cwd)) {
       try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
     }

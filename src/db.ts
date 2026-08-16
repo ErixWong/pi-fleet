@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS agents (
   system_prompt TEXT,
   tags VARCHAR(255) NOT NULL DEFAULT '',
   accept_external TINYINT(1) NOT NULL DEFAULT 0 COMMENT '接单开关：是否允许认领公共池(pool)外单',
+  run_user VARCHAR(64) NULL COMMENT '运行 pi 的默认用户（部署时指定；空=bridge 当前用户；非当前用户时 bridge 用 sudo -n -u 切换，需 sudoers 白名单）',
   key_hash CHAR(64) NOT NULL UNIQUE,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
   visible TINYINT(1) NOT NULL DEFAULT 1 COMMENT '软删除标记：有关联数据时置 0 不再显示',
@@ -260,6 +261,7 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliver_attempts INT NOT NULL DEFAULT
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3 AFTER deliver_attempts;
 -- 开放生态：agent 接单开关（默认关，safer default）
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS accept_external TINYINT(1) NOT NULL DEFAULT 0 AFTER tags;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS run_user VARCHAR(64) NULL COMMENT '运行 pi 的默认用户（部署时指定；空=bridge 当前用户）' AFTER accept_external;
 -- 主机删除：软删除标记（有关联数据时置 0 不再显示；物理删除直接删行）
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS visible TINYINT(1) NOT NULL DEFAULT 1 AFTER status;
 -- 消息类型（§10.3：报告/进度并入消息流）与来源标记（§3.4 验收回帖）

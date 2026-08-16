@@ -23,7 +23,6 @@ const offlineMin = ref(30);
 const showCreate = ref(false);
 const createName = ref('');
 const createWorkdir = ref('');
-const createRunUser = ref('');
 const createMsg = ref('');
 const createBusy = ref(false);
 
@@ -64,7 +63,6 @@ function openConv(convId) {
 function openCreate() {
   createName.value = '';
   createWorkdir.value = '';
-  createRunUser.value = '';
   createMsg.value = '';
   showCreate.value = true;
 }
@@ -127,7 +125,7 @@ async function submitCreate() {
     // 输入框只填子目录名（~/projects/ 前缀在 UI 上固定展示）；提交时拼全路径
     const rel = createWorkdir.value.trim().replace(/^~[\/]projects[\/]/, '').replace(/^[\/]+/, '');
     if (rel) payload.workdir = `~/projects/${rel}`;
-    if (createRunUser.value.trim()) payload.run_user = createRunUser.value.trim();
+    // 运行用户不在此处填写：部署时在主机上指定（agent.run_user），会话继承
     const data = await api.createConversation(payload);
     showCreate.value = false;
     await loadConversations();
@@ -234,7 +232,7 @@ function badge(status) {
                 </a>
                 <div class="text-secondary small">{{ c.conversation_id }}</div>
               </td>
-              <td><code class="small">{{ c.workdir || '—（默认目录）' }}</code></td>
+              <td><code class="small">{{ c.workdir || '—（默认 ~/projects）' }}</code></td>
               <td>{{ c.run_user || '当前用户' }}</td>
               <td class="small text-truncate" style="max-width: 240px">{{ c.last_message || '—' }}</td>
               <td class="small text-secondary">{{ fmtTime(c.updated_at) }}</td>
@@ -335,18 +333,15 @@ function badge(status) {
             <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
           </div>
           <div class="mb-2">
-            <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；不填=默认目录）</label>
+            <label class="form-label small mb-1">工作目录（可选；只填 ~/projects/ 下的子目录名，如 mini-mes 或 mis/crm；留空=~/projects 根目录，不存在自动创建）</label>
             <div class="input-group input-group-sm">
               <span class="input-group-text" title="工作目录限定在主机 ~/projects 下">~/projects/</span>
               <input v-model="createWorkdir" class="form-control" placeholder="mini-mes"
                      @keydown.enter.exact.prevent="submitCreate">
             </div>
-            <div class="text-secondary small mt-1">目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
+            <div class="text-secondary small mt-1">填目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；留空=~/projects 根目录（不存在自动创建）。</div>
           </div>
-          <div class="mb-2">
-            <label class="form-label small mb-1">运行 pi 的用户（可选；空=主机 bridge 当前用户）</label>
-            <input v-model="createRunUser" class="form-control form-control-sm" placeholder="如 pi-agent（非当前用户需远端 sudoers 白名单）">
-          </div>
+          <div class="text-secondary small">运行 pi 的用户在主机上部署时指定（编辑主机可修改），会话自动继承。</div>
           <div v-if="createMsg" class="small text-danger">{{ createMsg }}</div>
         </div>
         <div class="modal-footer py-2">

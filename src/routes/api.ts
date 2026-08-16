@@ -179,7 +179,7 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.status, a.last_seen_at, a.created_at
+    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
        FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
     [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
@@ -201,6 +201,8 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
     tags?: string;
     /** 接单开关（§3.2/§五）：是否允许认领公共池外单，默认关闭 */
     accept_external?: boolean;
+    /** 运行 pi 的默认用户（部署时指定，不填=bridge 当前用户） */
+    run_user?: string | null;
   };
   const name = (body.name ?? '').trim();
   if (!name) {
@@ -217,8 +219,8 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
     customPrompt ||
     `你是主机「${name}」的 agent（agent_id: ${agentId}）。${hostname ? `位于 ${hostname}。` : ''}${description ? `职责：${description}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
   await query(
-    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, key_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, key_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       agentId,
       name,
@@ -227,11 +229,12 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
       systemPrompt,
       (body.tags ?? '').trim(),
       body.accept_external ? 1 : 0,
+      body.run_user === undefined || body.run_user === null || String(body.run_user).trim() === '' ? null : String(body.run_user).trim(),
       hashApiKey(key),
     ],
   );
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, tags, accept_external, status, last_seen_at, created_at
+    `SELECT id, agent_id, name, hostname, description, tags, accept_external, run_user, status, last_seen_at, created_at
        FROM agents WHERE agent_id = ?`,
     [agentId],
   );
@@ -242,7 +245,7 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
 apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   const id = Number(req.params.id);
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, status,
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status,
             last_seen_at, created_at
        FROM agents WHERE id = ? AND visible = 1`,
     [id],
@@ -289,6 +292,8 @@ apiRouter.put('/agents/:id', requireAdminJson, async (req, res) => {
     system_prompt?: string;
     tags?: string;
     accept_external?: boolean;
+    /** 运行 pi 的默认用户（部署时指定；传空字符串=清除回 bridge 当前用户） */
+    run_user?: string | null;
   };
   const exists = (await query(`SELECT id, name, system_prompt FROM agents WHERE id = ? AND visible = 1`, [id])) as Array<
     Record<string, unknown>
@@ -319,11 +324,16 @@ apiRouter.put('/agents/:id', requireAdminJson, async (req, res) => {
   if (systemPrompt !== undefined) { fields.push('system_prompt = ?'); vals.push(systemPrompt); }
   if (body.tags !== undefined) { fields.push('tags = ?'); vals.push(String(body.tags).trim()); }
   if (body.accept_external !== undefined) { fields.push('accept_external = ?'); vals.push(body.accept_external ? 1 : 0); }
+  if (body.run_user !== undefined) {
+    const ru = body.run_user === null ? null : String(body.run_user).trim();
+    fields.push('run_user = ?');
+    vals.push(ru === '' ? null : ru);
+  }
   if (fields.length > 0) {
     await query(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`, [...vals, id]);
   }
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, status, last_seen_at, created_at
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status, last_seen_at, created_at
        FROM agents WHERE id = ? AND visible = 1`,
     [id],
   );
@@ -1069,16 +1079,17 @@ apiRouter.get('/conversations/:id', requireAdminJson, async (req, res) => {
  */
 apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   const agentId = Number((req.body ?? {}).agent_id);
-  if (!agentId) {
-    res.status(400).json({ error: '缺少 agent_id' });
+  if (!Number.isInteger(agentId) || agentId <= 0) {
+    res.status(400).json({ error: '缺少或非法的 agent_id' });
     return;
   }
   const body = req.body as Record<string, unknown>;
-  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
+  const agentRows = (await query(`SELECT id, run_user FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
     res.status(404).json({ error: '主机不存在' });
     return;
   }
+  const agentRunUser = agentRows[0].run_user === null || agentRows[0].run_user === undefined ? null : String(agentRows[0].run_user);
   const taskIdRaw = body.task_id;
   const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
   if (taskId) {
@@ -1097,14 +1108,18 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   //  未指定 name/workdir/run_user（纯「对话」入口）→ 复用最近 open 主机会话（保持聊天连续性）
   //  指定了任一（显式新建）→ 创建新会话（每个会话绑定不同目录/用户）
   const workdirRaw = body.workdir;
-  const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? null : String(workdirRaw);
+  const explicitWorkdir = workdirRaw !== undefined && workdirRaw !== null && String(workdirRaw).trim() !== '';
+  // 工作目录留空 → 默认 ~/projects 根目录（不存在由 bridge 在主机上自动创建）
+  const workdir = explicitWorkdir ? String(workdirRaw).trim() : '~/projects';
   const wdErr = await validateWorkdir(agentId, workdir);
   if (wdErr) {
     res.status(400).json({ error: wdErr });
     return;
   }
   const runUserRaw = body.run_user;
-  const runUser = runUserRaw === undefined || runUserRaw === null || String(runUserRaw).trim() === '' ? null : String(runUserRaw).trim();
+  const explicitRunUser = runUserRaw !== undefined && runUserRaw !== null && String(runUserRaw).trim() !== '';
+  // 未指定运行用户 → 继承主机部署时指定的默认（agent.run_user；再空则 bridge 当前用户）
+  const runUser = explicitRunUser ? String(runUserRaw).trim() : agentRunUser;
   if (runUser !== null && !/^[a-z_][a-z0-9_-]*$/i.test(runUser)) {
     res.status(400).json({ error: '运行用户格式不合法（Linux 用户名）' });
     return;
@@ -1115,7 +1130,7 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: '会话名过长（≤128）' });
     return;
   }
-  if (!name.trim() && workdir === null && runUser === null) {
+  if (!name.trim() && !explicitWorkdir && !explicitRunUser) {
     // 纯「对话」入口：复用最近主机会话（无则新建默认会话）
     const recent = (await query(
       `SELECT conversation_id FROM conversations WHERE agent_id = ? AND status = 'open' AND task_id IS NULL ORDER BY updated_at DESC LIMIT 1`,
@@ -1136,9 +1151,10 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
 /** 校验工作目录（严格，2026-08-16）：
  *  1. 格式：仅允许 ~/projects/ 下的相对子目录路径（段由字母数字/._- 组成）——拒绝绝对路径、..、空白与特殊字符
  *  2. 存在性：必须在该主机 bridge 上报的 ~/projects 目录列表（agent_projects）中——防止乱填/跑到别的路径
- *  返回错误消息；null 表示通过。workdir 为空返回 null（默认会话） */
+ *  返回错误消息；null 表示通过。workdir 为空或 ~/projects 根目录返回 null（默认会话，目录不存在时由 bridge 自动创建） */
 async function validateWorkdir(agentId: number, workdir: string | null | undefined): Promise<string | null> {
   if (workdir === null || workdir === undefined || workdir === '') return null;
+  if (workdir === '~/projects' || workdir === '~\\projects') return null; // 根目录：默认会话，不要求子目录存在
   const REL = '^~[\\/]projects[\\/][A-Za-z0-9._-]+([\\/][A-Za-z0-9._-]+)*$';
   if (!new RegExp(REL).test(workdir)) {
     return '工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转';
