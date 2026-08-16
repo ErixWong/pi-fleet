@@ -112,7 +112,7 @@ async function removeAgent() {
     } else {
       alert('已删除（无关联数据，物理删除）。');
     }
-    router.push('/agents');
+    router.push('/hosts');
   } catch (e) {
     alert(e.message);
   }
@@ -192,7 +192,7 @@ function badge(status) {
 
 <template>
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <router-link to="/agents" class="btn btn-sm btn-outline-secondary">← Agent 列表</router-link>
+    <router-link to="/hosts" class="btn btn-sm btn-outline-secondary">← 主机列表</router-link>
     <div class="d-flex gap-2">
       <button v-if="agent" class="btn btn-sm btn-outline-primary" @click="openChat">
         <i class="bi bi-chat-dots me-1"></i>对话

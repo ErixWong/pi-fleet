@@ -29,7 +29,7 @@ onMounted(async () => {
 <template>
   <div>
     <div class="d-flex justify-content-between align-items-center mb-2">
-      <router-link to="/agents" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>主机列表</router-link>
+      <router-link to="/hosts" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>主机列表</router-link>
       <div v-if="agent" class="fw-bold small">
         <i class="bi bi-chat-dots me-1 text-primary"></i>{{ agent.name }}
         <span class="text-secondary fw-normal">#{{ agent.agent_id }} · {{ convId ? '会话' : '直接对话' }}</span>
@@ -37,6 +37,6 @@ onMounted(async () => {
       <span v-if="error" class="text-danger small">{{ error }}</span>
       <span></span>
     </div>
-    <ChatPanel v-if="agent" :target="{ agent_id: agent.id, agent_name: agent.name }" :conversation-id="convId" fullscreen @close="router.push('/agents')" />
+    <ChatPanel v-if="agent" :target="{ agent_id: agent.id, agent_name: agent.name }" :conversation-id="convId" fullscreen @close="router.push('/hosts')" />
   </div>
 </template>
