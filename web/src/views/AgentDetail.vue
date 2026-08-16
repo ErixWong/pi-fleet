@@ -26,9 +26,6 @@ const createWorkdir = ref('');
 const createRunUser = ref('');
 const createMsg = ref('');
 const createBusy = ref(false);
-const projects = ref([]);
-const projectsLoaded = ref(false);
-const projectsUpdated = ref(null);
 
 async function loadTasks() {
   const data = await api.agent(route.params.id, { page: page.value, page_size: 10 });
@@ -49,26 +46,9 @@ async function loadConversations() {
   }
 }
 
-async function loadProjects(force) {
-  try {
-    const data = await api.agentProjects(route.params.id);
-    projects.value = data.dirs ?? [];
-    projectsUpdated.value = data.updated_at ?? null;
-    if (force) {
-      // 重新扫描：WS 推 bridge 立即上报，稍后重拉
-      const r = await api.rescanAgentProjects(route.params.id);
-      if (!r.online) createMsg.value = '主机未在线（bridge 未连接），目录列表可能不是最新的';
-      setTimeout(loadProjects, 1500);
-    }
-  } catch (e) {
-    createMsg.value = e.message;
-  }
-}
-
 onMounted(() => {
   loadTasks();
   loadConversations();
-  loadProjects();
 });
 
 /** 跳转全屏专门对话页（默认主机对话） */
@@ -194,10 +174,6 @@ function fmtTime(ts) {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleString();
-}
-
-function pickProject(name) {
-  createWorkdir.value = `~/projects/${name}`;
 }
 
 function badge(status) {
@@ -357,18 +333,10 @@ function badge(status) {
             <input v-model="createName" class="form-control form-control-sm" placeholder="如：pi-market 开发 / 数据库维护…">
           </div>
           <div class="mb-2">
-            <label class="form-label small mb-1">工作目录（~/projects 下，远端 pi 在该目录运行）</label>
+            <label class="form-label small mb-1">工作目录（可选；只允许 ~/projects/ 下目录，如 ~/projects/mini-mes 或 ~/projects/mis/crm；不填=默认目录）</label>
             <input v-model="createWorkdir" class="form-control form-control-sm" placeholder="~/projects/xxx"
                    @keydown.enter.exact.prevent="submitCreate">
-            <div v-if="projects.length" class="d-flex flex-wrap gap-1 mt-1">
-              <button v-for="p in projects" :key="p" type="button" class="btn btn-sm btn-outline-secondary py-0"
-                      :class="{ 'text-primary border-primary': createWorkdir === `~/projects/${p}` }" @click="pickProject(p)">
-                {{ p }}
-              </button>
-            </div>
-            <div v-else class="text-secondary small mt-1">主机目录列表为空{{ projectsUpdated ? '（缓存 ' + fmtTime(projectsUpdated) + '）' : '' }}，可手动输入或刷新。
-              <button class="btn btn-sm btn-link py-0" @click="loadProjects(true)"><i class="bi bi-arrow-clockwise"></i>刷新</button>
-            </div>
+            <div class="text-secondary small mt-1">目录须为主机真实存在的 ~/projects 子目录（平台严格校验）；不确定有哪些目录可以直接问 agent。</div>
           </div>
           <div class="mb-2">
             <label class="form-label small mb-1">运行 pi 的用户（可选；空=主机 bridge 当前用户）</label>

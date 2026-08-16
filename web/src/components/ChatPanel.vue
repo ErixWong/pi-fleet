@@ -28,8 +28,6 @@ const loading = ref(false);
 const workdirInput = ref('');
 const workdirMsg = ref('');
 const workdirSaving = ref(false);
-const projects = ref([]); // 主机 ~/projects 目录列表（bridge 上报）
-const projectsLoaded = ref(false);
 let pollTimer = null;
 
 onMounted(async () => {
@@ -78,7 +76,6 @@ async function openConversationById(convId) {
     await loadHistory();
     await refreshAgentInfo();
     startPolling();
-    await loadProjectsIfNeeded();
     await nextTick();
     inputEl.value?.focus();
   } catch (e) {
@@ -101,25 +98,12 @@ async function openConversation() {
     await loadHistory();
     await refreshAgentInfo();
     startPolling();
-    await loadProjectsIfNeeded();
     await nextTick();
     inputEl.value?.focus();
   } catch (e) {
     panelError.value = e.message;
   } finally {
     loading.value = false;
-  }
-}
-
-/** 拉主机 ~/projects 目录列表（供工作目录下拉选择；仅全屏主机对话页） */
-async function loadProjectsIfNeeded() {
-  if (projectsLoaded.value || !conversation.value || conversation.value.task_id) return;
-  try {
-    const data = await api.agentProjects(conversation.value.agent_id);
-    projects.value = data.dirs ?? [];
-    projectsLoaded.value = true;
-  } catch {
-    /* 静默：拉不到目录不影响对话 */
   }
 }
 
@@ -226,12 +210,12 @@ async function archive() {
   stopPolling();
 }
 
-/** 保存工作目录（远程 pi 下次回复在该路径下运行；约定 ~/projects/ 下） */
+/** 保存工作目录（远程 pi 下次回复在该路径下运行；只允许 ~/projects/ 下，后端严格校验存在性） */
 async function saveWorkdir() {
   if (!conversation.value) return;
   const wd = workdirInput.value.trim();
-  if (wd && !/^~[\/]projects[\/]|^\/|^[A-Za-z]:[\/\\]/.test(wd)) {
-    workdirMsg.value = '工作目录须为 ~/projects/ 下（限制在主机 home 内）';
+  if (wd && !/^~[\/]projects[\/]/.test(wd)) {
+    workdirMsg.value = '工作目录须为 ~/projects/ 下（如 ~/projects/mini-mes）';
     return;
   }
   workdirSaving.value = true;
@@ -244,30 +228,6 @@ async function saveWorkdir() {
     workdirMsg.value = e.message;
   } finally {
     workdirSaving.value = false;
-  }
-}
-
-/** 从主机目录列表选择工作目录 */
-async function pickProject(name) {
-  workdirInput.value = `~/projects/${name}`;
-  await saveWorkdir();
-}
-
-/** 重新扫描主机 ~/projects（WS 推 bridge 立即上报，随后重拉列表） */
-async function rescanProjects() {
-  if (!conversation.value) return;
-  try {
-    await api.rescanAgentProjects(conversation.value.agent_id);
-    workdirMsg.value = '已请求主机重新扫描目录，稍后刷新…';
-    setTimeout(async () => {
-      try {
-        const data = await api.agentProjects(conversation.value.agent_id);
-        projects.value = data.dirs ?? [];
-        workdirMsg.value = '目录列表已刷新';
-      } catch { /* 静默 */ }
-    }, 1500);
-  } catch (e) {
-    workdirMsg.value = e.message;
   }
 }
 </script>
@@ -305,24 +265,14 @@ async function rescanProjects() {
       </div>
     </div>
 
-    <!-- 工作目录（全屏对话页：指定后远程 pi 在该路径下运行；约定 ~/projects/ 下） -->
+    <!-- 工作目录（全屏对话页：只允许 ~/projects/ 下目录，空=默认目录；后端严格校验） -->
     <div v-if="props.fullscreen && conversation" class="px-2 py-1 chat-wd">
       <div class="input-group input-group-sm">
         <span class="input-group-text"><i class="bi bi-folder2-open"></i></span>
-        <input v-model="workdirInput" class="form-control" placeholder="~/projects/xxx（限制在主机 home 下，空=默认目录）"
+        <input v-model="workdirInput" class="form-control" placeholder="~/projects/xxx（只允许主机真实存在的 ~/projects 子目录，空=默认目录）"
                :disabled="workdirSaving" @keydown.enter.exact.prevent="saveWorkdir">
         <button class="btn btn-outline-primary" :disabled="workdirSaving" @click="saveWorkdir">
           {{ workdirSaving ? '保存中…' : '设置' }}
-        </button>
-      </div>
-      <div v-if="projects.length" class="d-flex flex-wrap gap-1 mt-1 align-items-center">
-        <span class="text-secondary small">主机目录：</span>
-        <button v-for="p in projects" :key="p" class="btn btn-sm btn-outline-secondary py-0 project-chip"
-                :class="{ 'text-primary border-primary': workdirInput === `~/projects/${p}` }" @click="pickProject(p)">
-          {{ p }}
-        </button>
-        <button class="btn btn-sm btn-outline-secondary py-0" title="重新扫描主机 ~/projects" @click="rescanProjects">
-          <i class="bi bi-arrow-clockwise"></i>
         </button>
       </div>
       <div v-if="workdirMsg" class="small" :class="workdirMsg.startsWith('已') ? 'text-success' : 'text-danger'">{{ workdirMsg }}</div>

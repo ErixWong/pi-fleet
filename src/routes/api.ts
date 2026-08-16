@@ -450,6 +450,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     await withTransaction(async (conn) => {
       const taskId = nextTaskId();
       const workdir = (body.workdir ?? '').trim() || null;
+      if (workdir !== null && !isSafeWorkdir(workdir)) {
+        throw new Error('工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转');
+      }
       // 交付物约定：数组 → JSON 字符串落库
       const deliverableSpec =
         body.deliverable_spec === undefined || body.deliverable_spec === null
@@ -1030,8 +1033,9 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   if (taskId) {
     const workdirRaw = body.workdir;
     const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
-    if (workdir !== undefined && !isSafeWorkdir(workdir)) {
-      res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
+    const wdErr = await validateWorkdir(agentId, workdir);
+    if (wdErr) {
+      res.status(400).json({ error: wdErr });
       return;
     }
     const conversation = await getOrCreateConversation(agentId, taskId, workdir);
@@ -1043,8 +1047,9 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   //  指定了任一（显式新建）→ 创建新会话（每个会话绑定不同目录/用户）
   const workdirRaw = body.workdir;
   const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? null : String(workdirRaw);
-  if (workdir !== null && !isSafeWorkdir(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
+  const wdErr = await validateWorkdir(agentId, workdir);
+  if (wdErr) {
+    res.status(400).json({ error: wdErr });
     return;
   }
   const runUserRaw = body.run_user;
@@ -1077,9 +1082,27 @@ apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   res.status(201).json({ conversation });
 });
 
-/** 校验工作目录：仅允许 ~/projects/ 开头（目录约定：主机会话的工作目录限定为主机 ~/projects 下的子目录）；其余拒绝 */
+/** 校验工作目录（严格，2026-08-16）：
+ *  1. 格式：仅允许 ~/projects/ 下的相对子目录路径（段由字母数字/._- 组成）——拒绝绝对路径、..、空白与特殊字符
+ *  2. 存在性：必须在该主机 bridge 上报的 ~/projects 目录列表（agent_projects）中——防止乱填/跑到别的路径
+ *  返回错误消息；null 表示通过。workdir 为空返回 null（默认会话） */
+async function validateWorkdir(agentId: number, workdir: string | null | undefined): Promise<string | null> {
+  if (workdir === null || workdir === undefined || workdir === '') return null;
+  const REL = '^~[\\/]projects[\\/][A-Za-z0-9._-]+([\\/][A-Za-z0-9._-]+)*$';
+  if (!new RegExp(REL).test(workdir)) {
+    return '工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转';
+  }
+  const rel = workdir.slice('~/projects/'.length);
+  const { dirs } = await getAgentProjects(agentId);
+  if (!dirs.includes(rel)) {
+    return `目录「${rel}」不在主机上报的 ~/projects 列表中（主机可能离线或目录未上报；目录须为主机真实存在的 ~/projects 子目录，不确定可先问 agent）`;
+  }
+  return null;
+}
+
+/** 校验工作目录格式（非异步场景保留：只查格式；存在性由 validateWorkdir 负责） */
 function isSafeWorkdir(workdir: string): boolean {
-  return /^~[\/]projects[\/]/.test(workdir);
+  return /^~[\\/]projects[\\/][A-Za-z0-9._-]+([\\/][A-Za-z0-9._-]+)*$/.test(workdir);
 }
 
 /** 列某主机所有 open 会话（多会话管理） */
@@ -1159,13 +1182,14 @@ apiRouter.post('/conversations/:id/run-user', requireAdminJson, async (req, res)
 apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) => {
   const raw = (req.body ?? {}).workdir;
   const workdir = raw === undefined || raw === null || raw === '' ? null : String(raw);
-  if (workdir !== null && !isSafeWorkdir(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/projects/ 下（限制在主机 home 内）' });
-    return;
-  }
   const conv = await getConversation(req.params.id);
   if (!conv) {
     res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  const wdErr = await validateWorkdir(Number(conv.agent_id), workdir);
+  if (wdErr) {
+    res.status(400).json({ error: wdErr });
     return;
   }
   await setConversationWorkdir(req.params.id, workdir);
