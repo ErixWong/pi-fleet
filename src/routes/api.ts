@@ -76,7 +76,36 @@ function requireAdminJson(req: Request, res: Response, next: NextFunction): void
 }
 
 // ─────────────────────────── 登录 / 会话 ───────────────────────────
+/** 登录失败限速（内存计数）：同 IP 1 分钟内连续失败 ≥5 次 → 429，防暴力破解 */
+const loginFailures = new Map<string, { count: number; windowStart: number }>();
+const LOGIN_MAX_FAIL = 5;
+const LOGIN_WINDOW_MS = 60_000;
+function loginThrottled(ip: string): boolean {
+  const now = Date.now();
+  const rec = loginFailures.get(ip);
+  if (!rec) return false;
+  if (now - rec.windowStart > LOGIN_WINDOW_MS) {
+    loginFailures.delete(ip);
+    return false;
+  }
+  return rec.count >= LOGIN_MAX_FAIL;
+}
+function recordLoginFail(ip: string): void {
+  const now = Date.now();
+  const rec = loginFailures.get(ip);
+  if (!rec || now - rec.windowStart > LOGIN_WINDOW_MS) {
+    loginFailures.set(ip, { count: 1, windowStart: now });
+  } else {
+    rec.count += 1;
+  }
+}
+
 apiRouter.post('/login', async (req, res) => {
+  const ip = String(req.ip ?? '');
+  if (loginThrottled(ip)) {
+    res.status(429).json({ error: '尝试过于频繁，请 1 分钟后再试' });
+    return;
+  }
   const { password } = (req.body ?? {}) as { password?: string };
   const rows = await query(`SELECT password_hash FROM admin WHERE id = 1 LIMIT 1`);
   if (rows.length === 0) {
@@ -85,10 +114,12 @@ apiRouter.post('/login', async (req, res) => {
   }
   const stored = String((rows[0] as Record<string, unknown>).password_hash);
   if (password && verifyPassword(password, stored)) {
+    loginFailures.delete(ip);
     (req.session as { admin?: boolean }).admin = true;
     res.json({ ok: true });
     return;
   }
+  recordLoginFail(ip);
   res.status(401).json({ error: '密码错误' });
 });
 

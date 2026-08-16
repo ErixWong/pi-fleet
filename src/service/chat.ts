@@ -168,7 +168,7 @@ export async function addChatMessage(convId: string, sender: 'admin' | 'agent', 
     `INSERT INTO chat_messages (conversation_id, sender_role, content, streaming) VALUES (?, ?, ?, 0)`,
     [convId, sender, content],
   )) as unknown as { insertId: unknown };
-  await query(`UPDATE conversations SET updated_at = NOW() WHERE conversation_id = ?`, [convId]);
+  await query(`UPDATE conversations SET updated_at = ? WHERE conversation_id = ?`, [nowString(), convId]);
   const rows = (await query(
     `SELECT id, conversation_id, sender_role, content, streaming, created_at FROM chat_messages WHERE id = ?`,
     [Number(ins.insertId)],
@@ -187,7 +187,7 @@ export async function appendStreaming(convId: string, delta: string): Promise<Ch
   } else {
     await query(`INSERT INTO chat_messages (conversation_id, sender_role, content, streaming) VALUES (?, 'agent', ?, 1)`, [convId, delta]);
   }
-  await query(`UPDATE conversations SET updated_at = NOW() WHERE conversation_id = ?`, [convId]);
+  await query(`UPDATE conversations SET updated_at = ? WHERE conversation_id = ?`, [nowString(), convId]);
   const rows = (await query(
     `SELECT id, conversation_id, sender_role, content, streaming, created_at FROM chat_messages WHERE conversation_id = ? AND streaming = 1 ORDER BY id DESC LIMIT 1`,
     [convId],

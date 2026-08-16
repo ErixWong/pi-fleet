@@ -2,6 +2,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { NextFunction, Request, Response } from 'express';
 import { query } from './db.js';
+import { nowString } from './scheduler.js';
 
 /** 当前请求上下文中已认证的 agent 身份 */
 export interface AgentIdentity {
@@ -70,9 +71,9 @@ export async function findAgentByKey(key: string): Promise<AgentIdentity | null>
   };
 }
 
-/** 更新 agent 最后活跃时间 */
+/** 更新 agent 最后活跃时间（Node 侧本地时间，避免 DB 时区错位） */
 export async function touchAgent(agentId: number): Promise<void> {
-  await query(`UPDATE agents SET last_seen_at = NOW() WHERE id = ?`, [agentId]);
+  await query(`UPDATE agents SET last_seen_at = ? WHERE id = ?`, [nowString(), agentId]);
 }
 
 /** MCP 路由的 Bearer key 校验中间件：通过后把 agent 身份写入 AsyncLocalStorage */

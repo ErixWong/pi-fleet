@@ -30,7 +30,7 @@ async function main(): Promise<void> {
       secret: config.sessionSecret,
       resave: false,
       saveUninitialized: false,
-      cookie: { maxAge: 7 * 24 * 3600 * 1000 },
+      cookie: { maxAge: 7 * 24 * 3600 * 1000, httpOnly: true, sameSite: 'lax' },
     }),
   );
 

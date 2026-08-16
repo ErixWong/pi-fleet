@@ -92,6 +92,16 @@ export function nowString(): string {
   return toLocalString(new Date());
 }
 
+/** N 小时前的本地时间字符串（超时回收边界；Node 侧算好传参，避免依赖数据库 NOW() 时区） */
+export function hoursAgoString(hours: number): string {
+  return toLocalString(new Date(Date.now() - hours * 3600_000));
+}
+
+/** N 天前的本地时间字符串（pending_confirm 自动确认边界） */
+export function daysAgoString(days: number): string {
+  return toLocalString(new Date(Date.now() - days * 86400_000));
+}
+
 /**
  * 超时回收：认领后超过 timeoutHours 无任何活动（未续期/未汇报）的 running 任务
  * 标记为 failed。长任务通过 report_progress 续期（last_activity_at 刷新）避免被误杀。
@@ -104,8 +114,8 @@ export async function recoverStaleRunningTasks(timeoutHours = 2): Promise<number
             result_at = ?
       WHERE status = 'running'
         AND last_activity_at IS NOT NULL
-        AND last_activity_at < DATE_SUB(NOW(), INTERVAL ? HOUR)`,
-    [nowString(), timeoutHours],
+        AND last_activity_at < ?`,
+    [nowString(), hoursAgoString(timeoutHours)],
   );
   return (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
 }
@@ -119,8 +129,8 @@ export async function recoverStaleClaimedTasks(timeoutHours = 2): Promise<number
     `SELECT id, task_id FROM tasks
       WHERE status = 'claimed' AND visibility = 'public'
         AND last_activity_at IS NOT NULL
-        AND last_activity_at < DATE_SUB(NOW(), INTERVAL ? HOUR)`,
-    [timeoutHours],
+        AND last_activity_at < ?`,
+    [hoursAgoString(timeoutHours)],
   );
   if (rows.length === 0) return 0;
   const ids = rows.map((r) => (r as Record<string, unknown>).id);
@@ -148,8 +158,8 @@ export async function autoConfirmPendingConfirm(days = 7): Promise<number> {
     `SELECT id FROM tasks
       WHERE status = 'pending_confirm'
         AND last_activity_at IS NOT NULL
-        AND last_activity_at < DATE_SUB(NOW(), INTERVAL ? DAY)`,
-    [days],
+        AND last_activity_at < ?`,
+    [daysAgoString(days)],
   );
   if (rows.length === 0) return 0;
   const ids = rows.map((r) => (r as Record<string, unknown>).id);
