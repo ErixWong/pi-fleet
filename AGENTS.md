@@ -137,12 +137,12 @@ async function load() {
 
 本地多主机测试：3 个 docker 容器模拟 3 台远端主机（node + pi + chat-bridge + sshd），用于多会话/多主机/run_user 端到端验证。**不进仓库，属本地基础设施**（/docker 约定）。
 
-- **镜像**：`pi-market/pi-host:0.1`（Dockerfile 在 `/docker/pi-hosts/build/`）——node:22-slim + pi CLI（COPY 自本机 npm 全局包）+ openssh-server + sudo；用户 `app`（bridge 运行者，uid 1000）+ `pi-agent`（run_user 测试）；sudoers 允许 app 无密码 sudo（测试 run_user 切换）
-- **编排**：`/docker/pi-hosts/docker-compose.yml`——3 个 service（host-1/2/3），端口 **2201/2202/2203 → 22**（SSH）；bridge 脚本与 node_modules 挂载自 `~/projects/pi-market`（改代码即生效，无需重建镜像）；`~/projects` 各挂 `/docker/pi-hosts/host-N/projects`（持久化，各 3 个子目录：web-app/blog/api-gateway、data-etl/reports/warehouse、ml-pipeline/docs/experiments）
+- **镜像**：**node 官方镜像 `node:22-slim`（不 build 自定义镜像）**；pi CLI / openssh-server / sudo 由挂载的初始化脚本 `/docker/pi-hosts/build/entrypoint.sh` 在容器首次启动时自动安装（`apt` 装 sshd/sudo/git → `npm install -g @earendil-works/pi-coding-agent@0.84.2` → 建用户 `app`（bridge 运行者，uid 1000）+ `pi-agent`（run_user 测试）+ sudoers 允许 app 无密码 sudo）；初始化仅容器重建后执行一次（约 1-2 分钟），`docker restart` 跳过（脚本 ro 挂载实时生效）
+- **编排**：`/docker/pi-hosts/docker-compose.yml`——3 个 service（host-1/2/3），`image: node:22-slim` + `entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]`，端口 **2201/2202/2203 → 22**（SSH）；初始化脚本 `entrypoint.sh` 与 bridge 脚本（`~/projects/pi-market`）均 ro 挂载自宿主机（改代码即生效，无需重建镜像）；`~/projects` 各挂 `/docker/pi-hosts/host-N/projects`（持久化，各 3 个子目录：web-app/blog/api-gateway、data-etl/reports/warehouse、ml-pipeline/docs/experiments）
 - **pi 模型配置**：`/docker/pi-hosts/conf/{models,settings}.json`（含 relay key，从本机 ~/.pi/agent 拷出），容器 entrypoint 拷到 app/pi-agent 的 ~/.pi/agent/
-- **启动**：`cd /docker/pi-hosts && docker compose up -d`（先注册 3 个 agent 拿 key 填 .env）；SSH 登录 `ssh app@127.0.0.1 -p 2201`（root/app 密码 `pi-host`）
+- **启动**：`cd /docker/pi-hosts && docker compose up -d`（先注册 3 个 agent 拿 key 填 .env；首次启动自动初始化安装，约 1-2 分钟）；SSH 登录 `ssh app@127.0.0.1 -p 2201`（root/app 密码 `pi-host`）
 - **平台 agent**：docker主机-1（id 13）/ docker主机-2（id 14）/ docker主机-3（id 15），各上报 3 个目录；**bridge 的 run_user 修复**（spawnPiProcess→piInvocation 绝对路径解析）由此环境实测（pi-agent 用户回复验证）
-- **改 bridge 后**：`docker restart pi-host-N`（脚本 ro 挂载实时生效）
+- **改 bridge / entrypoint 后**：`docker restart pi-host-N`（脚本 ro 挂载实时生效；改 compose 导致容器重建才触发依赖重装）
 
 ## 配置（.env）
 
