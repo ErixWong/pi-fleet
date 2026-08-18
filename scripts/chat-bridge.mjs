@@ -4,7 +4,7 @@
 // - pi 流式事件（text_delta 打字机增量）→ 平台 conv_stream*（落库 + 前端实时）
 // - 每对话一个 pi 子进程（--session-id=convId 续接）：空闲 kill，下条消息拉起续接（记忆保持）
 // - WS 断线 → 退回 chat-check 轮询（1.5s）+ 拉起 pi 一次性 chat-reply（不流式）
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -102,10 +102,22 @@ function killSession(convId) {
   console.log(`[bridge] 空闲回收 ${convId}`);
 }
 
-/** 解析对话工作目录并校验必须在主机 home 下（安全限制）；不合法返回 null */
-function resolveWorkdir(workdir) {
+/** 获取目标用户 home（Linux getent passwd 第 6 字段）；失败返回 null（非 Linux / 用户不存在） */
+function getUserHome(user) {
+  if (!user) return null;
+  try {
+    const line = execSync(`getent passwd ${user}`, { encoding: 'utf8' }).trim();
+    const parts = line.split(':');
+    return parts.length >= 6 && parts[5] ? parts[5] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 解析对话工作目录并校验必须在目标 home 下（安全限制）；不合法返回 null
+ * home 默认 bridge 用户；run_user 场景传入目标用户 home——`~` 按**最终执行用户**展开 */
+function resolveWorkdir(workdir, home = os.homedir()) {
   if (!workdir) return null;
-  const home = os.homedir();
   const p = workdir.startsWith('~/') || workdir === '~'
     ? path.join(home, workdir === '~' ? '' : workdir.slice(2))
     : workdir;
@@ -114,7 +126,7 @@ function resolveWorkdir(workdir) {
   if (resolved === homeResolved || resolved.startsWith(homeResolved + path.sep)) {
     return resolved;
   }
-  console.log(`[bridge] 工作目录 ${workdir} 不在 home 下，已忽略（用默认目录）`);
+  console.log(`[bridge] 工作目录 ${workdir} 不在 home(${home}) 下，已忽略（用默认目录）`);
   return null;
 }
 
@@ -137,9 +149,19 @@ function spawnPi(convId, onEvent) {
     return; // 上一条还没回完，忽略并发（超时保护会兜底解除）
   }
   if (!s.proc || s.proc.killed || s.proc.exitCode !== null) {
-    const cwd = resolveWorkdir(s.workdir) ?? path.join(os.homedir(), 'projects');
+    // run_user 场景：workdir/默认目录按**目标用户 home**解析（~ 展开到 /home/<run_user>），
+    // 与 sudo -u 切换的执行身份一致；未指定 run_user 时仍按 bridge 用户（os.homedir()）
+    const targetHome = s.runUser ? (getUserHome(s.runUser) ?? os.homedir()) : os.homedir();
+    const cwd = resolveWorkdir(s.workdir, targetHome) ?? path.join(targetHome, 'projects');
     if (!existsSync(cwd)) {
-      try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
+      try {
+        if (s.runUser && targetHome !== os.homedir()) {
+          // 目标用户 home 下（bridge 无写权限）→ 走 sudo 创建，保证 pi 以该用户可写
+          execSync(`sudo -n -u ${s.runUser} mkdir -p "${cwd}"`);
+        } else {
+          mkdirSync(cwd, { recursive: true });
+        }
+      } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
     }
     const child = spawnPiProcess(convId, s, cwd);
     s.proc = child;
