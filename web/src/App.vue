@@ -31,7 +31,7 @@ async function logout() {
       <div class="navbar-nav d-flex gap-1">
         <router-link to="/" class="nav-link" exact-active-class="active"><i class="bi bi-grid-1x2 me-1"></i>仪表盘</router-link>
         <router-link to="/plans" class="nav-link" active-class="active"><i class="bi bi-diagram-3 me-1"></i>计划与任务</router-link>
-        <router-link to="/agents" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
+        <router-link to="/hosts" class="nav-link" active-class="active"><i class="bi bi-pc-display me-1"></i>主机</router-link>
         <router-link to="/settings" class="nav-link" active-class="active"><i class="bi bi-gear me-1"></i>设置</router-link>
       </div>
       <div class="ms-auto d-flex align-items-center gap-2">

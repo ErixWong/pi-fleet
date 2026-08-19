@@ -23,12 +23,16 @@ import {
   addChatMessage,
   archiveConversation,
   chatMessagesSince,
+  createHostConversation,
+  getAgentProjects,
   getConversation,
   getOrCreateConversation,
   getTaskContext,
+  listAgentConversations,
   listChatMessages,
   listConversations,
-  setConversationWorkdir,
+  renameConversation,
+  setConversationRunUser,
 } from '../service/chat.js';
 import { chatHub } from '../ws-server.js';
 import {
@@ -73,6 +77,16 @@ function requireAdminJson(req: Request, res: Response, next: NextFunction): void
     return;
   }
   res.status(401).json({ error: 'unauthorized' });
+}
+
+/** :id 路由参数守卫：非正整数（含 NaN/0/负数）直接 400，防 NaN 落入 SQL 崩进程 */
+function agentIdGuard(req: Request, res: Response, next: NextFunction): void {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: '非法的 agent_id' });
+    return;
+  }
+  next();
 }
 
 // ─────────────────────────── 登录 / 会话 ───────────────────────────
@@ -135,7 +149,7 @@ apiRouter.get('/me', (req, res) => {
 apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   const [agents, tasks, recentReports, activeAgents] = await Promise.all([
-    query(`SELECT status, COUNT(*) AS cnt FROM agents GROUP BY status`),
+    query(`SELECT status, COUNT(*) AS cnt FROM agents WHERE visible = 1 GROUP BY status`),
     query(`SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status`),
     query(
       `SELECT r.content, r.created_at, a.agent_id, t.task_id
@@ -144,7 +158,7 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
          LEFT JOIN tasks t ON t.id = r.task_id
         ORDER BY r.created_at DESC LIMIT 5`,
     ),
-    query(`SELECT id, last_seen_at FROM agents WHERE status = 'active'`),
+    query(`SELECT id, last_seen_at FROM agents WHERE status = 'active' AND visible = 1`),
   ]);
   const offline = (activeAgents as Array<Record<string, unknown>>).filter((a) => agentOffline(a.last_seen_at, offlineAfterMin)).length;
   res.json({
@@ -162,8 +176,8 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   // 标签过滤（?tag=linux,arm 逗号分隔，any 语义：命中任意一个即可）
   const tagNames = String(req.query.tag ?? '').trim().split(',').map((s) => s.trim()).filter(Boolean);
   const where = tagNames.length
-    ? ` WHERE t.name IN (${tagNames.map(() => '?').join(',')}) OR t.label IN (${tagNames.map(() => '?').join(',')})`
-    : '';
+    ? ` WHERE (t.name IN (${tagNames.map(() => '?').join(',')}) OR t.label IN (${tagNames.map(() => '?').join(',')})) AND a.visible = 1`
+    : ' WHERE a.visible = 1';
   const join = tagNames.length ? ' JOIN agent_tags at ON at.agent_id = a.id JOIN tags t ON t.id = at.tag_id' : '';
   const filterParams = tagNames.length ? [...tagNames, ...tagNames] : [];
   const totalRows = (await query(
@@ -174,7 +188,7 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.status, a.last_seen_at, a.created_at
+    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
        FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
     [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
@@ -196,6 +210,8 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
     tags?: string;
     /** 接单开关（§3.2/§五）：是否允许认领公共池外单，默认关闭 */
     accept_external?: boolean;
+    /** 运行 pi 的默认用户（部署时指定，不填=bridge 当前用户） */
+    run_user?: string | null;
   };
   const name = (body.name ?? '').trim();
   if (!name) {
@@ -212,8 +228,8 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
     customPrompt ||
     `你是主机「${name}」的 agent（agent_id: ${agentId}）。${hostname ? `位于 ${hostname}。` : ''}${description ? `职责：${description}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
   await query(
-    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, key_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, key_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       agentId,
       name,
@@ -222,11 +238,12 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
       systemPrompt,
       (body.tags ?? '').trim(),
       body.accept_external ? 1 : 0,
+      body.run_user === undefined || body.run_user === null || String(body.run_user).trim() === '' ? null : String(body.run_user).trim(),
       hashApiKey(key),
     ],
   );
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, tags, accept_external, status, last_seen_at, created_at
+    `SELECT id, agent_id, name, hostname, description, tags, accept_external, run_user, status, last_seen_at, created_at
        FROM agents WHERE agent_id = ?`,
     [agentId],
   );
@@ -234,12 +251,12 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
   res.status(201).json({ agent: rows[0], key });
 });
 
-apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
+apiRouter.get('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, status,
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status,
             last_seen_at, created_at
-       FROM agents WHERE id = ?`,
+       FROM agents WHERE id = ? AND visible = 1`,
     [id],
   );
   if (rows.length === 0) {
@@ -261,7 +278,7 @@ apiRouter.get('/agents/:id', requireAdminJson, async (req, res) => {
   res.json({ agent, tasks, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
-apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/toggle', requireAdminJson, agentIdGuard, async (req, res) => {
   const result = await query(
     `UPDATE agents SET status = IF(status='active','disabled','active') WHERE id = ?`,
     [Number(req.params.id)],
@@ -274,8 +291,66 @@ apiRouter.post('/agents/:id/toggle', requireAdminJson, async (req, res) => {
   res.json({ ok: true });
 });
 
+/** 更新 agent 基础信息（2026-08-16）：name/hostname/description/system_prompt/tags/accept_external，仅更新传入字段 */
+apiRouter.put('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) => {
+  const id = Number(req.params.id);
+  const body = (req.body ?? {}) as {
+    name?: string;
+    hostname?: string;
+    description?: string;
+    system_prompt?: string;
+    tags?: string;
+    accept_external?: boolean;
+    /** 运行 pi 的默认用户（部署时指定；传空字符串=清除回 bridge 当前用户） */
+    run_user?: string | null;
+  };
+  const exists = (await query(`SELECT id, name, system_prompt FROM agents WHERE id = ? AND visible = 1`, [id])) as Array<
+    Record<string, unknown>
+  >;
+  if (exists.length === 0) {
+    res.status(404).json({ error: 'agent 不存在' });
+    return;
+  }
+  const cur = exists[0];
+  const name = body.name !== undefined ? (String(body.name).trim() || '') : String(cur.name);
+  if (!name) {
+    res.status(400).json({ error: '名称不能为空' });
+    return;
+  }
+  // 提示词：传入非空则用传入值；传入空字符串 = 清空为自动生成；未传则保持原样
+  let systemPrompt: string | undefined;
+  if (body.system_prompt !== undefined) {
+    const sp = String(body.system_prompt).trim();
+    systemPrompt =
+      sp ||
+      `你是主机「${name}」的 agent（agent_id: ${cur.agent_id ?? ''}）。${(String(body.hostname ?? '').trim() ? `位于 ${String(body.hostname).trim()}。` : '')}${String(body.description ?? '').trim() ? `职责：${String(body.description).trim()}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
+  }
+  const fields: string[] = [];
+  const vals: unknown[] = [];
+  if (body.name !== undefined) { fields.push('name = ?'); vals.push(name); }
+  if (body.hostname !== undefined) { fields.push('hostname = ?'); vals.push(String(body.hostname).trim()); }
+  if (body.description !== undefined) { fields.push('description = ?'); vals.push(String(body.description).trim()); }
+  if (systemPrompt !== undefined) { fields.push('system_prompt = ?'); vals.push(systemPrompt); }
+  if (body.tags !== undefined) { fields.push('tags = ?'); vals.push(String(body.tags).trim()); }
+  if (body.accept_external !== undefined) { fields.push('accept_external = ?'); vals.push(body.accept_external ? 1 : 0); }
+  if (body.run_user !== undefined) {
+    const ru = body.run_user === null ? null : String(body.run_user).trim();
+    fields.push('run_user = ?');
+    vals.push(ru === '' ? null : ru);
+  }
+  if (fields.length > 0) {
+    await query(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`, [...vals, id]);
+  }
+  const rows = await query(
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status, last_seen_at, created_at
+       FROM agents WHERE id = ? AND visible = 1`,
+    [id],
+  );
+  res.json({ agent: rows[0] });
+});
+
 /** 重置 agent key：吊销旧 key，生成新 key（一次性返回） */
-apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/reset-key', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const newKey = generateApiKey();
   const result = await query(`UPDATE agents SET key_hash = ? WHERE id = ?`, [hashApiKey(newKey), id]);
@@ -287,8 +362,44 @@ apiRouter.post('/agents/:id/reset-key', requireAdminJson, async (req, res) => {
   res.json({ ok: true, key: newKey });
 });
 
+/** 删除 agent（2026-08-16）：无外键关联 → 物理删除；有关联数据 → 软删除（visible=0 + disabled，不再显示） */
+apiRouter.post('/agents/:id/delete', requireAdminJson, agentIdGuard, async (req, res) => {
+  const id = Number(req.params.id);
+  const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (exists.length === 0) {
+    res.status(404).json({ error: 'agent 不存在' });
+    return;
+  }
+  // 统计引用（agent 参与过的所有业务数据）
+  const refChecks: Array<[string, string]> = [
+    ['conversations', 'agent_id'],
+    ['plans', 'creator_agent_id'],
+    ['agent_tags', 'agent_id'],
+    ['agent_projects', 'agent_id'],
+    ['tasks', 'creator_id'],
+    ['tasks', 'assignee_id'],
+    ['deliverables', 'agent_id'],
+    ['reports', 'agent_id'],
+  ];
+  const refs: Record<string, number> = {};
+  for (const [table, col] of refChecks) {
+    const r = (await query(`SELECT COUNT(*) AS c FROM ${table} WHERE ${col} = ?`, [id])) as Array<Record<string, unknown>>;
+    refs[`${table}.${col}`] = Number(r[0]?.c ?? 0);
+  }
+  const totalRefs = Object.values(refs).reduce((a, b) => a + b, 0);
+  if (totalRefs === 0) {
+    // 物理删除：无任何关联（agent_projects 是缓存无业务价值，也算引用但为 0 才走到这）
+    await query(`DELETE FROM agents WHERE id = ?`, [id]);
+    res.json({ ok: true, mode: 'physical', refs: {} });
+    return;
+  }
+  // 软删除：保留历史数据（任务/会话/报告等仍显示归属名字），主机不再显示、不再接活
+  await query(`UPDATE agents SET visible = 0, status = 'disabled' WHERE id = ?`, [id]);
+  res.json({ ok: true, mode: 'soft', refs, message: '该主机有关联数据（任务/会话/报告等），已软删除：不再显示、不再接活，历史记录保留' });
+});
+
 /** 接单开关（§3.2/§五）：是否允许该主机认领公共池外单 */
-apiRouter.post('/agents/:id/accept-toggle', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/accept-toggle', requireAdminJson, agentIdGuard, async (req, res) => {
   const result = await query(
     `UPDATE agents SET accept_external = IF(accept_external=1, 0, 1) WHERE id = ?`,
     [Number(req.params.id)],
@@ -311,7 +422,7 @@ apiRouter.get('/tags', requireAdminJson, async (_req, res) => {
 });
 
 /** 设置主机标签（全量覆盖；未匹配内置的自动建自定义） */
-apiRouter.post('/agents/:id/tags', requireAdminJson, async (req, res) => {
+apiRouter.post('/agents/:id/tags', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const names = Array.isArray((req.body ?? {}).tags) ? (req.body as { tags?: unknown[] }).tags!.map(String) : [];
   const exists = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
@@ -365,7 +476,7 @@ apiRouter.get('/tasks', requireAdminJson, async (req, res) => {
      ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
   const tasks = await query(sql, [...params, pageSize, offset]);
   const agents = await query(
-    `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' ORDER BY name`,
+    `SELECT id, agent_id, name, hostname FROM agents WHERE status='active' AND visible = 1 ORDER BY name`,
   );
   res.json({ tasks, agents, total, page, page_size: pageSize });
 });
@@ -409,6 +520,9 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
     await withTransaction(async (conn) => {
       const taskId = nextTaskId();
       const workdir = (body.workdir ?? '').trim() || null;
+      if (workdir !== null && !isSafeWorkdir(workdir)) {
+        throw new Error('工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转');
+      }
       // 交付物约定：数组 → JSON 字符串落库
       const deliverableSpec =
         body.deliverable_spec === undefined || body.deliverable_spec === null
@@ -950,44 +1064,171 @@ apiRouter.get('/activity', requireAdminJson, async (req, res) => {
 });
 
 // ─────────────────────────── 对话通道（管理员 ↔ agent 独立对话） ───────────────────────────
-/** 对话列表 */
+/** 会话列表 */
 apiRouter.get('/conversations', requireAdminJson, async (req, res) => {
   const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
   const r = await listConversations(page, pageSize);
   res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
 });
 
-/** 发起对话（同 agent 已有 open 对话 → 返回现有，幂等；task_id 可选：从任务发起时关联上下文；workdir 可选：远程 pi 在该路径下运行，须为 ~ 开头限制在 home 下） */
+/** 单个会话详情（会话管理页直接打开指定会话） */
+apiRouter.get('/conversations/:id', requireAdminJson, async (req, res) => {
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  res.json({ conversation: conv });
+});
+
+/** 发起对话：
+ *  带 task_id → 任务对话：复用该任务的 open 对话（没有就新建，任务独立上下文，固定 conv-task-{taskId}）
+ *  不带 task_id → **创建新主机会话**（多会话：每次调用新建一个，不固定 conv-host-{id}）；
+ *  可传 name（会话名）、workdir（~/projects 下目录）、run_user（运行 pi 的用户，空=bridge 当前用户）
+ */
 apiRouter.post('/conversations', requireAdminJson, async (req, res) => {
   const agentId = Number((req.body ?? {}).agent_id);
-  if (!agentId) {
-    res.status(400).json({ error: '缺少 agent_id' });
+  if (!Number.isInteger(agentId) || agentId <= 0) {
+    res.status(400).json({ error: '缺少或非法的 agent_id' });
     return;
   }
   const body = req.body as Record<string, unknown>;
-  const taskIdRaw = body.task_id;
-  const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
-  const workdirRaw = body.workdir;
-  const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
-  if (workdir !== undefined && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径（由主机校验是否在 home 内）' });
-    return;
-  }
-  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
+  const agentRows = (await query(`SELECT id, run_user FROM agents WHERE id = ?`, [agentId])) as Array<Record<string, unknown>>;
   if (agentRows.length === 0) {
     res.status(404).json({ error: '主机不存在' });
     return;
   }
-  const conversation = await getOrCreateConversation(agentId, taskId, workdir);
-  res.json({ conversation });
+  const agentRunUser = agentRows[0].run_user === null || agentRows[0].run_user === undefined ? null : String(agentRows[0].run_user);
+  const taskIdRaw = body.task_id;
+  const taskId = taskIdRaw === undefined || taskIdRaw === null || taskIdRaw === '' ? undefined : String(taskIdRaw);
+  if (taskId) {
+    const workdirRaw = body.workdir;
+    const workdir = workdirRaw === undefined || workdirRaw === null || workdirRaw === '' ? undefined : String(workdirRaw);
+    const wdErr = await validateWorkdir(agentId, workdir);
+    if (wdErr) {
+      res.status(400).json({ error: wdErr });
+      return;
+    }
+    const conversation = await getOrCreateConversation(agentId, taskId, workdir);
+    res.json({ conversation });
+    return;
+  }
+  // 主机会话（多会话）：
+  //  未指定 name/workdir/run_user（纯「对话」入口）→ 复用最近 open 主机会话（保持聊天连续性）
+  //  指定了任一（显式新建）→ 创建新会话（每个会话绑定不同目录/用户）
+  const workdirRaw = body.workdir;
+  const explicitWorkdir = workdirRaw !== undefined && workdirRaw !== null && String(workdirRaw).trim() !== '';
+  // 工作目录留空 → 默认 ~/projects 根目录（不存在由 bridge 在主机上自动创建）
+  const workdir = explicitWorkdir ? String(workdirRaw).trim() : '~/projects';
+  const wdErr = await validateWorkdir(agentId, workdir);
+  if (wdErr) {
+    res.status(400).json({ error: wdErr });
+    return;
+  }
+  const runUserRaw = body.run_user;
+  const explicitRunUser = runUserRaw !== undefined && runUserRaw !== null && String(runUserRaw).trim() !== '';
+  // 未指定运行用户 → 继承主机部署时指定的默认（agent.run_user；再空则 bridge 当前用户）
+  const runUser = explicitRunUser ? String(runUserRaw).trim() : agentRunUser;
+  if (runUser !== null && !/^[a-z_][a-z0-9_-]*$/i.test(runUser)) {
+    res.status(400).json({ error: '运行用户格式不合法（Linux 用户名）' });
+    return;
+  }
+  const nameRaw = body.name;
+  const name = nameRaw === undefined || nameRaw === null ? '' : String(nameRaw);
+  if (name.length > 128) {
+    res.status(400).json({ error: '会话名过长（≤128）' });
+    return;
+  }
+  if (!name.trim() && !explicitWorkdir && !explicitRunUser) {
+    // 纯「对话」入口：复用最近主机会话（无则新建默认会话）
+    const recent = (await query(
+      `SELECT conversation_id FROM conversations WHERE agent_id = ? AND status = 'open' AND task_id IS NULL ORDER BY updated_at DESC LIMIT 1`,
+      [agentId],
+    )) as Array<Record<string, unknown>>;
+    if (recent.length > 0) {
+      const conv = await getConversation(String(recent[0].conversation_id));
+      if (conv) {
+        res.json({ conversation: conv });
+        return;
+      }
+    }
+  }
+  const conversation = await createHostConversation(agentId, { name, workdir, run_user: runUser });
+  res.status(201).json({ conversation });
 });
 
-/** 更新对话工作目录（远程 pi 下次回复在该路径下运行；限制在主机 home 下） */
-apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) => {
-  const raw = (req.body ?? {}).workdir;
-  const workdir = raw === undefined || raw === null || raw === '' ? null : String(raw);
-  if (workdir !== null && !/^~[\/\\]|^\/|^[A-Za-z]:[\/\\]/.test(workdir)) {
-    res.status(400).json({ error: '工作目录须为 ~/ 开头（限制在主机 home 下）或绝对路径' });
+/** 校验工作目录（严格，2026-08-16）：
+ *  1. 格式：仅允许 ~/projects/ 下的相对子目录路径（段由字母数字/._- 组成）——拒绝绝对路径、..、空白与特殊字符
+ *  2. 存在性：必须在该主机 bridge 上报的 ~/projects 目录列表（agent_projects）中——防止乱填/跑到别的路径
+ *  返回错误消息；null 表示通过。workdir 为空或 ~/projects 根目录返回 null（默认会话，目录不存在时由 bridge 自动创建） */
+async function validateWorkdir(agentId: number, workdir: string | null | undefined): Promise<string | null> {
+  if (workdir === null || workdir === undefined || workdir === '') return null;
+  if (workdir === '~/projects' || workdir === '~\\projects') return null; // 根目录：默认会话，不要求子目录存在
+  const REL = '^~[\\/]projects[\\/][A-Za-z0-9._-]+([\\/][A-Za-z0-9._-]+)*$';
+  if (!new RegExp(REL).test(workdir)) {
+    return '工作目录只允许 ~/projects/ 下的子目录（如 ~/projects/web-app 或 ~/projects/mis/crm），禁止绝对路径或 .. 跳转';
+  }
+  const rel = workdir.slice('~/projects/'.length);
+  if (/(^|\/)\.{1,2}(\/|$)/.test(rel)) {
+    return '工作目录不允许 .. 或 . 段（禁止目录跳转）';
+  }
+  const { dirs } = await getAgentProjects(agentId);
+  if (!dirs.includes(rel)) {
+    return `目录「${rel}」不在主机上报的 ~/projects 列表中（主机可能离线或目录未上报；目录须为主机真实存在的 ~/projects 子目录，不确定可先问 agent）`;
+  }
+  return null;
+}
+
+/** 校验工作目录格式（非异步场景保留：只查格式；存在性由 validateWorkdir 负责） */
+function isSafeWorkdir(workdir: string): boolean {
+  return /^~[\\/]projects[\\/][A-Za-z0-9._-]+([\\/][A-Za-z0-9._-]+)*$/.test(workdir);
+}
+
+/** 列某主机所有 open 会话（多会话管理） */
+apiRouter.get('/agents/:id/conversations', requireAdminJson, agentIdGuard, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
+  const r = await listAgentConversations(id, page, pageSize);
+  res.json({ conversations: r.items, total: r.total, page, page_size: pageSize });
+});
+
+/** 读主机 ~/projects 目录列表缓存（bridge 上报） */
+apiRouter.get('/agents/:id/projects', requireAdminJson, agentIdGuard, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const r = await getAgentProjects(id);
+  res.json({ dirs: r.dirs, updated_at: r.updated_at });
+});
+
+/** 请求主机重新扫描 ~/projects（WS 推给 bridge；bridge 上报后缓存更新） */
+apiRouter.post('/agents/:id/projects-rescan', requireAdminJson, agentIdGuard, async (req, res) => {
+  const id = Number(req.params.id);
+  const agentRows = (await query(`SELECT id FROM agents WHERE id = ?`, [id])) as Array<Record<string, unknown>>;
+  if (agentRows.length === 0) {
+    res.status(404).json({ error: '主机不存在' });
+    return;
+  }
+  const online = chatHub.agentOnline(id);
+  if (online) {
+    chatHub.publishToAgent(id, { type: 'projects_rescan' });
+  }
+  res.json({ ok: true, online });
+});
+
+/** 重命名会话（多会话管理） */
+apiRouter.post('/conversations/:id/rename', requireAdminJson, async (req, res) => {
+  const name = String((req.body ?? {}).name ?? '').trim();
+  if (!name || name.length > 128) {
+    res.status(400).json({ error: '会话名不能为空且 ≤128' });
     return;
   }
   const conv = await getConversation(req.params.id);
@@ -995,8 +1236,25 @@ apiRouter.post('/conversations/:id/workdir', requireAdminJson, async (req, res) 
     res.status(404).json({ error: '对话不存在' });
     return;
   }
-  await setConversationWorkdir(req.params.id, workdir);
-  res.json({ ok: true, workdir });
+  await renameConversation(req.params.id, name);
+  res.json({ ok: true });
+});
+
+/** 设置会话运行用户（空=bridge 当前用户；非当前用户需远端 sudoers 白名单） */
+apiRouter.post('/conversations/:id/run-user', requireAdminJson, async (req, res) => {
+  const raw = (req.body ?? {}).run_user;
+  const runUser = raw === undefined || raw === null || String(raw).trim() === '' ? null : String(raw).trim();
+  if (runUser !== null && !/^[a-z_][a-z0-9_-]*$/i.test(runUser)) {
+    res.status(400).json({ error: '运行用户格式不合法（Linux 用户名）' });
+    return;
+  }
+  const conv = await getConversation(req.params.id);
+  if (!conv) {
+    res.status(404).json({ error: '对话不存在' });
+    return;
+  }
+  await setConversationRunUser(req.params.id, runUser);
+  res.json({ ok: true, run_user: runUser });
 });
 
 /** 对话历史（正序分页） */
@@ -1036,9 +1294,9 @@ apiRouter.post('/conversations/:id/messages', requireAdminJson, async (req, res)
     return;
   }
   const message = await addChatMessage(req.params.id, 'admin', content);
-  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文 + 工作目录
+  // 推送给 agent 桥接器（在线才推；离线由桥接器 chat-check 兜底）；带任务上下文 + 工作目录 + 运行用户 + 会话名
   const task = conv.task_id ? await getTaskContext(conv.task_id) : null;
-  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task, workdir: conv.workdir });
+  chatHub.publishToAgent(Number(conv.agent_id), { type: 'conv_new_message', conversation_id: req.params.id, content, task, workdir: conv.workdir, run_user: conv.run_user, name: conv.name });
   res.json({ message });
 });
 

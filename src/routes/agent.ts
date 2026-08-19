@@ -9,7 +9,7 @@ import {
   updateTaskWorkdir,
   type SubmitStatus,
 } from '../service/tasks.js';
-import { addChatMessage, chatCheck, getConversation, getTaskContext, listChatMessages } from '../service/chat.js';
+import { addChatMessage, chatCheck, getConversation, getTaskContext, listChatMessages, setAgentProjects } from '../service/chat.js';
 import { claimTask, listPoolTasks } from '../service/market.js';
 import {
   attachmentAbsPath,
@@ -37,10 +37,18 @@ function getAgent() {
   return agent;
 }
 
-// ─────────────────────────── 心跳 / 身份 ───────────────────────────
+// ─────────────────────────── 心跳 / 身份 / 目录上报 ───────────────────────────
 agentRouter.post('/heartbeat', async (_req, res) => {
   const agent = getAgent();
   res.json({ ok: true, agent_id: agent.agentId, server_time: nowString() });
+});
+
+/** 上报主机 ~/projects 下目录列表（bridge 常驻调用；创建主机会话时供选择工作目录） */
+agentRouter.post('/projects', async (req, res) => {
+  const agent = getAgent();
+  const dirs = Array.isArray((req.body ?? {}).dirs) ? (req.body.dirs as unknown[]).map(String) : [];
+  await setAgentProjects(agent.id, dirs);
+  res.json({ ok: true, count: dirs.length });
 });
 
 // ─────────────────────────── 独立对话通道（chat bridge / 兜底轮询） ───────────────────────────

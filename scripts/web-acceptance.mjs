@@ -7,7 +7,7 @@ import 'dotenv/config';
 import { chromium } from 'playwright';
 import { createPool } from 'mariadb';
 
-const BASE = 'http://127.0.0.1:3000';
+const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
 let cookie = '';
 let passed = 0, failed = 0;

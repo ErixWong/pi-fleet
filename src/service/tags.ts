@@ -196,7 +196,7 @@ export async function agentsByTags(names: string[]): Promise<Array<{ id: number;
        FROM agents a
        JOIN agent_tags at ON at.agent_id = a.id
        JOIN tags t ON t.id = at.tag_id
-      WHERE t.name IN (${clean.map(() => '?').join(',')}) OR t.label IN (${clean.map(() => '?').join(',')})`,
+      WHERE (t.name IN (${clean.map(() => '?').join(',')}) OR t.label IN (${clean.map(() => '?').join(',')})) AND a.visible = 1`,
     [...clean, ...clean],
   )) as Array<Record<string, unknown>>;
   return rows.map((r) => ({

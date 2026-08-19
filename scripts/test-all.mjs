@@ -10,7 +10,7 @@ import path from 'node:path';
 import 'dotenv/config';
 import { createPool } from 'mariadb';
 
-const BASE = 'http://127.0.0.1:3000';
+const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
 const here = path.dirname(fileURLToPath(import.meta.url));
 

@@ -112,24 +112,37 @@ async function load() {
 - 已接入列表：任务页 / 计划页 / Agent 页 / Agent 详情任务表 / 任务详情消息流（messages_page）/ 设置页日志 tab（activity/llm-calls/history）；Dashboard 摘要卡与 PlanDetail 树视图不分页
 - 后端统一用 `src/routes/api.ts` 的 `pageParams(req.query)` 解析分页参数（page 默认 1，page_size 默认 20 上限 200）
 
-## 独立对话通道（管理员 ↔ agent，2026-08-15 落地；任务发起 + 任务上下文注入）
+## 独立对话通道（管理员 ↔ agent，2026-08-15 落地；任务发起 + 任务上下文注入；多会话 2026-08-16）
 
 - **语义**：任务外沟通走独立对话（conversations + chat_messages），不污染任务消息流（任务内 reply 保留用于执行沟通）；`messages` 表已改名 **`task_messages`**
 - **入口**：任务**详情页**右上角「与 agent 对话」按钮（有指派 agent 才显示）→ 详情缩到 8/12，右侧 4/12 对话面板，头部显示「agent 名 #id + T-xxx · 标题 · 状态」；任务列表页不放对话按钮
-- **表**：`conversations`（agent 对象/task_id 业务串 T-xxx 可选/status open|archived）+ `chat_messages`（sender_role admin|agent + streaming 打字机标记）；`conversation_id` 业务串 conv-<8hex>
-- **管理端 API**（src/routes/api.ts）：`GET/POST /api/conversations`（带 task_id → 只复用该任务 open 对话，没有就新建；不带 → 复用同 agent open，幂等）、`GET .../messages`（正序分页）、`GET .../messages/since?since_id=`（**`id >=` 含等号**——streaming 行 id 不变内容累积，`>=` 让打字机增量可重复拉到，前端按 id 去重合并）、`POST .../messages`（落库 + WS 推 agent 桥接器，**带 task 上下文**）、`POST .../archive`
-- **agent API**（src/routes/agent.ts）：`chat-check`（零副作用回合检测）、`chat-messages`（历史 + **任务上下文 getTaskContext**，归属校验）、`chat-reply`（非流式落库）
-- **WS**（src/ws-server.ts）：`/api/agent/chat-stream` Bearer 认证；平台推 `conv_new_message`（含 task）；桥接器回推 `conv_stream_start/conv_stream/conv_stream_end`；管理端浏览器不连 WS，300ms 轮询 since
-- **桥接器**（scripts/chat-bridge.mjs，常驻）：收到消息拉起 pi `--mode rpc --session-id chat-{convId}`（**跨进程续接验证过**）→ **prompt 注入【任务上下文】**（任务 ID/标题/状态/指令摘要，buildPrompt）→ 转发 text_delta 打字机 → agent_end 落库；空闲 120s kill；WS 断线退回 1.5s chat-check 轮询（chat-messages 拉任务上下文 + 不流式回复）；启动 `node scripts/chat-bridge.mjs`（key 从 ~/.pi/agent/mcp.json 读）
-- **前端**：TaskDetail.vue「与 agent 对话」+ ChatPanel.vue（任务上下文头部/气泡 markdown/时间戳/300ms 轮询打字机/textarea Enter 发送/归档/全屏模式 workdir 输入）+ ChatPage.vue 全屏专门对话页（`/chat/:agentId`，主机详情「对话」按钮跳转）；Tasks.vue 列表无对话入口；主机对话（无 task_id）只复用无任务 open 对话，与任务对话隔离
-- **工作目录**：conversations.workdir（发起时传或 `POST /conversations/:id/workdir` 设置）；**远程 pi 在该路径下启动**——bridge spawn 时 cwd=workdir（自动 mkdir）；**安全限制：路径必须限制在主机 home 下**（平台校验 `~/` 开头或绝对路径格式，bridge 在主机上 resolve 后校验必须以 home 为前缀，否则忽略用默认目录）
-- **验收**：playwright 冒烟（work/chat-detail-smoke.mjs，详情页发起→上下文→7.4s 回复）+ npm test 162 全过；对话隔离：不进 task_messages、任务 reply 不触发对话
+- **多会话模型（2026-08-16）**：一个主机可有**多个会话**，每个会话独立绑定 `name` + `workdir`（~/projects 下子目录，留空=默认 ~/projects 根）；`conversations` 新增 `name/workdir/run_user` 列（run_user 继承主机部署时指定，见下），`agent_projects` 表缓存主机 `~/projects` 目录列表（bridge 启动即上报 + 5 分钟周期 + WS `projects_rescan` 触发立即上报）
+- **表**：`conversations`（agent 对象/task_id 业务串 T-xxx 可选/name/workdir/run_user/status open|archived）+ `chat_messages`（sender_role admin|agent + streaming 打字机标记）；`conversation_id` 业务串 conv-<8hex（主机会话）/ conv-task-{taskId}（任务会话）>；`agents` 新增 `run_user`（主机级默认运行用户，注册/编辑时设定，2026-08-16）
+- **管理端 API**（src/routes/api.ts）：`POST /api/conversations`（带 task_id → 任务对话固定 conv-task-{taskId} 复用；不带 → **主机会话多会话**：带 name/workdir 任一即新建，全空为纯「对话」入口复用最近 open 主机会话；**workdir 留空=默认 ~/projects 根目录**（不存在由 bridge 自动创建）；**run_user 不在创建时传**——未传则继承 agents.run_user）、`GET /api/agents/:id/conversations`（列表）、`GET /api/conversations/:id`（单查）、`POST .../rename`、`POST .../run-user`、`GET /api/agents/:id/projects`、`POST /api/agents/:id/projects-rescan`、`GET .../messages`（正序分页）、`GET .../messages/since?since_id=`（**`id >=` 含等号**——streaming 行 id 不变内容累积，`>=` 让打字机增量可重复拉到，前端按 id 去重合并）、`POST .../messages`（落库 + WS 推 agent 桥接器，**带 task 上下文 + workdir/run_user/name**）、`POST .../archive`；主机注册/编辑：`POST/PUT /api/agents` 接受 `run_user`（部署时指定）
+- **agent API**（src/routes/agent.ts）：`chat-check`（零副作用回合检测）、`chat-messages`（历史 + **任务上下文 getTaskContext**，归属校验）、`chat-reply`（非流式落库）、`POST /api/agent/projects`（**目录上报** dirs 数组，Bearer）
+- **WS**（src/ws-server.ts）：`/api/agent/chat-stream` Bearer 认证；平台推 `conv_new_message`（含 task/workdir/run_user/name）+ `projects_rescan`；桥接器回推 `conv_stream_start/conv_stream/conv_stream_end`；管理端浏览器不连 WS，300ms 轮询 since
+- **桥接器**（scripts/chat-bridge.mjs，常驻）：收到消息拉起 pi `--mode rpc --session-id chat-{convId}`（**跨进程续接验证过**）→ **prompt 注入【任务上下文】**（buildPrompt）→ 转发 text_delta 打字机 → agent_end 落库；空闲 120s kill；WS 断线退回 1.5s chat-check 轮询（chat-messages 拉任务上下文 + 不流式回复）；启动 `node scripts/chat-bridge.mjs`（key 从 ~/.pi/agent/mcp.json 读，PLATFORM_URL 覆盖）
+- **工作目录**：conversations.workdir，**创建时固定、不可修改**（无修改端点）；**固定以 ~/projects/ 为前缀**——前端 label 展示前缀，输入只填子目录名（或留空=默认 `~/projects` 根目录，bridge 启动时不存在自动 mkdir）；**远程 pi 在该路径下启动**——bridge spawn 时 cwd=resolveWorkdir(workdir)（workdir 为空→目标用户 home 的 projects；**`~` 按最终执行用户展开：run_user 非空用 `getent passwd` 取目标用户 home，否则 bridge 用户（os.homedir()）**；目标用户 home 下目录不存在时用 `sudo -n -u <run_user> mkdir -p` 创建）+ `--name` 让远端 `pi -r` 可识别会话；**安全限制：平台只允许 `~/projects/` 开头**（isSafeWorkdir；根目录 `~/projects` 放行；禁 .. / . 段），bridge 在主机上 resolve 后校验必须在目标 home 下否则忽略
+- **运行用户**：**部署时在主机上指定**（agents.run_user，注册/编辑主机弹窗设置）；conversations.run_user = 创建时继承的最终值（未显式传→继承 agents.run_user→再空=bridge 当前用户）；非空且≠当前用户 → bridge 用 `sudo -n -u <user> -H -- node ...` 切换（**需 sudoers 白名单**，`-H` 让 HOME/pi sessions 随该用户）；**失败路径**：pi 进程异常退出（code≠0 且无回复）→ 自动回帖错误提示（含 sudoers 提醒）
+- **前端**：TaskDetail.vue「与 agent 对话」+ ChatPanel.vue（任务上下文头部/气泡 markdown/300ms 轮询打字机/全屏模式 workdir 输入 + **目录下拉 chips**）+ ChatPage.vue（`/chat/:agentId` 默认入口、`/chat/:agentId/:convId` 直接打开指定会话）+ AgentDetail.vue **会话管理卡片**（列所有会话：名/目录/用户/最后消息 + 打开/重命名/运行用户/归档 + **新建会话弹窗**：名称 + 目录输入（留空=~/projects 根）；**运行用户不在会话创建时填写**——注册/编辑主机弹窗设置）
+- **验收**：多会话端到端验证过：两会话并行（不同 workdir 各自拉起 pi、记忆隔离）+ 会话续接（同 convId 再发消息 pi 记得上文）+ run_user 失败回帖 + 多主机目录隔离；npm test 162 全过；对话隔离：不进 task_messages、任务 reply 不触发对话
 
 ## 主机失联检测（心跳徽标）
 
 - agent 每次带 key 请求（poll/heartbeat 等）刷新 `agents.last_seen_at`（auth.ts）
 - **失联判定（只读标记，不自动禁用）**：`last_seen_at` 为空（从未连接）或超过 `agent_offline_after_min` 分钟（settings KV，默认 30）未心跳 → 后端在 `/api/agents`、`/api/agents/:id`、`/api/stats` 响应中附 `offline` 标记（列表/详情/仪表盘同时返回 `offline_after_min` 供前端提示）
 - 前端：Agent 列表/详情显示红色「失联」徽标（title 提示阈值与最近活跃时间）；仪表盘「启用主机」卡显示 `· N 失联`；agent 恢复心跳后自动变回在线（无需手动操作）
+
+## docker 多主机测试环境（/docker/pi-hosts，2026-08-16）
+
+本地多主机测试：3 个 docker 容器模拟 3 台远端主机（node + pi + chat-bridge + sshd），用于多会话/多主机/run_user 端到端验证。**不进仓库，属本地基础设施**（/docker 约定）。
+
+- **镜像**：**node 官方镜像 `node:22-slim`（不 build 自定义镜像）**；pi CLI / openssh-server / sudo 由挂载的初始化脚本 `/docker/pi-hosts/build/entrypoint.sh` 在容器首次启动时自动安装（`apt` 装 sshd/sudo/git → `npm install -g @earendil-works/pi-coding-agent@0.84.2` → 建用户 `app`（bridge 运行者，uid 1000）+ `pi-agent`（run_user 测试）+ sudoers 允许 app 无密码 sudo）；初始化仅容器重建后执行一次（约 1-2 分钟），`docker restart` 跳过（脚本 ro 挂载实时生效）
+- **编排**：`/docker/pi-hosts/docker-compose.yml`——3 个 service（host-1/2/3），`image: node:22-slim` + `entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]`，端口 **2201/2202/2203 → 22**（SSH）；初始化脚本 `entrypoint.sh` 与 bridge 脚本（`~/projects/pi-market`）均 ro 挂载自宿主机（改代码即生效，无需重建镜像）；`~/projects` 各挂 `/docker/pi-hosts/host-N/projects`（持久化，各 3 个子目录：web-app/blog/api-gateway、data-etl/reports/warehouse、ml-pipeline/docs/experiments）
+- **pi 模型配置**：`/docker/pi-hosts/conf/{models,settings}.json`（含 relay key，从本机 ~/.pi/agent 拷出），容器 entrypoint 拷到 app/pi-agent 的 ~/.pi/agent/
+- **启动**：`cd /docker/pi-hosts && docker compose up -d`（先注册 3 个 agent 拿 key 填 .env；首次启动自动初始化安装，约 1-2 分钟）；SSH 登录 `ssh app@127.0.0.1 -p 2201`（root/app 密码 `pi-host`）
+- **平台 agent**：docker主机-1（id 13）/ docker主机-2（id 14）/ docker主机-3（id 15），各上报 3 个目录；**bridge 的 run_user 修复**（spawnPiProcess→piInvocation 绝对路径解析）由此环境实测（pi-agent 用户回复验证）
+- **改 bridge / entrypoint 后**：`docker restart pi-host-N`（脚本 ro 挂载实时生效；改 compose 导致容器重建才触发依赖重装）
 
 ## 配置（.env）
 

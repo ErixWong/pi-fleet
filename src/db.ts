@@ -68,8 +68,10 @@ CREATE TABLE IF NOT EXISTS agents (
   system_prompt TEXT,
   tags VARCHAR(255) NOT NULL DEFAULT '',
   accept_external TINYINT(1) NOT NULL DEFAULT 0 COMMENT '接单开关：是否允许认领公共池(pool)外单',
+  run_user VARCHAR(64) NULL COMMENT '运行 pi 的默认用户（部署时指定；空=bridge 当前用户；非当前用户时 bridge 用 sudo -n -u 切换，需 sudoers 白名单）',
   key_hash CHAR(64) NOT NULL UNIQUE,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
+  visible TINYINT(1) NOT NULL DEFAULT 1 COMMENT '软删除标记：有关联数据时置 0 不再显示',
   last_seen_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -145,11 +147,16 @@ CREATE TABLE IF NOT EXISTS task_messages (
 ) ENGINE=InnoDB;
 
 -- 独立对话通道（管理员↔agent 直接对话，与 task_messages 解耦；task_id 为可选的来源任务上下文）
+-- 多会话（2026-08-16）：主机对话不再固定 conv-host-{id} 单会话，允许创建多个（name/workdir/run_user 各自独立），
+-- 任务对话保持固定 conv-task-{taskId}；workdir 约定为 ~/projects 下目录（远端 pi 在该目录下运行，pi 会话按目录存储可续接）
 CREATE TABLE IF NOT EXISTS conversations (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   conversation_id VARCHAR(32) NOT NULL UNIQUE,
   agent_id BIGINT NOT NULL,
   task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选；对话仍存独立表不污染任务流）',
+  name VARCHAR(128) NOT NULL DEFAULT '' COMMENT '会话名（主机会话展示用，如 pi-market 开发）',
+  workdir VARCHAR(512) NULL COMMENT '工作目录（~/projects 下；远端 pi 在该路径下运行，按目录续接会话）',
+  run_user VARCHAR(64) NULL COMMENT '运行 pi 的用户（空=bridge 当前用户；非当前用户时 bridge 用 sudo -n -u 切换，需 sudoers 白名单）',
   status ENUM('open','archived') NOT NULL DEFAULT 'open',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -157,6 +164,14 @@ CREATE TABLE IF NOT EXISTS conversations (
 ) ENGINE=InnoDB;
 CREATE INDEX IF NOT EXISTS idx_conv_agent ON conversations(agent_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(task_id);
+
+-- 主机 ~/projects 目录列表缓存（bridge 上报；创建主机会话时供选择工作目录）
+CREATE TABLE IF NOT EXISTS agent_projects (
+  agent_id BIGINT NOT NULL,
+  projects TEXT NULL COMMENT 'JSON 数组：~/projects 下目录名',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (agent_id)
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS chat_messages (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -246,6 +261,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deliver_attempts INT NOT NULL DEFAULT
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 3 AFTER deliver_attempts;
 -- 开放生态：agent 接单开关（默认关，safer default）
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS accept_external TINYINT(1) NOT NULL DEFAULT 0 AFTER tags;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS run_user VARCHAR(64) NULL COMMENT '运行 pi 的默认用户（部署时指定；空=bridge 当前用户）' AFTER accept_external;
+-- 主机删除：软删除标记（有关联数据时置 0 不再显示；物理删除直接删行）
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS visible TINYINT(1) NOT NULL DEFAULT 1 AFTER status;
 -- 消息类型（§10.3：报告/进度并入消息流）与来源标记（§3.4 验收回帖）
 ALTER TABLE task_messages ADD COLUMN IF NOT EXISTS type ENUM('chat','progress','report','verdict','system') NOT NULL DEFAULT 'chat' AFTER sender_role;
 ALTER TABLE task_messages MODIFY COLUMN sender_role ENUM('agent','admin','system','platform') NOT NULL DEFAULT 'agent';
@@ -297,7 +315,6 @@ CREATE TABLE IF NOT EXISTS llm_models (
 -- 旧库升级：llm_models 补 provider_id 列（数据迁移在 initDb 内 JS 完成，成功后删 base_url/api_key 列）
 ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER id;
 ALTER TABLE llm_models ADD COLUMN IF NOT EXISTS temperature DECIMAL(3,1) NULL DEFAULT NULL AFTER vision;
-ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER model_id;
 
 -- LLM 调用日志（成本归平台：provider/模型/用途/tokens/价格）
 CREATE TABLE IF NOT EXISTS llm_calls (
@@ -314,6 +331,7 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   error VARCHAR(255) NOT NULL DEFAULT '',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS provider_id VARCHAR(32) NULL AFTER model_id;
 CREATE INDEX IF NOT EXISTS idx_llm_calls_time ON llm_calls(created_at);
 
 -- ─── 标签系统（tags 目录 + agent/task 多对多；内置种子见 seedBuiltinTags） ───
@@ -386,38 +404,47 @@ export async function initDb(): Promise<void> {
       await conn.query(`DROP TABLE IF EXISTS chat_messages`);
       console.log('[db] chat_messages 重建（conversation_id VARCHAR）');
     }
-    // 迁移：conversations 加 task_id（来源任务上下文；新表 ALTER 可行）
-    const convCols = (await conn.query(
-      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'task_id'`,
-    )) as Array<Record<string, unknown>>;
-    if (Number(convCols[0]?.c ?? 0) === 0) {
-      await conn.query(`ALTER TABLE conversations ADD COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）' AFTER agent_id`);
-      console.log('[db] conversations 加 task_id');
-    }
-    // 迁移：task_id 早期误建为 BIGINT → MODIFY 为 VARCHAR(32)（业务串 T-xxx；新表可行）
-    const convTaskType = (await conn.query(
-      `SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'task_id'`,
-    )) as Array<Record<string, unknown>>;
-    if (convTaskType.length > 0 && String(convTaskType[0].column_type).toLowerCase().startsWith('bigint')) {
-      await conn.query(`ALTER TABLE conversations MODIFY COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）'`);
-      console.log('[db] conversations.task_id → VARCHAR(32)');
-    }
-    // 迁移：conversations 加 workdir（对话工作目录：指定后远程 pi 在该路径下运行）
-    const convWd = (await conn.query(
-      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'workdir'`,
-    )) as Array<Record<string, unknown>>;
-    if (Number(convWd[0]?.c ?? 0) === 0) {
-      await conn.query(`ALTER TABLE conversations ADD COLUMN workdir VARCHAR(255) NULL COMMENT '对话工作目录（远程 pi 在该路径下运行）' AFTER task_id`);
-      console.log('[db] conversations 加 workdir');
-    }
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }
+    // 迁移：conversations 新列（task_id/name/workdir/run_user）——SCHEMA 建表后执行
+    await migrateConversations(conn);
     await migrateLlmProviders(conn);
     await seedBuiltinTags(conn);
     await migrateLegacyAgentTags(conn);
   } finally {
     conn.release();
+  }
+}
+
+/**
+ * 迁移：conversations 新列（task_id/name/workdir/run_user，多会话模型）。
+ * 幂等：列已存在（新库 SCHEMA 已含）即跳过；旧库在 SCHEMA 建表后 ALTER 补齐。
+ */
+async function migrateConversations(conn: { query(sql: string, params?: unknown[]): Promise<unknown> }): Promise<void> {
+  const cols = async (name: string) =>
+    (await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = ?`,
+      [name],
+    )) as Array<Record<string, unknown>>;
+  const add = async (name: string, ddl: string) => {
+    const r = await cols(name);
+    if (Number(r[0]?.c ?? 0) === 0) {
+      await conn.query(`ALTER TABLE conversations ADD COLUMN ${ddl}`);
+      console.log(`[db] conversations 加 ${name}`);
+    }
+  };
+  await add('task_id', `task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）' AFTER agent_id`);
+  await add('name', `name VARCHAR(128) NOT NULL DEFAULT '' COMMENT '会话名（主机会话展示用）' AFTER task_id`);
+  await add('workdir', `workdir VARCHAR(512) NULL COMMENT '对话工作目录（远程 pi 在该路径下运行）' AFTER task_id`);
+  await add('run_user', `run_user VARCHAR(64) NULL COMMENT '运行 pi 的用户（空=bridge 当前用户）' AFTER workdir`);
+  // task_id 早期误建为 BIGINT → MODIFY 为 VARCHAR(32)（业务串 T-xxx）
+  const t = (await conn.query(
+    `SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'conversations' AND column_name = 'task_id'`,
+  )) as Array<Record<string, unknown>>;
+  if (t.length > 0 && String(t[0].column_type).toLowerCase().startsWith('bigint')) {
+    await conn.query(`ALTER TABLE conversations MODIFY COLUMN task_id VARCHAR(32) NULL COMMENT '来源任务（业务串 T-xxx，可选）'`);
+    console.log('[db] conversations.task_id → VARCHAR(32)');
   }
 }
 

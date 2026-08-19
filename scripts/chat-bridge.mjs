@@ -4,8 +4,8 @@
 // - pi 流式事件（text_delta 打字机增量）→ 平台 conv_stream*（落库 + 前端实时）
 // - 每对话一个 pi 子进程（--session-id=convId 续接）：空闲 kill，下条消息拉起续接（记忆保持）
 // - WS 断线 → 退回 chat-check 轮询（1.5s）+ 拉起 pi 一次性 chat-reply（不流式）
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { spawn, execSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
@@ -51,6 +51,44 @@ async function api(method, pathname, body) {
   return data;
 }
 
+// ── ~/projects 目录扫描与上报（创建主机会话时供选择工作目录） ──
+const PROJECTS_DIR = path.join(os.homedir(), 'projects');
+const PROJECTS_REPORT_MS = Number(process.env.PROJECTS_REPORT_MS ?? 300000); // 默认 5 分钟
+let projectsTimer = null;
+
+/** 扫描 ~/projects 下的一级子目录（只列目录，跳过隐藏项） */
+function scanProjects() {
+  const dirs = [];
+  try {
+    if (!existsSync(PROJECTS_DIR)) return dirs;
+    for (const name of readdirSync(PROJECTS_DIR)) {
+      if (name.startsWith('.')) continue;
+      const p = path.join(PROJECTS_DIR, name);
+      try { if (statSync(p).isDirectory()) dirs.push(name); } catch { /* 无权限/已删除忽略 */ }
+    }
+  } catch (e) {
+    console.log(`[bridge] 扫描 ~/projects 失败: ${e.message}`);
+  }
+  return dirs.sort();
+}
+
+/** 上报目录列表到平台（失败静默，下次周期重试） */
+async function reportProjects() {
+  const dirs = scanProjects();
+  try {
+    const r = await api('POST', '/api/agent/projects', { dirs });
+    console.log(`[bridge] 上报 ~/projects ${dirs.length} 个目录`);
+  } catch (e) {
+    console.log(`[bridge] 上报 ~/projects 失败: ${e.message}`);
+  }
+}
+
+function startProjectsTimer() {
+  clearInterval(projectsTimer);
+  projectsTimer = setInterval(() => { void reportProjects(); }, PROJECTS_REPORT_MS);
+  projectsTimer.unref?.();
+}
+
 // ── pi 子进程管理（每对话一个；--session-id 续接） ──
 const sessions = new Map(); // convId -> { proc, seq, idleTimer, busy }
 
@@ -64,10 +102,22 @@ function killSession(convId) {
   console.log(`[bridge] 空闲回收 ${convId}`);
 }
 
-/** 解析对话工作目录并校验必须在主机 home 下（安全限制）；不合法返回 null */
-function resolveWorkdir(workdir) {
+/** 获取目标用户 home（Linux getent passwd 第 6 字段）；失败返回 null（非 Linux / 用户不存在） */
+function getUserHome(user) {
+  if (!user) return null;
+  try {
+    const line = execSync(`getent passwd ${user}`, { encoding: 'utf8' }).trim();
+    const parts = line.split(':');
+    return parts.length >= 6 && parts[5] ? parts[5] : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 解析对话工作目录并校验必须在目标 home 下（安全限制）；不合法返回 null
+ * home 默认 bridge 用户；run_user 场景传入目标用户 home——`~` 按**最终执行用户**展开 */
+function resolveWorkdir(workdir, home = os.homedir()) {
   if (!workdir) return null;
-  const home = os.homedir();
   const p = workdir.startsWith('~/') || workdir === '~'
     ? path.join(home, workdir === '~' ? '' : workdir.slice(2))
     : workdir;
@@ -76,7 +126,7 @@ function resolveWorkdir(workdir) {
   if (resolved === homeResolved || resolved.startsWith(homeResolved + path.sep)) {
     return resolved;
   }
-  console.log(`[bridge] 工作目录 ${workdir} 不在 home 下，已忽略（用默认目录）`);
+  console.log(`[bridge] 工作目录 ${workdir} 不在 home(${home}) 下，已忽略（用默认目录）`);
   return null;
 }
 
@@ -99,15 +149,23 @@ function spawnPi(convId, onEvent) {
     return; // 上一条还没回完，忽略并发（超时保护会兜底解除）
   }
   if (!s.proc || s.proc.killed || s.proc.exitCode !== null) {
-    const cwd = resolveWorkdir(s.workdir) ?? process.cwd();
+    // run_user 场景：workdir/默认目录按**目标用户 home**解析（~ 展开到 /home/<run_user>），
+    // 与 sudo -u 切换的执行身份一致；未指定 run_user 时仍按 bridge 用户（os.homedir()）
+    const targetHome = s.runUser ? (getUserHome(s.runUser) ?? os.homedir()) : os.homedir();
+    const cwd = resolveWorkdir(s.workdir, targetHome) ?? path.join(targetHome, 'projects');
     if (!existsSync(cwd)) {
-      try { mkdirSync(cwd, { recursive: true }); } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
+      try {
+        if (s.runUser && targetHome !== os.homedir()) {
+          // 目标用户 home 下（bridge 无写权限）→ 走 sudo 创建，保证 pi 以该用户可写
+          execSync(`sudo -n -u ${s.runUser} mkdir -p "${cwd}"`);
+        } else {
+          mkdirSync(cwd, { recursive: true });
+        }
+      } catch (e) { console.log(`[bridge] 创建目录失败 ${cwd}: ${e.message}`); }
     }
-    const child = CLI
-      ? spawn(process.execPath, [CLI, '--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-      : spawn('pi', ['--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnPiProcess(convId, s, cwd);
     s.proc = child;
-    console.log(`[bridge] spawn pi ${convId} pid=${child.pid} cwd=${cwd}`);
+    console.log(`[bridge] spawn pi ${convId} pid=${child.pid} cwd=${cwd}` + (s.runUser ? ` user=${s.runUser}` : '') + (s.name ? ` name=${s.name}` : ''));
     child.stderr?.on('data', (d) => console.log(`[bridge][pi-stderr] ${String(d).slice(0, 200)}`));
     child.stdout.on('data', (d) => {
       s.buffer += d.toString();
@@ -119,13 +177,59 @@ function spawnPi(convId, onEvent) {
         handlePiEvent(convId, evt, onEvent);
       }
     });
-    child.on('close', () => { s.proc = null; s.busy = false; });
+    child.on('close', (code, signal) => {
+      const failed = code !== 0 && !s.replied;
+      s.proc = null;
+      s.busy = false;
+      clearTimeout(s.timeoutTimer);
+      if (failed) {
+        const runUserNote = s.runUser ? `（run_user=${s.runUser}，需远端 sudoers 白名单允许 bridge 用户无密码 sudo 切换）` : '';
+        const msg = `\n\n⚠️ pi 进程异常退出（code=${code ?? signal ?? '?'}），本次未产生回复${runUserNote}。请检查 bridge 日志或会话配置后重试。`;
+        console.log(`[bridge] pi 异常退出 ${convId} code=${code} signal=${signal}`);
+        onEvent({ type: 'conv_stream_end', conversation_id: convId, content: msg });
+      }
+      scheduleIdleKill(convId);
+    });
     child.on('error', (e) => { console.log(`[bridge][pi-error] ${e.message}`); s.proc = null; s.busy = false; });
     // 会话就绪后注入（rpc 模式直接可写；稍等进程起来）
     setTimeout(() => sendPrompt(convId), 500);
   } else {
     sendPrompt(convId);
   }
+}
+
+/** spawn pi 子进程：支持指定运行用户（sudo -n -u 切换，需 sudoers 白名单）；--name 让远端 pi -r 列表可识别
+ * 注意：CLI 可能为 null（pi 不在 node 全局里，直接靠 PATH 的 `pi` 命令）；sudo 场景 PATH 受 secure_path 限制，
+ * 优先用绝对路径（PI_CLI 或 node 全局解析），实在没有才回退 `pi` 命令名 */
+function piInvocation() {
+  if (CLI) return { cmd: process.execPath, args: [CLI] };
+  // CLI null：优先常见绝对路径（node 镜像 /usr/local/bin/pi，npm 全局）
+  const candidates = [
+    '/usr/local/bin/pi',
+    '/usr/bin/pi',
+    path.join(os.homedir(), '.npm-global', 'bin', 'pi'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return { cmd: p, args: [] };
+  }
+  return { cmd: 'pi', args: [] }; // 最后回退：靠 PATH
+}
+
+function spawnPiProcess(convId, s, cwd) {
+  const args = ['--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING];
+  if (s.name) args.push('--name', String(s.name).slice(0, 120));
+  const nodeExe = process.execPath;
+  const runUser = s.runUser && s.runUser !== (process.env.USER || os.userInfo().username) ? s.runUser : null;
+  if (runUser) {
+    // 指定用户：sudo -n -u <user> -H -- <pi> ...（-H 让 HOME 指向目标用户，pi 配置/sessions 随该用户）
+    const { cmd, args: invArgs } = piInvocation();
+    const sudoArgs = ['-n', '-u', runUser, '-H', '--', cmd, ...invArgs, ...args];
+    return spawn('sudo', sudoArgs, { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  }
+  if (CLI) {
+    return spawn(nodeExe, [CLI, ...args], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  }
+  return spawn('pi', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 }
 
 function sendPrompt(convId) {
@@ -169,6 +273,8 @@ function buildPrompt(s) {
 /** pi 事件 → 平台流式事件（text_delta 打字机；agent_end 落库） */
 function handlePiEvent(convId, evt, onEvent) {
   if (evt.type === 'message_start') {
+    const s = sessions.get(convId);
+    if (s) s.replied = false;
     onEvent({ type: 'conv_stream_start', conversation_id: convId });
   } else if (evt.type === 'message_update') {
     const am = evt.assistantMessageEvent;
@@ -179,7 +285,11 @@ function handlePiEvent(convId, evt, onEvent) {
     const text = (evt.messages ?? []).filter((m) => m.role === 'assistant').pop()
       ?.content?.filter((c) => c.type === 'text').map((c) => c.text).join('') ?? '';
     console.log(`[bridge] pi agent_end ${convId}: ${text.length} 字`);
-    if (text.trim()) onEvent({ type: 'conv_stream_end', conversation_id: convId, content: text.trim() });
+    if (text.trim()) {
+      const s = sessions.get(convId);
+      if (s) s.replied = true;
+      onEvent({ type: 'conv_stream_end', conversation_id: convId, content: text.trim() });
+    }
     const s = sessions.get(convId);
     if (s) { s.busy = false; clearTimeout(s.timeoutTimer); scheduleIdleKill(convId); }
   }
@@ -192,12 +302,17 @@ function connect() {
   ws.on('open', () => console.log(`[bridge] WS 已连接 ${WS_URL}`));
   ws.on('message', (raw) => {
     let evt; try { evt = JSON.parse(String(raw)); } catch { return; }
+    if (evt.type === 'projects_rescan') {
+      console.log(`[bridge] 收到 projects_rescan，立即重新上报`);
+      void reportProjects();
+      return;
+    }
     if (evt.type === 'conv_new_message' && evt.conversation_id) {
       const s = sessions.get(evt.conversation_id);
-      const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null, workdir: evt.workdir ?? null };
-      if (s) { s.pendingMsg = evt.content; if (evt.task) s.taskCtx = evt.task; if (evt.workdir) s.workdir = evt.workdir; }
+      const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: evt.content, taskCtx: evt.task ?? null, workdir: evt.workdir ?? null, runUser: evt.run_user ?? null, name: evt.name ?? null };
+      if (s) { s.pendingMsg = evt.content; if (evt.task) s.taskCtx = evt.task; if (evt.workdir) s.workdir = evt.workdir; if (evt.run_user !== undefined) s.runUser = evt.run_user ?? null; if (evt.name !== undefined) s.name = evt.name ?? null; }
       else sessions.set(evt.conversation_id, init);
-      console.log(`[bridge] ${new Date().toLocaleTimeString()} 新消息 ${evt.conversation_id}: ${String(evt.content).slice(0, 40)}` + (evt.task ? `（任务 ${evt.task.task_id}）` : '') + (evt.workdir ? `（workdir ${evt.workdir}）` : ''));
+      console.log(`[bridge] ${new Date().toLocaleTimeString()} 新消息 ${evt.conversation_id}: ${String(evt.content).slice(0, 40)}` + (evt.task ? `（任务 ${evt.task.task_id}）` : '') + (evt.workdir ? `（workdir ${evt.workdir}）` : '') + (evt.run_user ? `（user ${evt.run_user}）` : ''));
       spawnPi(evt.conversation_id, forward);
     }
   });
@@ -235,14 +350,18 @@ async function startPolling() {
           // 拉对话 + 任务上下文（兜底路径无推送，需自取）
           let taskCtx = null;
           let workdir = null;
+          let runUser = null;
+          let name = null;
           try {
             const hist = await api('POST', '/api/agent/chat-messages', { conversation_id: c.conversation_id });
             taskCtx = hist.task ?? null;
             workdir = hist.conversation?.workdir ?? null;
+            runUser = hist.conversation?.run_user ?? null;
+            name = hist.conversation?.name ?? null;
           } catch { /* 拉不到上下文不影响回复 */ }
           const s = sessions.get(c.conversation_id);
-          const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx, workdir };
-          if (s) { s.pendingMsg = c.last_message ?? '请继续我们的对话。'; if (taskCtx) s.taskCtx = taskCtx; if (workdir) s.workdir = workdir; }
+          const init = { proc: null, seq: 1, idleTimer: null, timeoutTimer: null, busy: false, buffer: '', pendingMsg: c.last_message ?? '请继续我们的对话。', taskCtx, workdir, runUser, name };
+          if (s) { s.pendingMsg = c.last_message ?? '请继续我们的对话。'; if (taskCtx) s.taskCtx = taskCtx; if (workdir) s.workdir = workdir; if (runUser !== undefined && runUser !== null) s.runUser = runUser; if (name !== undefined && name !== null) s.name = name; }
           else sessions.set(c.conversation_id, init);
           spawnPi(c.conversation_id, forward);
         }
@@ -254,4 +373,7 @@ async function startPolling() {
 }
 
 connect();
-console.log(`[bridge] chat-bridge 启动 key=${AGENT_KEY.slice(0, 8)}… pi=${CLI ?? 'pi'}`);
+startProjectsTimer();
+// 启动即上报一次（目录缓存尽快可用）
+void reportProjects();
+console.log(`[bridge] chat-bridge 启动 key=${AGENT_KEY.slice(0, 8)}… pi=${CLI ?? 'pi'} projects=${PROJECTS_DIR}`);
