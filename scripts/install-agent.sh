@@ -70,8 +70,35 @@ while (($# > 0)); do
 done
 
 command -v pi >/dev/null 2>&1 || {
-  warn "未检测到 pi CLI。请先执行：npm install -g @earendil-works/pi-coding-agent"
-  exit 1
+  warn "未检测到 pi CLI。pi 官方一键安装："
+  case "$(uname -s)" in
+    Linux|Darwin) echo "    curl -fsSL https://pi.dev/install.sh | sh" ;;
+    *)            echo "    powershell -c \"irm https://pi.dev/install.ps1 | iex\"" ;;
+  esac
+  read -r -p "是否现在用官方脚本安装 pi？[y/N] " ans
+  if [[ "$ans" =~ ^[Yy] ]]; then
+    case "$(uname -s)" in
+      Linux|Darwin)
+        curl -fsSL https://pi.dev/install.sh | sh || die "官方安装脚本执行失败，请手动安装后重跑"
+        ;;
+      *)
+        die "Windows 请先手动在 PowerShell 执行：powershell -c \"irm https://pi.dev/install.ps1 | iex\"，然后在 WSL 重跑本脚本"
+        ;;
+    esac
+    # 官方脚本可能装到 ~/.local/bin 等非 PATH 目录，补上探测
+    if ! command -v pi >/dev/null 2>&1; then
+      for p in "$HOME/.local/bin/pi" "$HOME/bin/pi" "$HOME/.npm-global/bin/pi" /usr/local/bin/pi; do
+        if [[ -x "$p" ]]; then
+          export PATH="$(dirname "$p"):$PATH"
+          break
+        fi
+      done
+    fi
+    command -v pi >/dev/null 2>&1 || die "pi 安装后仍不可用（PATH 不含 pi），请手动安装后重跑"
+  else
+    warn "请先安装 pi（官方命令见上），再重新运行本脚本"
+    exit 1
+  fi
 }
 NODE_BIN=$(command -v node) || die "未检测到 node，无法运行 agent-daemon.mjs"
 

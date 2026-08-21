@@ -116,8 +116,10 @@ journalctl -u pi-agent -f
 # 示例：专用低权限用户（按发行版和已有部署调整）
 useradd -r -m -s /bin/bash pi-agent
 
-# 安装 pi（版本按项目要求）
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+# 安装 pi（官方一键安装，Linux/macOS）
+curl -fsSL https://pi.dev/install.sh | sh
+# Windows：powershell -c "irm https://pi.dev/install.ps1 | iex"
+# 或 npm 方式：npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
 在 `pi-agent` 用户的 `~/.pi/agent/models.json` 中自行配置 provider、模型和 API Key；
