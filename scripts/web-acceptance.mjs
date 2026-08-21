@@ -121,19 +121,21 @@ try {
   check('计划出现在列表', (await page.locator(`table tbody >> text="${PLAN_NAME}"`).count()) >= 1);
   check('列表显示阶段/任务数', (await page.locator(`table tbody >> text="${PLAN_NAME}"`).first().locator('xpath=ancestor::tr').locator('td:has-text("阶段")').count()) >= 1);
 
-  // ── 3. 树视图：当前 stage 高亮 / 后续置灰 / blocked ──
-  console.log('== 3. plan 树视图 ==');
+  // ── 3. 「处理计划」modal：当前 stage 高亮 / 后续置灰 / blocked ──
+  console.log('== 3. plan 处理 modal（树视图） ==');
   const plans = await api('GET', '/api/plans');
   planId = plans.plans.find((p) => p.name === PLAN_NAME).plan_id;
-  await page.click(`table tbody a:has-text("${PLAN_NAME}")`);
-  await page.waitForURL((u) => u.pathname.startsWith('/plans/'));
-  await page.waitForSelector('.card');
-  check('树视图渲染（2 个 stage card）', (await page.locator('.card').count()) >= 2);
+  // 新 UI：计划列表行内展开 + 「处理计划」tools 按钮打开 modal（不再跳转 /plans/:id）
+  await page.locator(`tr:has-text("${PLAN_NAME}") button[title^="处理计划"]`).click();
+  await page.waitForSelector('.modal.show');
+  await page.waitForTimeout(400); // procPlan 异步加载
+  const cards = page.locator('.modal.show .card');
+  check('树视图渲染（2 个 stage card）', (await cards.count()) >= 2);
   // stage1 当前：border-primary + 徽标「当前」
-  const s1Card = page.locator('.card').first();
+  const s1Card = cards.first();
   check('stage1 高亮（border-primary + 当前徽标）',
     (await s1Card.getAttribute('class')).includes('border-primary') && (await s1Card.locator('text=当前').count()) === 1);
-  const s2Card = page.locator('.card').nth(1);
+  const s2Card = cards.nth(1);
   check('stage2 置灰（opacity-75 + 阶段 2 徽标）',
     (await s2Card.getAttribute('class')).includes('opacity-75') && (await s2Card.locator('text=阶段 2').count()) >= 1);
   check('stage2 任务 blocked（闸门中）',
@@ -141,7 +143,7 @@ try {
   check('stage1 任务 open/active',
     (await s1Card.locator('text=open').count()) >= 1 && (await s1Card.locator('text=active').count()) >= 1);
 
-  // ── 4. 交付物可见性下拉改档（UI）→ 回帖留痕（API 验证） ──
+  // ── 4. 交付物可见性下拉改档（modal 内 UI）→ 回帖留痕（API 验证） ──
   console.log('== 4. 交付物可见性改档 ==');
   const s1TaskRow = s1Card.locator('div.border-bottom').first();
   const dvSelect = s1TaskRow.locator('select');
@@ -149,20 +151,22 @@ try {
   await dvSelect.selectOption('public');
   await page.waitForTimeout(500);
   check('改档后 select 值 public', (await dvSelect.inputValue()) === 'public');
-  const t1 = await api('GET', '/api/tasks'); // 取该 plan 的第一个任务 task_id
   const tree = await api('GET', `/api/plans/${planId}`);
   const stage1Task = tree.plan.stages[0].tasks.find((t) => t.title === '准备数据');
   const t1Detail = await api('GET', `/api/tasks/${stage1Task.task_id}`);
   check('改档留痕回帖（[交付物可见性]）', t1Detail.messages.some((m) => m.content.includes('交付物可见性') && m.content.includes('public')), JSON.stringify(t1Detail.messages.map((m) => m.content)));
 
   // ── 5. failed 处置：置 failed → stalled 标红 + 处置按钮 → 重开回 open ──
-  // 用 stage2（非当前 stage）任务：current 徽标优先于 stalled，非当前 stage 有 failed 才显示 stalled 徽标
   console.log('== 5. failed 处置（重开） ==');
   const stage2Task = tree.plan.stages[1].tasks[0];
   await pool.query(`UPDATE tasks SET status='failed', deliver_attempts=2, result='[ui-test]' WHERE task_id = ?`, [stage2Task.task_id]);
-  await page.reload({ waitUntil: 'networkidle' });
-  await page.waitForSelector('.card');
-  const s2Card2 = page.locator('.card').nth(1);
+  // 重新打开 modal（procPlan 是打开时拉取的）
+  await page.locator('.modal.show .btn-close').click();
+  await page.waitForSelector('.modal.show', { state: 'hidden' });
+  await page.locator(`tr:has-text("${PLAN_NAME}") button[title^="处理计划"]`).click();
+  await page.waitForSelector('.modal.show');
+  await page.waitForTimeout(400);
+  const s2Card2 = page.locator('.modal.show .card').nth(1);
   check('failed 任务显示 failed 徽标', (await s2Card2.locator('text=failed').count()) >= 1);
   check('stage stalled 标红（stalled 徽标）', (await s2Card2.locator('text=stalled').count()) === 1 && (await s2Card2.locator('span.badge.text-bg-danger').count()) >= 1);
   const failRow = s2Card2.locator('div.border-bottom').filter({ hasText: '执行分析' });
@@ -172,11 +176,8 @@ try {
     (await failRow.locator('button:has-text("取消(跳过)")').count()) === 1);
   await failRow.locator('button:has-text("重开")').click();
   await page.waitForTimeout(800); // confirm 自动接受 + load() 刷新
-  const s2Card3 = page.locator('.card').nth(1);
-  const reopenedRow = s2Card3.locator('div.border-bottom').filter({ hasText: '执行分析' });
-  check('重开后回 open（private+assignee 落点）+ 处置按钮消失',
-    (await reopenedRow.locator('text=open').count()) >= 1 && (await reopenedRow.locator('button:has-text("重开")').count()) === 0);
   const reopenedDetail = await api('GET', `/api/tasks/${stage2Task.task_id}`);
+  check('重开后回 open（private+assignee 落点）', reopenedDetail.task.status === 'open' && reopenedDetail.task.deliver_attempts === 0, JSON.stringify({ status: reopenedDetail.task.status, attempts: reopenedDetail.task.deliver_attempts }));
   check('重开留痕回帖（[处置] 发起人重开）', reopenedDetail.messages.some((m) => m.content.includes('发起人重开') && m.content.includes('open')), JSON.stringify(reopenedDetail.messages.map((m) => m.content)));
 
   // ── 6. 设置页渲染 ──

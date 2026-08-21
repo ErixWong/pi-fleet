@@ -15,7 +15,7 @@
 | 容器 | `pi-host-1` / `pi-host-2` / `pi-host-3` |
 | 镜像 | `node:22-slim`（node 官方镜像，**不 build 自定义镜像**；pi/sshd/sudo 由挂载的初始化脚本首次启动自动安装） |
 | 端口 | `2201 / 2202 / 2203 → 22`（SSH 登录用） |
-| 每容器内容 | node + pi CLI + chat-bridge 常驻 + sshd（entrypoint 自动初始化） |
+| 每容器内容 | node + pi CLI + agent-daemon 常驻 + sshd（任务执行 + 对话桥接合一，entrypoint 自动初始化） |
 
 **bind mount（统一 `/docker/<名称>/` 约定，数据持久化）：**
 
@@ -23,8 +23,8 @@
 |---|---|---|
 | `/docker/pi-hosts/host-{N}/projects` | `/home/app/projects` | 各主机 `~/projects`（持久化，agent 工作目录） |
 | `/docker/pi-hosts/conf` | `/conf:ro` | pi 模型配置（`models.json` + `settings.json`，含 relay key） |
-| `/home/eric/projects/pi-market` | `/opt/pi-market:ro` | bridge 脚本 `scripts/chat-bridge.mjs` + node_modules（改代码即生效） |
-| `/docker/pi-hosts/build/entrypoint.sh` | `/opt/entrypoint.sh:ro` | 初始化脚本（apt 装 sshd/sudo → npm 装 pi → 拷 pi 配置 → sshd → bridge；改脚本 `docker restart` 即生效） |
+| `/home/eric/projects/pi-market` | `/opt/pi-market:ro` | agent-daemon 脚本 `scripts/agent-daemon.mjs` + node_modules（改代码即生效） |
+| `/docker/pi-hosts/build/entrypoint.sh` | `/opt/entrypoint.sh:ro` | 初始化脚本（apt 装 sshd/sudo → npm 装 pi → 拷 pi 配置 → sshd → agent-daemon；改脚本 `docker restart` 即生效） |
 
 **环境变量（每个容器一份）：**
 
@@ -35,7 +35,7 @@
 | `HOST_NAME` | `pi-host-{N}` | agent 名 |
 | `HOST_HOSTNAME` | `pi-host-{N}` | 主机名 |
 | `SSH_PASSWORD` | 自定义 | root/app 的 SSH 密码（默认 `pi-host`） |
-| `BRIDGE_SCRIPT` | `/opt/pi-market/scripts/chat-bridge.mjs` | bridge 入口（挂载自宿主机） |
+| `BRIDGE_SCRIPT` | `/opt/pi-market/scripts/agent-daemon.mjs` | agent-daemon 入口（挂载自宿主机） |
 
 ---
 
@@ -97,7 +97,7 @@ services:
       - HOST_NAME=pi-host-1
       - HOST_HOSTNAME=pi-host-1
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/chat-bridge.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
     restart: unless-stopped
 
   host-2:
@@ -118,7 +118,7 @@ services:
       - HOST_NAME=pi-host-2
       - HOST_HOSTNAME=pi-host-2
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/chat-bridge.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
     restart: unless-stopped
 
   host-3:
@@ -139,7 +139,7 @@ services:
       - HOST_NAME=pi-host-3
       - HOST_HOSTNAME=pi-host-3
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/chat-bridge.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
     restart: unless-stopped
 ```
 
@@ -178,7 +178,7 @@ mcp({ tool: "portainer_StackInspect", args: { id: <stackId>, endpointId: 2 } })
 
 ```bash
 docker ps | grep pi-host            # pi-host-1/2/3 Up
-docker logs pi-host-1 | tail -20    # 应看到 [init] pi 配置已就绪 / sshd 就绪 / 启动 chat-bridge
+docker logs pi-host-1 | tail -20    # 应看到 [init] pi 配置已就绪 / sshd 就绪 / agent-daemon 启动
 ssh app@127.0.0.1 -p 2201           # SSH 可登录（密码 = SSH_PASSWORD）
 ```
 
@@ -199,7 +199,7 @@ ssh app@127.0.0.1 -p 2201           # SSH 可登录（密码 = SSH_PASSWORD）
 **更新流程**：
 
 1. 只改 compose（环境变量/挂载/端口）→ `StackUpdate` 直接生效
-2. 改初始化脚本 `entrypoint.sh` / bridge 脚本（`scripts/chat-bridge.mjs`）→ 无需重建：两者都是 ro 挂载，`docker restart pi-host-N` 即生效
+2. 改初始化脚本 `entrypoint.sh` / agent-daemon 脚本（`scripts/agent-daemon.mjs`）→ 无需重建：两者都是 ro 挂载，`docker restart pi-host-N` 即生效
 3. 注意：stack 更新（`StackUpdate`）会**重建容器** → 首次启动重新执行 `entrypoint.sh` 的依赖安装（apt+npm 约 1-2 分钟）；只想重载脚本用 `docker restart` 避免重装
 
 **改 key / 密码** → `StackUpdate` 传新的 `Env` 数组。
@@ -226,5 +226,5 @@ cd /docker/pi-hosts && docker compose down      # 停止并删除 compose 管理
 - **数据持久化**：bind mount 一律 `/docker/<名称>/`（§1 表），不建匿名卷
 - **初始化脚本**：`entrypoint.sh` 由宿主机 ro 挂载，改脚本 `docker restart` 即生效（无需重建镜像/容器）
 - **重启策略**：`restart: unless-stopped`（已含）
-- **健康检查**：本环境为测试用途，容器靠 entrypoint 串行初始化 + bridge 常驻，未配 `healthcheck`；如需依赖编排再加
+- **健康检查**：本环境为测试用途，容器靠 entrypoint 串行初始化 + agent-daemon 常驻，未配 `healthcheck`；如需依赖编排再加
 - 本环境不进仓库、无自定义镜像（node 官方镜像，无需 push registry）

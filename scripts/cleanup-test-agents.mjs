@@ -1,6 +1,7 @@
 // 清理验收脚本产生的测试 agent 及其任务/报告（保留 local-pi / vm-02 / web-01 等真实 agent）
+import 'dotenv/config';
 import { createPool } from 'mariadb';
-const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
+const pool = createPool({ host: process.env.DB_HOST ?? '127.0.0.1', port: Number(process.env.DB_PORT ?? 3306), user: process.env.DB_USER ?? 'root', password: process.env.DB_PASSWORD ?? '', database: process.env.DB_NAME ?? 'task_dispatch' });
 
 const [beforeAgents, beforeTasks] = await Promise.all([
   pool.query(`SELECT COUNT(*) c FROM agents`),

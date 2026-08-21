@@ -1,5 +1,6 @@
 // MCP 验收：终局工具面（whoami + task 10 action + upload_attachment）+ 附件系统（§3.7）+ key 管理
 // 覆盖：协作会话 / 定时任务 / 交付物（附件引用+版本+预检）/ 开放生态（公共池+认领+验收）/ 附件权限
+import 'dotenv/config';
 import { createPool } from 'mariadb';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -203,7 +204,7 @@ try {
   // 发起人 B 验收关闭私有任务（验收权跟随发起权）
   const privDone = await task(clientB, 'approve', { task_id: privTask.task_id, opinion: 'ok' });
   check('私有任务验收通过 → done', privDone.ok === true && privDone.status === 'done', JSON.stringify(privDone));
-  const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
+  const pool = createPool({ host: process.env.DB_HOST ?? '127.0.0.1', port: Number(process.env.DB_PORT ?? 3306), user: process.env.DB_USER ?? 'root', password: process.env.DB_PASSWORD ?? '', database: process.env.DB_NAME ?? 'task_dispatch' });
   // 5. 开放生态：公共池 / 原子认领 / 验收链路（全部附件引用）
   console.log('== 5. 开放生态：公共池 + 认领 + 验收 ==');
   const agentC = await api('POST', '/api/agents', { name: 'sess-C', hostname: '10.0.0.3', accept_external: true });

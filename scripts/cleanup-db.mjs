@@ -1,10 +1,11 @@
 // 数据库清理：删除测试/演示主机及其任务/消息/报告/交付物，只保留真实主机（本机 local-pi）
 // 注意：表空间损坏的表（task_messages/reports/deliverables）只能用 DELETE，不能用 TRUNCATE
+import 'dotenv/config';
 import { createPool } from 'mariadb';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rm } from 'node:fs/promises';
-const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch', supportBigNumbers: true, bigNumberStrings: true });
+const pool = createPool({ host: process.env.DB_HOST ?? '127.0.0.1', port: Number(process.env.DB_PORT ?? 3306), user: process.env.DB_USER ?? 'root', password: process.env.DB_PASSWORD ?? '', database: process.env.DB_NAME ?? 'task_dispatch', supportBigNumbers: true, bigNumberStrings: true });
 
 const KEEP = ['local-pi', 'local-pi-open']; // 本机真实接入的主机
 
