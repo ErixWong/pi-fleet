@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // chat-bridge：pi agent 对话桥接器（常驻）
-// ⚠️ 已废弃（2026-08，issue #5）：功能已合并进 scripts/agent-daemon.mjs（任务执行 + 对话桥接 + 心跳合一）。
+// ⚠️ 已废弃（2026-08，issue #5）：功能已合并进 client/src/agent-daemon.mjs（任务执行 + 对话桥接 + 心跳合一）。
 //    新部署请用 agent-daemon.mjs；本文件仅保留供历史参考。
 // - 连平台 WS /api/agent/chat-stream（Bearer）；收到 conv_new_message → 拉起 pi --mode rpc
 // - pi 流式事件（text_delta 打字机增量）→ 平台 conv_stream*（落库 + 前端实时）

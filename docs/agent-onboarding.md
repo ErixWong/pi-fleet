@@ -10,30 +10,32 @@
 
 ## 快速开始
 
-当前版本先下载仓库，再在仓库根目录执行一条命令：
+客户端以 npm 子包发布（发布通道待定），安装后执行 setup：
 
 ```bash
-bash scripts/install-agent.sh
+npm i -g @pi-market/pi-agent-client
+pi-agent setup
+pi-agent install-service
 ```
 
-安装向导交互填写平台地址与 agent key（形如 `pd-xxx`）后，即完成 daemon 配置、systemd 开机自启和启动。平台托管安装入口
-`curl -fsSL <平台>/install.sh | bash` 计划在二期上线，当前不可用。
+也可以不全局安装，使用 `npx @pi-market/pi-agent-client setup` 和对应子命令。安装向导交互填写平台地址、agent key（形如 `pd-xxx`）、
+主机名和执行器后，写入客户端配置并合并 pi 的 MCP 配置；systemd 主机再执行 `pi-agent install-service`。
 
 安装前请先在平台 Web 界面注册 agent，并保存一次性显示的 API Key。pi 本身所需的 LLM provider 仍由用户自行配置
 `~/.pi/agent/models.json`；这是安装 pi-agent 时本来就要做的配置，与 pi-web 的模型配置一致，安装向导不涉及、不代配。
 
 ## 架构概览（必读）
 
-每台设备只运行一个常驻的 `agent-daemon.mjs`，由它统一承担程序调度和 pi 进程管理：
+每台设备只运行一个常驻的 `client/src/agent-daemon.mjs`，由 npm 客户端统一承担程序调度和执行器进程管理：
 
 ```text
 中心平台（任务分发 + REST/MCP + 对话 WS）
    │
-   └── 设备（Linux）：agent-daemon.mjs（常驻守护进程）
-         ├─ 任务执行：定时 poll → 拉起 pi -p 一次性执行
-         │             → pi 经 MCP task(submit) 交差
+   └── 设备（Linux）：pi-agent（npm 客户端）
+         ├─ 任务执行：定时 poll → 拉起配置的 CLI 一次性执行
+         │             → CLI 经 MCP task(submit) 交差
          │             → 异常退出/超时才 POST result failed 兜底
-         ├─ 对话桥接：WS conv_new_message → pi --mode rpc 会话 → 流式回复
+         ├─ 对话桥接：WS conv_new_message → pi RPC 会话 → 流式回复
          ├─ 心跳：daemon 的平台请求刷新在线状态
          └─ ~/projects 目录扫描与上报
 ```
@@ -54,7 +56,7 @@ REST 与 MCP 使用同一个 agent key（平台注册时生成，`pd-` 前缀）
 ### 工作职责
 
 1. **任务执行**：按 `POLL_MS` 调用 `/api/agent/poll`，平台返回到期任务后，逐个创建任务进程并拉起
-   `pi -p` 一次性执行。pi 通过 MCP `task(detail)` 获取上下文，最后调用 `task(submit)` 交差。
+   配置的 CLI 一次性执行。CLI 通过 MCP `task(detail)` 获取上下文，最后调用 `task(submit)` 交差。
    正常退出时 daemon 不代替 pi 提交成功结果；只有 pi 异常退出、无法启动或超过 `TASK_TIMEOUT_MS`，
    才调用 `/api/agent/tasks/result` 上报 `failed`。
 2. **对话桥接**：通过 WS 收到 `conv_new_message` 后，按会话启动或复用
@@ -70,7 +72,8 @@ REST 与 MCP 使用同一个 agent key（平台注册时生成，`pd-` 前缀）
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PLATFORM_URL` | `http://127.0.0.1:3000` | 平台地址 |
-| `PI_AGENT_KEY` | 无 | 平台 agent key；也可由 `~/.pi/agent/mcp.json` 的 `task-dispatch` 配置读取 |
+| `PI_AGENT_KEY` | 无 | 平台 agent key；也可由客户端 config.json 或 `~/.pi/agent/mcp.json` 读取 |
+| `AGENT_CMD` | `pi` | 执行器：`pi` / `copilot` / `claude` / `codex` / `auto`；平台 agent_cli 非空时覆盖 |
 | `POLL_MS` | `60000` | 任务 poll 周期，单位毫秒 |
 | `TASK_TIMEOUT_MS` | `1800000` | 单个任务最长执行时间，默认 30 分钟 |
 | `WORK_ROOT` | `~/pi-agent-work` | 无项目目录任务的沙箱根目录 |
@@ -82,10 +85,10 @@ REST 与 MCP 使用同一个 agent key（平台注册时生成，`pd-` 前缀）
 
 ### 手动运行
 
-在仓库根目录执行：
+直接运行客户端 daemon：
 
 ```bash
-PLATFORM_URL=http://x PI_AGENT_KEY=pd-xxx node scripts/agent-daemon.mjs
+PLATFORM_URL=http://x PI_AGENT_KEY=pd-xxx AGENT_CMD=auto node client/src/agent-daemon.mjs
 ```
 
 生产环境建议使用安装向导生成的 `pi-agent` systemd 服务，不要把 key 直接写入命令历史。查看服务日志：
@@ -97,8 +100,8 @@ journalctl -u pi-agent -f
 
 ### 安装与 systemd
 
-`bash scripts/install-agent.sh` 会交互读取平台地址和 key，并完成 daemon 所需配置、systemd 服务安装及开机自启。
-服务名固定为 `pi-agent`；不再需要手写 `alarm.sh`、timer 或多个 worker 的环境文件。
+`pi-agent setup` 会写入 `~/.config/pi-agent/config.json` 和 pi 的 `mcp.json`；`pi-agent install-service`
+会完成 daemon 所需的 systemd 服务安装及开机自启。服务名固定为 `pi-agent`。
 
 ---
 
@@ -160,7 +163,7 @@ daemon 按任务是否带项目目录选择工作方式：
 
 ## 四、旧部署模式（已废弃）
 
-> **已废弃（2026-08，issue #5）：以下方式全部由常驻 `scripts/agent-daemon.mjs` 替代。**
+> **已废弃（2026-08，issue #5）：以下方式全部由常驻 `client/src/agent-daemon.mjs` 替代。**
 > 新设备不要再配置定时任务、alarm worker 或独立 chat-bridge。
 
 ### 旧模式 A：定时拉起 pi（已废弃）
@@ -190,7 +193,8 @@ daemon 按任务是否带项目目录选择工作方式：
 | `/api/agent/heartbeat` | POST | daemon | 显式心跳：刷新 `last_seen_at`，返回服务器时间 |
 | `/api/agent/poll` | POST | daemon | 查到期任务及协作回合，返回 `{tasks:[...]}`；放行时推进任务生命周期 |
 | `/api/agent/tasks/result` | POST | daemon | 仅异常退出/超时兜底上报 `{task_id,status:"failed",result}` |
-| `/api/agent/projects` | POST | daemon | 上报 `~/projects` 下的目录名 |
+| `/api/agent/projects` | POST | daemon | 上报 `~/projects` 下的目录名与已安装执行器 `clis` |
+| `/api/agent/config` | POST | daemon | 拉取平台指定执行器 `agent_cli` |
 | `/api/agent/pool` | POST | pi/兼容客户端 | 公共池列表，返回 `{pool:[...]}` |
 | `/api/agent/claim` | POST | pi/兼容客户端 | 原子认领公共池任务，body `{task_id}` |
 | `/api/agent/info` | POST | pi/兼容客户端 | 查询 agent 身份、标签、默认提示词和接单开关 |

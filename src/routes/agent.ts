@@ -46,9 +46,29 @@ agentRouter.post('/heartbeat', async (_req, res) => {
 /** 上报主机 ~/projects 下目录列表（bridge 常驻调用；创建主机会话时供选择工作目录） */
 agentRouter.post('/projects', async (req, res) => {
   const agent = getAgent();
-  const dirs = Array.isArray((req.body ?? {}).dirs) ? (req.body.dirs as unknown[]).map(String) : [];
-  await setAgentProjects(agent.id, dirs);
-  res.json({ ok: true, count: dirs.length });
+  const body = (req.body ?? {}) as { dirs?: unknown[]; clis?: unknown[] };
+  const hasDirs = Object.prototype.hasOwnProperty.call(body, 'dirs');
+  const hasClis = Object.prototype.hasOwnProperty.call(body, 'clis');
+  const dirs = Array.isArray(body.dirs) ? body.dirs.map(String) : [];
+  const supportedClis = new Set(['pi', 'copilot', 'claude', 'codex']);
+  const clis = Array.isArray(body.clis)
+    ? [...new Set(body.clis.map((cli) => String(cli).trim().toLowerCase()).filter((cli) => supportedClis.has(cli)))]
+    : [];
+  if (hasDirs) await setAgentProjects(agent.id, dirs);
+  if (hasClis) {
+    await query(`DELETE FROM agent_clis WHERE agent_id = ?`, [agent.id]);
+    for (const cli of clis) {
+      await query(`REPLACE INTO agent_clis (agent_id, cli) VALUES (?, ?)`, [agent.id, cli]);
+    }
+  }
+  res.json({ ok: true, count: dirs.length, clis });
+});
+
+/** 读取平台为本机指定的执行器；空值表示继续使用客户端本地配置。 */
+agentRouter.post('/config', async (_req, res) => {
+  const agent = getAgent();
+  const rows = (await query(`SELECT agent_cli FROM agents WHERE id = ? LIMIT 1`, [agent.id])) as Array<Record<string, unknown>>;
+  res.json({ agent_cli: rows.length > 0 && rows[0].agent_cli ? String(rows[0].agent_cli) : null });
 });
 
 // ─────────────────────────── 独立对话通道（chat bridge / 兜底轮询） ───────────────────────────

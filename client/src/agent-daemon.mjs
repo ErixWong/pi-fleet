@@ -9,32 +9,69 @@
 // 一台设备接入平台 = 装好 pi + 本脚本常驻，一条命令搞定。
 //
 // 运行：
-//   PLATFORM_URL=http://x PI_AGENT_KEY=pd-xxx node agent-daemon.mjs
-//   （key 缺省自动从 ~/.pi/agent/mcp.json 的 task-dispatch 段读取，与 chat-bridge 一致）
+//   PLATFORM_URL=http://x PI_AGENT_KEY=pd-xxx AGENT_CMD=auto node agent-daemon.mjs
+//   （key 缺省依次从 config.json、~/.pi/agent/mcp.json 的 task-dispatch 段读取）
 //
 // 功能：
 //   1. 连平台 WS（/api/agent/chat-stream）：管理员对话推送 → 拉起 pi --mode rpc 会话
 //      （打字机流式 / --session-id 续接 / 空闲 kill / 超时保护 / run_user sudo）
-//   2. 定时 poll（默认 60s，POLL_MS）：claimDueTasks → 新任务拉起 pi -p 一次性执行
+//   2. 定时 poll（默认 60s，POLL_MS）：claimDueTasks → 新任务拉起配置的 CLI 一次性执行
 //      （MCP task(submit) 交差；异常退出 / 超时 → POST /api/tasks/result failed 兜底）
 //   3. WS 断线 → 退回 chat-check 轮询（对话兜底）+ poll 继续（任务不受影响）
 //   4. ~/projects 目录扫描上报（主机会话工作目录选择）
 //
 // 环境变量：
 //   PLATFORM_URL        平台地址（默认 http://127.0.0.1:3000）
-//   PI_AGENT_KEY        agent key（优先；否则读 mcp.json task-dispatch）
+//   PI_AGENT_KEY        agent key（优先；否则读 config.json / mcp.json task-dispatch）
+//   AGENT_CMD           执行器：pi / copilot / claude / codex / auto
 //   POLL_MS             任务轮询周期（默认 60000）
 //   TASK_TIMEOUT_MS     单任务执行超时（默认 1800000 = 30min）
 //   WORK_ROOT           沙箱任务工作目录根（默认 ~/pi-agent-work）
 //   CHAT_*              对话参数（沿用 chat-bridge：CHAT_IDLE_KILL_MS / CHAT_PI_TIMEOUT_MS / CHAT_POLL_MS / CHAT_PI_THINKING）
 //   PI_CLI              pi CLI 绝对路径（默认自动探测）
-import { spawn, execSync } from 'node:child_process';
+import { spawn, execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 
-const BASE = process.env.PLATFORM_URL ?? 'http://127.0.0.1:3000';
+const SUPPORTED_CLIS = ['pi', 'copilot', 'claude', 'codex'];
+const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'config.json');
+const PI_MCP_CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json');
+
+function readJsonFile(filePath) {
+  try {
+    const value = JSON.parse(readFileSync(filePath, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function readClientConfig() {
+  const cfg = readJsonFile(CLIENT_CONFIG_PATH);
+  return {
+    url: typeof cfg.url === 'string' ? cfg.url.trim() : '',
+    key: typeof cfg.key === 'string' ? cfg.key : '',
+    cli: typeof cfg.cli === 'string' ? cfg.cli.trim().toLowerCase() : '',
+  };
+}
+
+function normalizeCli(value) {
+  const cli = String(value ?? '').trim().toLowerCase();
+  return cli === 'auto' || SUPPORTED_CLIS.includes(cli) ? cli : null;
+}
+
+function normalizeBaseUrl(value) {
+  return String(value ?? '').trim().replace(/\/+$/, '');
+}
+
+const CLIENT_CONFIG = readClientConfig();
+const PI_MCP_CONFIG = readJsonFile(PI_MCP_CONFIG_PATH);
+const PI_MCP_SERVER = PI_MCP_CONFIG.mcpServers?.['task-dispatch'];
+const MCP_SERVER_URL = typeof PI_MCP_SERVER?.url === 'string' ? normalizeBaseUrl(PI_MCP_SERVER.url) : '';
+const MCP_BASE_URL = MCP_SERVER_URL.replace(/\/mcp$/, '');
+const BASE = normalizeBaseUrl(process.env.PLATFORM_URL || CLIENT_CONFIG.url || MCP_BASE_URL || 'http://127.0.0.1:3000');
 const WS_URL = BASE.replace(/^http/, 'ws') + '/api/agent/chat-stream';
 const POLL_MS = Number(process.env.POLL_MS ?? 60_000);                 // 任务轮询周期
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS ?? 1_800_000); // 单任务执行超时
@@ -46,18 +83,15 @@ const PI_THINKING = process.env.CHAT_PI_THINKING ?? 'low';             // 对话
 const WORK_ROOT = process.env.WORK_ROOT ?? path.join(os.homedir(), 'pi-agent-work');
 
 function readKeyFromPiMcp() {
-  try {
-    const cfg = JSON.parse(readFileSync(path.join(os.homedir(), '.pi', 'agent', 'mcp.json'), 'utf8'));
-    const srv = cfg.mcpServers?.['task-dispatch'];
-    if (srv?.bearerToken) return srv.bearerToken;
-    if (srv?.bearerTokenEnv) return process.env[srv.bearerTokenEnv] ?? '';
-  } catch { /* fallthrough */ }
+  if (typeof PI_MCP_SERVER?.bearerToken === 'string') return PI_MCP_SERVER.bearerToken;
+  if (typeof PI_MCP_SERVER?.bearerTokenEnv === 'string') return process.env[PI_MCP_SERVER.bearerTokenEnv] ?? '';
   return '';
 }
-const AGENT_KEY = process.env.PI_AGENT_KEY || readKeyFromPiMcp();
+
+const AGENT_KEY = process.env.PI_AGENT_KEY || CLIENT_CONFIG.key || readKeyFromPiMcp();
 if (!AGENT_KEY) { console.error('缺少 key：设 PI_AGENT_KEY 环境变量，或在 ~/.pi/agent/mcp.json 配 task-dispatch 段'); process.exit(1); }
 
-function piCli() {
+function configuredPiCli() {
   if (process.env.PI_CLI) return process.env.PI_CLI;
   if (process.platform === 'win32' && process.env.APPDATA) {
     const c = path.join(process.env.APPDATA, 'npm', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js');
@@ -65,15 +99,116 @@ function piCli() {
   }
   return null;
 }
-const CLI = piCli();
 
-/** pi 调用方式：优先绝对路径（sudo 场景 PATH 受 secure_path 限制） */
-function piInvocation() {
-  if (CLI) return { cmd: process.execPath, args: [CLI] };
-  const candidates = ['/usr/local/bin/pi', '/usr/bin/pi', path.join(os.homedir(), '.npm-global', 'bin', 'pi')];
-  for (const p of candidates) if (existsSync(p)) return { cmd: p, args: [] };
-  return { cmd: 'pi', args: [] };
+/** 探测本机已安装的 CLI；systemd 环境也使用 which/where，避免依赖交互 shell。 */
+function commandExists(command) {
+  if (command === 'pi' && configuredPiCli()) return true;
+  const probe = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(probe, [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  return result.status === 0;
 }
+
+export function detectAvailableClis() {
+  return SUPPORTED_CLIS.filter(commandExists);
+}
+
+function resolveCli(cli) {
+  const normalized = normalizeCli(cli) ?? 'pi';
+  if (normalized !== 'auto') return normalized;
+  return detectAvailableClis()[0] ?? 'pi';
+}
+
+/** 解析 CLI 绝对路径（sudo 场景 PATH 受 secure_path 限制）。 */
+function cliInvocation(cli) {
+  const selected = resolveCli(cli);
+  if (selected === 'pi') {
+    const configured = configuredPiCli();
+    if (configured) {
+      return /\.m?js$/i.test(configured)
+        ? { cmd: process.execPath, args: [configured] }
+        : { cmd: configured, args: [] };
+    }
+  }
+  const probe = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(probe, [selected], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const found = String(result.stdout ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  return { cmd: found || selected, args: [] };
+}
+
+function mcpConfig() {
+  return {
+    mcpServers: {
+      'task-dispatch': {
+        type: 'http',
+        url: `${BASE}/mcp`,
+        headers: { Authorization: `Bearer ${AGENT_KEY}` },
+      },
+    },
+  };
+}
+
+function invocationEnv() {
+  return { ...process.env, PLATFORM_URL: BASE, PI_AGENT_KEY: AGENT_KEY };
+}
+
+/**
+ * 构造不同执行器的命令行调用。
+ * chat 目前依赖 pi 的 RPC JSON 协议；其他 CLI 统一回退到 pi 并明确提示。
+ */
+export function buildAgentInvocation(cli, { mode, prompt = '', sessionId = '', cwd: _cwd = undefined }) {
+  const selected = resolveCli(cli);
+  if (mode === 'chat' && selected !== 'pi') {
+    console.warn(`[daemon] ${selected} 暂不支持当前对话 RPC 协议，回退 pi`);
+    return buildAgentInvocation('pi', { mode, prompt, sessionId, cwd: _cwd });
+  }
+
+  const invocation = cliInvocation(selected);
+  if (mode === 'chat') {
+    return {
+      ...invocation,
+      args: [...invocation.args, '--mode', 'rpc', '--session-id', sessionId, '--thinking', PI_THINKING],
+      env: invocationEnv(),
+    };
+  }
+
+  if (selected === 'copilot') {
+    return {
+      ...invocation,
+      args: [
+        ...invocation.args,
+        '-p',
+        '-s',
+        '--allow-all-tools',
+        '--additional-mcp-config',
+        JSON.stringify(mcpConfig()),
+        prompt,
+      ],
+      env: invocationEnv(),
+    };
+  }
+  if (selected === 'claude') {
+    return {
+      ...invocation,
+      args: [...invocation.args, '-p', '--mcp-config', JSON.stringify(mcpConfig()), prompt],
+      env: invocationEnv(),
+    };
+  }
+  if (selected === 'codex') {
+    return {
+      ...invocation,
+      args: [...invocation.args, 'exec', '--mcp-config', JSON.stringify(mcpConfig()), prompt],
+      env: invocationEnv(),
+    };
+  }
+  return {
+    ...invocation,
+    args: [...invocation.args, '-p', '-a', prompt],
+    env: invocationEnv(),
+  };
+}
+
+const LOCAL_AGENT_CMD = normalizeCli(process.env.AGENT_CMD || CLIENT_CONFIG.cli) || 'pi';
+let AGENT_CMD = LOCAL_AGENT_CMD;
 
 // ── 平台 REST ──
 async function api(method, pathname, body) {
@@ -86,12 +221,22 @@ async function api(method, pathname, body) {
   return data;
 }
 
+async function refreshAgentConfig() {
+  try {
+    const data = await api('POST', '/api/agent/config', {});
+    const platformCli = normalizeCli(data.agent_cli);
+    AGENT_CMD = platformCli || LOCAL_AGENT_CMD;
+  } catch (e) {
+    console.log(`[daemon] 刷新执行器配置失败: ${e.message}`);
+  }
+}
+
 // ════════════════════════════════ 一、任务执行（原模式 A/B） ════════════════════════════════
 
 const execSessions = new Map();   // taskId -> { proc, startedAt, timeoutTimer, outputLog }
 const recentlyDone = new Map();   // taskId -> timestamp（防 poll 重复拉起）
 
-/** poll 一次：拿到到期任务 → 逐个拉起 pi 执行（正在执行/刚完成的跳过） */
+/** poll 一次：拿到到期任务 → 逐个拉起配置的 CLI 执行（正在执行/刚完成的跳过） */
 async function pollTasks() {
   let tasks = [];
   try {
@@ -101,13 +246,15 @@ async function pollTasks() {
     console.log(`[daemon] poll 失败: ${e.message}`);
     return;
   }
+  await refreshAgentConfig();
+  await reportProjects();
   const now = Date.now();
   for (const [tid, ts] of recentlyDone) if (now - ts > RECENT_DONE_TTL_MS) recentlyDone.delete(tid);
   let started = 0;
   for (const t of tasks) {
     const tid = String(t.task_id);
     if (execSessions.has(tid) || recentlyDone.has(tid)) continue;
-    spawnTaskPi(t);
+    spawnTaskAgent(t);
     started++;
   }
   if (started > 0) console.log(`[daemon] poll: ${tasks.length} 个到期，拉起 ${started} 个`);
@@ -122,8 +269,11 @@ function resolveTaskWorkdir(workdir, home = os.homedir()) {
   return resolved === homeResolved || resolved.startsWith(homeResolved + path.sep) ? resolved : null;
 }
 
-/** 任务启动语（-p 模式，pi 自取上下文；workdir 项目模式不污染项目目录，信息全在启动语） */
+/** 任务启动语（CLI 自取上下文；workdir 项目模式不污染项目目录，信息全在启动语） */
 function taskPrompt(t, cwd, sandboxDir) {
+  const identityStep = resolveCli(AGENT_CMD) === 'pi'
+    ? '第一个动作调 whoami 确认身份'
+    : '第一个动作通过 MCP 工具 task-dispatch 调用 whoami 确认身份';
   const lines = [
     `你是主机 agent（agent_id 由 whoami 确认）。平台有一个到期任务需要你处理：`,
     `- task_id: ${t.task_id}`,
@@ -133,7 +283,7 @@ function taskPrompt(t, cwd, sandboxDir) {
   if (cwd && sandboxDir === null) lines.push(`- 工作目录: ${cwd}（去那里干活，项目目录不被污染；本任务信息只在此 prompt 中）`);
   lines.push(
     `执行步骤：`,
-    `1. 第一个动作调 whoami 确认身份，再调 task(list,scope=due) 找到本 task_id 的任务，调 task(detail) 获取完整上下文（消息流/交付物要求）。`,
+    `1. ${identityStep}，再调 task(list,scope=due) 找到本 task_id 的任务，调 task(detail) 获取完整上下文（消息流/交付物要求）。`,
     `2. 若该任务状态是 claimed，说明你上次交付被验收打回——读拒绝理由，修复后重新提交（claimed 状态下允许再次 submit）。`,
     `3. 认领/开工后立即 task(reply) 回复 'received, starting work'。`,
     `4. 完成前 task(reply) 一次介绍交付物（简短摘要 + 你的过程/困难/心得）。`,
@@ -143,8 +293,8 @@ function taskPrompt(t, cwd, sandboxDir) {
   return lines.join('\n');
 }
 
-/** 拉起 pi 执行单个任务（-p 一次性；交差靠 MCP task(submit)，本函数只兜底失败） */
-function spawnTaskPi(t) {
+/** 拉起执行器执行单个任务（一次性；交差靠 MCP task(submit)，本函数只兜底失败） */
+function spawnTaskAgent(t) {
   const tid = String(t.task_id);
   const home = os.homedir();
   const wd = resolveTaskWorkdir(t.workdir);
@@ -161,13 +311,12 @@ function spawnTaskPi(t) {
     } catch (e) { console.log(`[daemon] 写 AGENTS.md 失败: ${e.message}`); }
   }
 
-  const { cmd, args: invArgs } = piInvocation();
   const prompt = taskPrompt(t, wd ?? null, sandbox);
+  const invocation = buildAgentInvocation(AGENT_CMD, { mode: 'task', prompt, sessionId: tid, cwd });
   const outLog = sandbox ? path.join(sandbox, 'output', 'stdout.txt') : null;
   console.log(`[daemon] 执行任务 ${tid} cwd=${cwd}` + (t.workdir ? '（项目目录）' : '（沙箱）'));
-  // 注意：pi 没有 --cwd 参数，工作目录用 spawn 的 cwd 选项注入
-  const child = spawn(cmd, [...invArgs, '-p', '-a', prompt], {
-    cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  const child = spawn(invocation.cmd, invocation.args, {
+    cwd, env: invocation.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   const s = { proc: child, startedAt: Date.now(), timeoutTimer: null, outBuf: '' };
   execSessions.set(tid, s);
@@ -188,19 +337,19 @@ function spawnTaskPi(t) {
     recentlyDone.set(tid, Date.now());
     const tail = s.outBuf.split('\n').slice(-5).join('\n');
     if (code === 0) {
-      // 正常退出：pi 已通过 MCP task(submit) 交差（含验收链），daemon 不干预
+      // 正常退出：CLI 已通过 MCP task(submit) 交差（含验收链），daemon 不干预
       console.log(`[daemon] 任务 ${tid} 正常完成（code=0）`);
     } else {
       console.log(`[daemon] 任务 ${tid} 异常退出 code=${code} signal=${signal}，兜底标记失败`);
-      void reportTaskFailed(tid, `pi 执行异常退出（code=${code ?? signal ?? '?'}）\n\n--- 输出尾部 ---\n${tail}`);
+      void reportTaskFailed(tid, `执行器异常退出（code=${code ?? signal ?? '?'}）\n\n--- 输出尾部 ---\n${tail}`);
     }
   });
   child.on('error', (e) => {
-    console.log(`[daemon] 任务 ${tid} 无法启动 pi: ${e.message}`);
+    console.log(`[daemon] 任务 ${tid} 无法启动执行器: ${e.message}`);
     clearTimeout(s.timeoutTimer);
     execSessions.delete(tid);
     recentlyDone.set(tid, Date.now());
-    void reportTaskFailed(tid, `pi 启动失败：${e.message}`);
+    void reportTaskFailed(tid,     `执行器启动失败：${e.message}`);
   });
 }
 
@@ -234,7 +383,11 @@ function scanProjects() {
 }
 async function reportProjects() {
   const dirs = scanProjects();
-  try { await api('POST', '/api/agent/projects', { dirs }); console.log(`[daemon] 上报 ~/projects ${dirs.length} 个目录`); }
+  const clis = detectAvailableClis();
+  try {
+    await api('POST', '/api/agent/projects', { dirs, clis });
+    console.log(`[daemon] 上报 ~/projects ${dirs.length} 个目录，执行器 ${clis.join(',') || '无'}`);
+  }
   catch (e) { console.log(`[daemon] 上报 ~/projects 失败: ${e.message}`); }
 }
 function startProjectsTimer() {
@@ -278,19 +431,20 @@ function scheduleIdleKill(convId) {
 }
 
 function spawnPiProcess(convId, s, cwd) {
-  const args = ['--mode', 'rpc', '--session-id', `chat-${convId}`, '--thinking', PI_THINKING];
+  const invocation = buildAgentInvocation(AGENT_CMD, {
+    mode: 'chat',
+    prompt: '',
+    sessionId: `chat-${convId}`,
+    cwd,
+  });
+  const args = [...invocation.args];
   if (s.name) args.push('--name', String(s.name).slice(0, 120));
-  const nodeExe = process.execPath;
   const runUser = s.runUser && s.runUser !== (process.env.USER || os.userInfo().username) ? s.runUser : null;
   if (runUser) {
-    const { cmd, args: invArgs } = piInvocation();
-    const sudoArgs = ['-n', '-u', runUser, '-H', '--', cmd, ...invArgs, ...args];
-    return spawn('sudo', sudoArgs, { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const sudoArgs = ['-n', '-u', runUser, '-H', '--', invocation.cmd, ...args];
+    return spawn('sudo', sudoArgs, { cwd, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   }
-  // 统一走 piInvocation（绝对路径优先，避免 PATH 不含 pi 时报 ENOENT）；
-  // CLI 命中时 cmd=node、args=[cli.js]；回退时 cmd='pi' 靠 PATH
-  const { cmd, args: invArgs } = piInvocation();
-  return spawn(cmd, [...invArgs, ...args], { cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  return spawn(invocation.cmd, args, { cwd, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 }
 
 function spawnPi(convId, onEvent) {
@@ -477,4 +631,4 @@ connect();
 startTaskPolling();
 startProjectsTimer();
 void reportProjects();
-console.log(`[daemon] agent-daemon 启动 key=${AGENT_KEY.slice(0, 8)}… pi=${CLI ?? 'pi'} work=${WORK_ROOT} poll=${POLL_MS / 1000}s`);
+console.log(`[daemon] agent-daemon 启动 key=${AGENT_KEY.slice(0, 8)}… cli=${AGENT_CMD} work=${WORK_ROOT} poll=${POLL_MS / 1000}s`);

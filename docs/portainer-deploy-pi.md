@@ -23,7 +23,7 @@
 |---|---|---|
 | `/docker/pi-hosts/host-{N}/projects` | `/home/app/projects` | 各主机 `~/projects`（持久化，agent 工作目录） |
 | `/docker/pi-hosts/conf` | `/conf:ro` | pi 模型配置（`models.json` + `settings.json`，含 relay key） |
-| `/home/eric/projects/pi-market` | `/opt/pi-market:ro` | agent-daemon 脚本 `scripts/agent-daemon.mjs` + node_modules（改代码即生效） |
+| `/home/eric/projects/pi-market` | `/opt/pi-market:ro` | npm 客户端 `client/src/agent-daemon.mjs` + node_modules（改代码即生效） |
 | `/docker/pi-hosts/build/entrypoint.sh` | `/opt/entrypoint.sh:ro` | 初始化脚本（apt 装 sshd/sudo → npm 装 pi → 拷 pi 配置 → sshd → agent-daemon；改脚本 `docker restart` 即生效） |
 
 **环境变量（每个容器一份）：**
@@ -35,7 +35,7 @@
 | `HOST_NAME` | `pi-host-{N}` | agent 名 |
 | `HOST_HOSTNAME` | `pi-host-{N}` | 主机名 |
 | `SSH_PASSWORD` | 自定义 | root/app 的 SSH 密码（默认 `pi-host`） |
-| `BRIDGE_SCRIPT` | `/opt/pi-market/scripts/agent-daemon.mjs` | agent-daemon 入口（挂载自宿主机） |
+| `BRIDGE_SCRIPT` | `/opt/pi-market/client/src/agent-daemon.mjs` | agent-daemon 入口（挂载自宿主机） |
 
 ---
 
@@ -97,7 +97,7 @@ services:
       - HOST_NAME=pi-host-1
       - HOST_HOSTNAME=pi-host-1
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/client/src/agent-daemon.mjs
     restart: unless-stopped
 
   host-2:
@@ -118,7 +118,7 @@ services:
       - HOST_NAME=pi-host-2
       - HOST_HOSTNAME=pi-host-2
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/client/src/agent-daemon.mjs
     restart: unless-stopped
 
   host-3:
@@ -139,7 +139,7 @@ services:
       - HOST_NAME=pi-host-3
       - HOST_HOSTNAME=pi-host-3
       - SSH_PASSWORD=${SSH_PASSWORD:-pi-host}
-      - BRIDGE_SCRIPT=/opt/pi-market/scripts/agent-daemon.mjs
+      - BRIDGE_SCRIPT=/opt/pi-market/client/src/agent-daemon.mjs
     restart: unless-stopped
 ```
 
@@ -199,7 +199,7 @@ ssh app@127.0.0.1 -p 2201           # SSH 可登录（密码 = SSH_PASSWORD）
 **更新流程**：
 
 1. 只改 compose（环境变量/挂载/端口）→ `StackUpdate` 直接生效
-2. 改初始化脚本 `entrypoint.sh` / agent-daemon 脚本（`scripts/agent-daemon.mjs`）→ 无需重建：两者都是 ro 挂载，`docker restart pi-host-N` 即生效
+2. 改初始化脚本 `entrypoint.sh` / agent-daemon 脚本（`client/src/agent-daemon.mjs`）→ 无需重建：两者都是 ro 挂载，`docker restart pi-host-N` 即生效
 3. 注意：stack 更新（`StackUpdate`）会**重建容器** → 首次启动重新执行 `entrypoint.sh` 的依赖安装（apt+npm 约 1-2 分钟）；只想重载脚本用 `docker restart` 避免重装
 
 **改 key / 密码** → `StackUpdate` 传新的 `Env` 数组。

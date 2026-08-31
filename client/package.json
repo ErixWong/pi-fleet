@@ -1,0 +1,19 @@
+{
+  "name": "@pi-market/pi-agent-client",
+  "version": "0.1.0",
+  "description": "任务分发平台 Agent 客户端与常驻 daemon",
+  "type": "module",
+  "bin": {
+    "pi-agent": "bin/pi-agent.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8"
+  }
+}

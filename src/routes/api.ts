@@ -66,6 +66,22 @@ function agentOffline(lastSeen: unknown, offlineAfterMin: number): boolean {
   return Date.now() - seen > offlineAfterMin * 60 * 1000;
 }
 
+const SUPPORTED_AGENT_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'auto']);
+
+function normalizeAgentCli(value: unknown): string | null {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const cli = String(value).trim().toLowerCase();
+  if (!SUPPORTED_AGENT_CLIS.has(cli)) throw new Error('执行器必须是 pi|copilot|claude|codex|auto');
+  return cli;
+}
+
+async function agentCliWarning(agentId: number, cli: string | null): Promise<string | null> {
+  if (!cli || cli === 'pi' || cli === 'auto') return null;
+  const rows = (await query(`SELECT cli FROM agent_clis WHERE agent_id = ?`, [agentId])) as Array<Record<string, unknown>>;
+  if (rows.some((row) => String(row.cli).toLowerCase() === cli)) return null;
+  return `主机尚未上报 ${cli}，保存后 daemon 将在该执行器不可用时启动失败`;
+}
+
 // ─────────────────────────── 鉴权辅助 ───────────────────────────
 function isAdmin(req: Request): boolean {
   return Boolean((req.session as { admin?: boolean } | undefined)?.admin);
@@ -188,7 +204,7 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
+    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.agent_cli, a.status, a.last_seen_at, a.created_at
        FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
     [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
@@ -212,6 +228,7 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
     accept_external?: boolean;
     /** 运行 pi 的默认用户（部署时指定，不填=bridge 当前用户） */
     run_user?: string | null;
+    agent_cli?: string | null;
   };
   const name = (body.name ?? '').trim();
   if (!name) {
@@ -224,12 +241,19 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
   const hostname = (body.hostname ?? '').trim();
   const description = (body.description ?? '').trim();
   const customPrompt = (body.system_prompt ?? '').trim();
+  let agentCli: string | null;
+  try {
+    agentCli = normalizeAgentCli(body.agent_cli);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '执行器不合法' });
+    return;
+  }
   const systemPrompt =
     customPrompt ||
     `你是主机「${name}」的 agent（agent_id: ${agentId}）。${hostname ? `位于 ${hostname}。` : ''}${description ? `职责：${description}。` : ''}通过任务分发平台接收任务并执行，完成后汇报结果。`;
   await query(
-    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, key_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, agent_cli, key_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       agentId,
       name,
@@ -239,11 +263,12 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
       (body.tags ?? '').trim(),
       body.accept_external ? 1 : 0,
       body.run_user === undefined || body.run_user === null || String(body.run_user).trim() === '' ? null : String(body.run_user).trim(),
+      agentCli,
       hashApiKey(key),
     ],
   );
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, tags, accept_external, run_user, status, last_seen_at, created_at
+    `SELECT id, agent_id, name, hostname, description, tags, accept_external, run_user, agent_cli, status, last_seen_at, created_at
        FROM agents WHERE agent_id = ?`,
     [agentId],
   );
@@ -254,7 +279,7 @@ apiRouter.post('/agents', requireAdminJson, async (req, res) => {
 apiRouter.get('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) => {
   const id = Number(req.params.id);
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status,
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, agent_cli, status,
             last_seen_at, created_at
        FROM agents WHERE id = ? AND visible = 1`,
     [id],
@@ -267,6 +292,9 @@ apiRouter.get('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) =>
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   agent.offline = agentOffline(agent.last_seen_at, offlineAfterMin);
   agent.tags_detail = await getAgentTags(Number(agent.id));
+  const cliRows = (await query(`SELECT cli FROM agent_clis WHERE agent_id = ? ORDER BY cli`, [id])) as Array<Record<string, unknown>>;
+  const clis = cliRows.map((row) => String(row.cli));
+  agent.clis = clis;
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const totalRows = (await query(`SELECT COUNT(*) AS c FROM tasks WHERE assignee_id = ?`, [id])) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
@@ -275,7 +303,7 @@ apiRouter.get('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) =>
        FROM tasks WHERE assignee_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [id, pageSize, offset],
   );
-  res.json({ agent, tasks, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
+  res.json({ agent, clis, tasks, total, page, page_size: pageSize, offline_after_min: offlineAfterMin });
 });
 
 apiRouter.post('/agents/:id/toggle', requireAdminJson, agentIdGuard, async (req, res) => {
@@ -303,8 +331,10 @@ apiRouter.put('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) =>
     accept_external?: boolean;
     /** 运行 pi 的默认用户（部署时指定；传空字符串=清除回 bridge 当前用户） */
     run_user?: string | null;
+    /** 平台指定执行器；空字符串/null=使用客户端本地配置 */
+    agent_cli?: string | null;
   };
-  const exists = (await query(`SELECT id, name, system_prompt FROM agents WHERE id = ? AND visible = 1`, [id])) as Array<
+  const exists = (await query(`SELECT id, agent_id, name, system_prompt, agent_cli FROM agents WHERE id = ? AND visible = 1`, [id])) as Array<
     Record<string, unknown>
   >;
   if (exists.length === 0) {
@@ -317,6 +347,14 @@ apiRouter.put('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) =>
     res.status(400).json({ error: '名称不能为空' });
     return;
   }
+  let agentCli: string | null | undefined;
+  try {
+    agentCli = body.agent_cli === undefined ? undefined : normalizeAgentCli(body.agent_cli);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '执行器不合法' });
+    return;
+  }
+  const warning = agentCli === undefined ? null : await agentCliWarning(id, agentCli);
   // 提示词：传入非空则用传入值；传入空字符串 = 清空为自动生成；未传则保持原样
   let systemPrompt: string | undefined;
   if (body.system_prompt !== undefined) {
@@ -338,15 +376,23 @@ apiRouter.put('/agents/:id', requireAdminJson, agentIdGuard, async (req, res) =>
     fields.push('run_user = ?');
     vals.push(ru === '' ? null : ru);
   }
+  if (agentCli !== undefined) {
+    fields.push('agent_cli = ?');
+    vals.push(agentCli);
+  }
   if (fields.length > 0) {
     await query(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`, [...vals, id]);
   }
   const rows = await query(
-    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, status, last_seen_at, created_at
+    `SELECT id, agent_id, name, hostname, description, system_prompt, tags, accept_external, run_user, agent_cli, status, last_seen_at, created_at
        FROM agents WHERE id = ? AND visible = 1`,
     [id],
   );
-  res.json({ agent: rows[0] });
+  const updated = rows[0] as Record<string, unknown>;
+  const cliRows = (await query(`SELECT cli FROM agent_clis WHERE agent_id = ? ORDER BY cli`, [id])) as Array<Record<string, unknown>>;
+  const clis = cliRows.map((row) => String(row.cli));
+  updated.clis = clis;
+  res.json({ agent: updated, clis, ...(warning ? { warning } : {}) });
 });
 
 /** 重置 agent key：吊销旧 key，生成新 key（一次性返回） */
@@ -376,6 +422,7 @@ apiRouter.post('/agents/:id/delete', requireAdminJson, agentIdGuard, async (req,
     ['plans', 'creator_agent_id'],
     ['agent_tags', 'agent_id'],
     ['agent_projects', 'agent_id'],
+    ['agent_clis', 'agent_id'],
     ['tasks', 'creator_id'],
     ['tasks', 'assignee_id'],
     ['deliverables', 'agent_id'],

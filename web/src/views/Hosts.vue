@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Modal } from 'bootstrap';
 import { api } from '../api';
@@ -62,9 +62,16 @@ const createBusy = ref(false);
 
 // 编辑主机弹窗（名称/标识/描述/提示词/接外单）
 const showEdit = ref(false);
-const editForm = ref({ name: '', hostname: '', description: '', system_prompt: '', accept_external: false, run_user: '' });
+const editForm = ref({ name: '', hostname: '', description: '', system_prompt: '', accept_external: false, run_user: '', agent_cli: '' });
 const editBusy = ref(false);
 const editMsg = ref('');
+
+const availableClis = computed(() => {
+  const current = agent.value?.agent_cli || editForm.value.agent_cli;
+  const values = ['pi', 'auto', ...(agent.value?.clis || [])];
+  if (current) values.push(current);
+  return [...new Set(values)];
+});
 
 // 注册主机弹窗
 const tagGroups = ref([]);
@@ -324,6 +331,7 @@ function openEdit() {
     system_prompt: a.system_prompt ?? '',
     accept_external: !!a.accept_external,
     run_user: a.run_user ?? '',
+    agent_cli: a.agent_cli ?? '',
   };
   editMsg.value = '';
   showEdit.value = true;
@@ -342,6 +350,7 @@ async function submitEdit() {
       system_prompt: editForm.value.system_prompt,
       accept_external: editForm.value.accept_external,
       run_user: editForm.value.run_user.trim(),
+      agent_cli: editForm.value.agent_cli || null,
     };
     await api.updateAgent(selectedAgent.value.id, payload);
     showEdit.value = false;
@@ -550,6 +559,11 @@ function badge(status) {
                       </td></tr>
                     <tr><th class="text-secondary">运行用户</th>
                       <td class="small">{{ agent.run_user || 'bridge 当前用户（未指定）' }}</td></tr>
+                    <tr><th class="text-secondary">执行器</th>
+                      <td>
+                        <span class="badge text-bg-primary">{{ agent.agent_cli || '本机配置' }}</span>
+                        <span class="text-secondary small ms-1">已上报：{{ (agent.clis || []).join(', ') || '—' }}</span>
+                      </td></tr>
                     <tr><th class="text-secondary">状态</th>
                       <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span>
                         <span v-if="agent.offline" class="badge text-bg-danger ms-1" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${agent.last_seen_at || '从未连接'}）`">失联</span>
@@ -675,6 +689,11 @@ function badge(status) {
             </div>
             <label class="form-label small mb-1">运行 pi 的用户（部署时指定；空=bridge 当前用户；非当前用户需远端 sudoers 白名单）</label>
             <input v-model="editForm.run_user" class="form-control form-control-sm mb-2" placeholder="如 pi-agent">
+            <label class="form-label small mb-1">执行器（主机上报能力后可选对应 CLI）</label>
+            <select v-model="editForm.agent_cli" class="form-select form-select-sm mb-2">
+              <option value="">未指定（使用客户端本地配置）</option>
+              <option v-for="cli in availableClis" :key="cli" :value="cli">{{ cli }}</option>
+            </select>
             <label class="form-label small mb-1">默认提示词（agent 启动时加载；清空=自动生成）</label>
             <textarea v-model="editForm.system_prompt" class="form-control form-control-sm" rows="5"
               placeholder="你是 web-01 的运维 agent，负责..."></textarea>
