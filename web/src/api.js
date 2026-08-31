@@ -25,6 +25,7 @@ export const api = {
   stats: () => req('GET', '/api/stats'),
   events: (params = {}) => req('GET', `/api/events?${new URLSearchParams(params)}`),
   agents: (page = 1, pageSize = 10, tag = '') => req('GET', `/api/agents?page=${page}&page_size=${pageSize}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`),
+  agentsAll: () => req('GET', '/api/agents?all=1'),
   tags: () => req('GET', '/api/tags'),
   setAgentTags: (id, tags) => req('POST', `/api/agents/${id}/tags`, { tags }),
   setTaskTags: (id, tags) => req('POST', `/api/tasks/${id}/tags`, { tags }),

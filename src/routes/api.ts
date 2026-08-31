@@ -183,6 +183,7 @@ apiRouter.get('/events', requireAdminJson, async (req, res) => {
 
 // ─────────────────────────── Agent ───────────────────────────
 apiRouter.get('/agents', requireAdminJson, async (req, res) => {
+  const fetchAll = req.query.all === '1' || req.query.all === 'true';
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   // 标签过滤（?tag=linux,arm 逗号分隔，any 语义：命中任意一个即可）
@@ -200,9 +201,12 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
-       FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
-    [...filterParams, pageSize, offset],
+    fetchAll
+      ? `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
+           FROM agents a${join}${where} ORDER BY a.created_at DESC`
+      : `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.status, a.last_seen_at, a.created_at
+           FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
+    fetchAll ? filterParams : [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
   const tagsByAgent = await tagsDetailForAgents(agents.map((a) => Number(a.id)));
   const list = agents.map((a) => ({
