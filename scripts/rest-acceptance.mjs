@@ -1,4 +1,6 @@
 // REST 端点验收：heartbeat / info / poll / tasks/result / renew / reports（Bearer key）
+import 'dotenv/config';
+
 const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
 let cookie = '';
@@ -46,7 +48,13 @@ const restoreLlm = async () => {
 };
 
 const { createPool } = await import('mariadb');
-const pool = createPool({ host: '127.0.0.1', port: 3306, user: 'root', password: 'erixPwd', database: 'task_dispatch' });
+const pool = createPool({
+  host: process.env.DB_HOST ?? '127.0.0.1',
+  port: Number(process.env.DB_PORT ?? 3306),
+  user: process.env.DB_USER ?? 'root',
+  password: process.env.DB_PASSWORD ?? '',
+  database: process.env.DB_NAME ?? 'task_dispatch',
+});
 
 let exitCode = 0;
 try {
@@ -82,7 +90,7 @@ const noStage = await api('POST', '/api/tasks', {
 check('任务必须从属 stage（缺 stage 拒绝）', noStage.status === 400, JSON.stringify(noStage.data));
 const manual = await api('POST', '/api/tasks', {
   title: 'REST 测试任务', plan_id: plan.plan_id, stage_id: plan.stage_id,
-  assignee_id: created.data.agent.id, instruction: '测试 REST 回传', workdir: `/tmp/proj-${Date.now()}`,  // 唯一 workdir 防同目录互踩
+  assignee_id: created.data.agent.id, instruction: '测试 REST 回传', workdir: `~/projects/rest-test-${Date.now()}`,  // 唯一 workdir 防同目录互踩
 });
 check('任务创建（挂 stage）', manual.status === 201, JSON.stringify(manual.data));
 const list = await api('GET', '/api/tasks');
@@ -92,7 +100,7 @@ check('列表含新任务', !!mTask, JSON.stringify(list.data.tasks));
 // poll 领取（协作回合）
 const poll = await api('POST', '/api/agent/poll', {}, KEY);
 check('poll 领取 manual 任务', poll.data.tasks.some((t) => t.task_id === mTask.task_id), JSON.stringify(poll.data));
-check('poll 返回 workdir', poll.data.tasks.find((t) => t.task_id === mTask.task_id)?.workdir?.startsWith('/tmp/proj-'));
+check('poll 返回 workdir', poll.data.tasks.find((t) => t.task_id === mTask.task_id)?.workdir?.startsWith('~/projects/rest-test-'));
 
 // manual 协作会话：reply 回复 + resolve 关闭
 const reply = await api('POST', '/api/agent/tasks/reply', {

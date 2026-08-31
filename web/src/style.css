@@ -322,6 +322,12 @@ body {
   gap: 0.45rem;
   width: 100%;
 }
+.rail-hosts {
+  flex: 0 1 auto;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
 .rail-divider {
   width: 32px;
   margin: 0.1rem 0 0.2rem;

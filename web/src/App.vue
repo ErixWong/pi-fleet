@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Dropdown } from 'bootstrap';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from './api';
@@ -22,6 +22,7 @@ const showSessionContext = computed(() => route.path === '/hosts' || route.path.
 const agents = ref([]);
 const agentLoadError = ref('');
 let agentTimer = null;
+let routeReady = false;
 
 const sortedAgents = computed(() => [...agents.value].sort((a, b) => {
   const aOnline = a.status === 'active' && !a.offline;
@@ -60,7 +61,24 @@ async function logout() {
 }
 
 onMounted(() => {
-  if (!isLogin.value) {
+  router.isReady().then(() => {
+    routeReady = true;
+    if (!isLogin.value) {
+      loadAgents();
+      agentTimer = setInterval(loadAgents, 30_000);
+    }
+  });
+});
+
+watch(() => route.path, () => {
+  if (!routeReady) return;
+  if (isLogin.value) {
+    if (agentTimer) clearInterval(agentTimer);
+    agentTimer = null;
+    agents.value = [];
+    return;
+  }
+  if (!agentTimer) {
     loadAgents();
     agentTimer = setInterval(loadAgents, 30_000);
   }
