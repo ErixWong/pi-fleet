@@ -416,7 +416,7 @@ function badge(status) {
 </script>
 
 <template>
-  <div class="hosts-workspace d-flex flex-column" style="height: calc(100vh - 88px)">
+  <div class="hosts-workspace d-flex flex-column" style="height: calc(100vh - 154px)">
     <!-- ========== 顶部横条：主机标题 + 展开/收起/注册 ========== -->
     <div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom flex-shrink-0">
       <button v-if="sidebarCollapsed" class="btn btn-sm btn-outline-primary" title="展开主机列表" @click="sidebarCollapsed = false">
