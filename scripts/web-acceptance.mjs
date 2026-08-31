@@ -1,6 +1,6 @@
-// Web UI 端到端验收（Playwright + chromium）：编排 UI 冒烟
+// Web UI 端到端验收（Playwright + chromium）：指挥中心与编排 UI 冒烟
 // 覆盖：登录 / 计划创建树表单（多 stage+多 task）/ 计划列表 / 树视图（当前高亮·后续置灰·stalled 标红）
-//       / 交付物可见性下拉改档 / failed 处置（重开） / 设置页
+//       / 窄栏主机导航 / Dashboard 活动流 / 交付物可见性下拉改档 / failed 处置（重开） / 设置页
 // 前置：后端已启动（node dist/src/index.js，端口 3000）、管理员 admin123、web/dist 已构建
 // 运行：node scripts/web-acceptance.mjs
 import 'dotenv/config';
@@ -85,14 +85,23 @@ try {
   await page.click('button:has-text("登录")');
   await page.waitForURL((u) => u.pathname === '/');
   check('登录后跳转仪表盘', page.url().endsWith('/'), page.url());
-  await page.waitForSelector('h4');
-  check('仪表盘渲染', (await page.locator('h4:has-text("仪表盘")').count()) === 1);
+  await page.waitForSelector('.app-shell');
+  check('指挥中心骨架渲染', (await page.locator('.app-rail').count()) === 1 && (await page.locator('.app-topbar').count()) === 1);
+  check('Dashboard 活动流容器渲染', (await page.locator('.activity-card').count()) === 1);
 
   // ── 2. 准备测试 agent（API） + 创建一次性 plan（UI 树表单） ──
   console.log('== 2. 创建计划（UI 树表单：2 stage / 3 task） ==');
   const ag = await api('POST', '/api/agents', { name: AGENT_NAME, hostname: '10.0.0.9', accept_external: true });
   agentId = ag.agent.agent_id;
   check('测试 agent 已创建（API 辅助）', !!agentId);
+
+  // ── 2.1 窄栏主机导航 + 活动流数据 ──
+  await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(300);
+  check('窄栏显示测试主机', (await page.locator('.rail-host').count()) >= 1);
+  await page.locator('.rail-host').last().click();
+  await page.waitForURL((u) => u.pathname === '/hosts' && u.searchParams.get('agent') !== null);
+  check('窄栏点击进入主机工作台', page.url().includes('/hosts?agent='));
 
   await page.goto(`${BASE}/plans`, { waitUntil: 'networkidle' });
   await page.click('button:has-text("创建计划")');
@@ -179,8 +188,17 @@ try {
   const reopenedDetail = await api('GET', `/api/tasks/${stage2Task.task_id}`);
   check('重开留痕回帖（[处置] 发起人重开）', reopenedDetail.messages.some((m) => m.content.includes('发起人重开') && m.content.includes('open')), JSON.stringify(reopenedDetail.messages.map((m) => m.content)));
 
-  // ── 6. 设置页渲染 ──
-  console.log('== 6. 设置页 ==');
+  // ── 6. Dashboard 活动流数据 + 设置页渲染 ──
+  console.log('== 6. Dashboard 活动流 ==');
+  const activity = await api('GET', '/api/events?page=1&page_size=20');
+  check('events API 返回计划/任务活动', activity.items.some((e) => e.type === 'plan.created' || e.type === 'task.created'));
+  await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.activity-item');
+  check('活动流显示事件条目', (await page.locator('.activity-item').count()) > 0);
+  check('活动流保留新建任务入口', (await page.locator('a:has-text("新建任务")').count()) === 1);
+
+  // ── 7. 设置页渲染 ──
+  console.log('== 7. 设置页 ==');
   await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
   check('设置页渲染（系统设置标题）', (await page.locator('h4:has-text("系统设置")').count()) === 1);
 

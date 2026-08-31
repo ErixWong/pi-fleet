@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, nextTick, watch } from 'vue';
 import { api } from '../api';
 import { renderMd } from '../md';
+import StatusBadge from './StatusBadge.vue';
 
 /** 管理员 ↔ agent 对话面板（4/12 侧栏，任务页/主机详情页复用）
  *  props.target：{ agent_id, agent_name, task_id?, task_title? }——任务对话带 task_id/task_title

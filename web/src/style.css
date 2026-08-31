@@ -254,6 +254,7 @@ body {
   backdrop-filter: blur(12px);
   box-shadow: var(--card-shadow);
   color: var(--text-strong);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .card-header {
   background: var(--surface-strong);
@@ -261,6 +262,7 @@ body {
 }
 .card:hover {
   border-color: var(--accent-border-hover);
+  transform: translateY(-2px);
 }
 
 /* ─────────────────────────── 应用骨架：窄栏 + 顶部栏 ─────────────────────────── */
