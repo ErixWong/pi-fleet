@@ -23,6 +23,7 @@ export const api = {
   login: (password) => req('POST', '/api/login', { password }),
   logout: () => req('POST', '/api/logout'),
   stats: () => req('GET', '/api/stats'),
+  events: (params = {}) => req('GET', `/api/events?${new URLSearchParams(params)}`),
   agents: (page = 1, pageSize = 10, tag = '') => req('GET', `/api/agents?page=${page}&page_size=${pageSize}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`),
   tags: () => req('GET', '/api/tags'),
   setAgentTags: (id, tags) => req('POST', `/api/agents/${id}/tags`, { tags }),

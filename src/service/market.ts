@@ -2,6 +2,7 @@ import { query, withTransaction } from '../db.js';
 import type { AgentIdentity } from '../auth.js';
 import { nowString } from '../scheduler.js';
 import { llmConfigured } from './llm.js';
+import { recordEvent } from './events.js';
 import { taskContentHash, nextTaskId, resolvePublishStatus } from './plans.js';
 import {
   getTaskMessages,
@@ -80,6 +81,11 @@ export async function claimTask(
     [agent.id, nowString(), nowString(), taskId, agent.id],
   );
   if (((r1 as unknown as { affectedRows?: number }).affectedRows ?? 0) === 1) {
+    await recordEvent('task.claimed', {
+      actor: 'agent',
+      ref_task: taskId,
+      summary: `${agent.name} 认领了公共池任务 ${taskId}`,
+    });
     return { ok: true, mode: 'pool' };
   }
 
@@ -90,6 +96,11 @@ export async function claimTask(
     [nowString(), nowString(), taskId, agent.id],
   );
   if (((r2 as unknown as { affectedRows?: number }).affectedRows ?? 0) === 1) {
+    await recordEvent('task.claimed', {
+      actor: 'agent',
+      ref_task: taskId,
+      summary: `${agent.name} 认领了指派任务 ${taskId}`,
+    });
     return { ok: true, mode: 'assigned' };
   }
 
@@ -232,6 +243,16 @@ export async function createTask(
         [Number((ins as unknown as { insertId: unknown }).insertId), '[闸门] 任务在非当前 stage，已置 blocked（前序 stage 完成后放行）'],
       );
     }
+    await recordEvent(
+      'task.created',
+      {
+        actor: 'agent',
+        ref_task: taskId,
+        ref_plan: planRow[0].plan_id as string | number,
+        summary: `${agent.name} 创建任务「${title}」（${status}）`,
+      },
+      conn,
+    );
     return { ok: true, task_id: taskId, status };
   });
 }
@@ -306,6 +327,11 @@ export async function reviseTask(
         [rows[0].id, agent.id, llmOn ? '[修订提交] 已重新提交 LLM 审核' : '[修订提交] 已重新发布（LLM 审核未配置，降级放行）'],
       );
     }
+    await recordEvent(
+      'task.revised',
+      { actor: 'agent', ref_task: taskId, summary: `${agent.name} 修订任务「${taskId}」` },
+      conn,
+    );
     return { ok: true };
   });
 }
@@ -602,6 +628,11 @@ export async function submitForReview(
           WHERE id = ?`,
         [result, nowString(), nowString(), t.id],
       );
+      await recordEvent(
+        'task.submitted',
+        { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 提交任务 ${taskId}，状态变为 done` },
+        conn,
+      );
       return { ok: true, status: 'done' };
     }
 
@@ -644,6 +675,11 @@ export async function submitForReview(
            VALUES (?, NULL, 'platform', 'verdict', ?)`,
           [t.id, `${reason}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
         );
+        await recordEvent(
+          'task.failed',
+          { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 提交任务 ${taskId} 未通过预检，任务失败` },
+          conn,
+        );
         return { ok: true, status: 'failed', reason: `${reason}（已达上限）` };
       }
       await conn.query(
@@ -654,6 +690,11 @@ export async function submitForReview(
         `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
          VALUES (?, NULL, 'platform', 'verdict', ?)`,
         [t.id, `${reason}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
+      );
+      await recordEvent(
+        'task.submitted',
+        { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 提交任务 ${taskId} 未通过预检，退回 claimed 续做` },
+        conn,
       );
       return { ok: true, status: 'claimed', reason };
     }
@@ -673,6 +714,11 @@ export async function submitForReview(
           `[平台预检] 交付物齐全，通过；已进入 LLM 验收（提交说明：${result.slice(0, 2000)}）`,
         ],
       );
+      await recordEvent(
+        'task.submitted',
+        { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 提交任务 ${taskId}，进入 LLM 验收` },
+        conn,
+      );
       return { ok: true, status: 'submitted' };
     }
     await conn.query(
@@ -686,6 +732,11 @@ export async function submitForReview(
         t.id,
         `[平台预检] 交付物齐全，通过（未配置 LLM 验收，降级放行并标记"未经 LLM 验收"）；已进入待发起人确认。提交说明：${result.slice(0, 2000)}`,
       ],
+    );
+    await recordEvent(
+      'task.submitted',
+      { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 提交任务 ${taskId}，进入发起人确认` },
+      conn,
     );
     return { ok: true, status: 'pending_confirm' };
   });
@@ -725,6 +776,11 @@ export async function approveTask(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, ?, 'agent', 'verdict', ?)`,
       [t.id, agent.id, `[验收通过 by ${agent.name}]${note}`],
+    );
+    await recordEvent(
+      'task.approved',
+      { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 验收通过任务 ${taskId}` },
+      conn,
     );
     return { ok: true, status: 'done' };
   });
@@ -767,6 +823,11 @@ export async function rejectTask(
          VALUES (?, ?, 'agent', 'verdict', ?)`,
         [t.id, agent.id, `[验收打回 by ${agent.name}] ${reason}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
       );
+      await recordEvent(
+        'task.rejected',
+        { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 打回任务 ${taskId}，达到尝试上限并失败` },
+        conn,
+      );
       return { ok: true, status: 'failed' };
     }
     await conn.query(
@@ -777,6 +838,11 @@ export async function rejectTask(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content)
        VALUES (?, ?, 'agent', 'verdict', ?)`,
       [t.id, agent.id, `[验收打回 by ${agent.name}] ${reason}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
+    );
+    await recordEvent(
+      'task.rejected',
+      { actor: 'agent', ref_task: t.id as string | number, summary: `${agent.name} 打回任务 ${taskId}，回到 claimed 续做` },
+      conn,
     );
     return { ok: true, status: 'claimed' };
   });
@@ -813,6 +879,11 @@ export async function cancelTask(
         [rows[0].id, agent.id, `[任务取消 by ${agent.name}] ${reason.trim()}`],
       );
     }
+    await recordEvent(
+      'task.cancelled',
+      { actor: 'agent', ref_task: rows[0].id as string | number, summary: `${agent.name} 取消任务 ${taskId}` },
+      conn,
+    );
     return { ok: true };
   });
 }
