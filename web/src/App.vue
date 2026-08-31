@@ -129,7 +129,7 @@ onBeforeUnmount(() => {
       </router-link>
     </aside>
 
-    <div class="app-workspace">
+    <div class="app-workspace" :class="{ 'app-workspace-chat': route.path.startsWith('/chat/') }">
       <header class="app-topbar">
         <div class="app-brand">
           <span class="app-brand-mark"><i class="bi bi-hdd-network"></i></span>
@@ -164,7 +164,7 @@ onBeforeUnmount(() => {
           <span class="text-secondary">{{ route.path.startsWith('/chat/') ? '独立对话' : '会话管理' }}</span>
         </div>
       </div>
-      <main class="app-content">
+      <main class="app-content" :class="{ 'app-content-chat': route.path.startsWith('/chat/') }">
         <router-view />
       </main>
     </div>

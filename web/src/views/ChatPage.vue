@@ -48,7 +48,17 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.chat-page { min-height: 0; }
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.chat-page :deep(.chat-panel-full) {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
 .chat-page-heading {
   display: flex;
   align-items: center;

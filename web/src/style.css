@@ -391,6 +391,10 @@ body {
   display: flex;
   flex-direction: column;
 }
+.app-workspace-chat {
+  height: 100vh;
+  min-height: 0;
+}
 .app-topbar {
   position: sticky;
   top: 0;
@@ -478,6 +482,11 @@ body {
   flex: 1;
   margin: 0 auto;
   padding: 1.5rem clamp(1rem, 3vw, 2.5rem);
+}
+.app-content-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .login-shell {
   min-height: 100vh;
