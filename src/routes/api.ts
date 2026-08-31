@@ -46,6 +46,7 @@ import {
   type TagView,
 } from '../service/tags.js';
 import { sendAttachmentFile } from './attach-shared.js';
+import { listEvents, recordEvent } from '../service/events.js';
 
 export const apiRouter = Router();
 // JSON body parser 只作用于 /api（MCP 端点不走这里，保留原始流给 transport）
@@ -185,8 +186,20 @@ apiRouter.get('/stats', requireAdminJson, async (_req, res) => {
   });
 });
 
+// ─────────────────────────── 全局活动流 ───────────────────────────
+apiRouter.get('/events', requireAdminJson, async (req, res) => {
+  const { page, pageSize } = pageParams(req.query as Record<string, unknown>);
+  const result = await listEvents(page, pageSize, {
+    type: typeof req.query.type === 'string' ? req.query.type : undefined,
+    refTask: typeof req.query.ref_task === 'string' ? req.query.ref_task : undefined,
+    refPlan: typeof req.query.ref_plan === 'string' ? req.query.ref_plan : undefined,
+  });
+  res.json(result);
+});
+
 // ─────────────────────────── Agent ───────────────────────────
 apiRouter.get('/agents', requireAdminJson, async (req, res) => {
+  const fetchAll = req.query.all === '1' || req.query.all === 'true';
   const { page, pageSize, offset } = pageParams(req.query as Record<string, unknown>);
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   // 标签过滤（?tag=linux,arm 逗号分隔，any 语义：命中任意一个即可）
@@ -204,9 +217,12 @@ apiRouter.get('/agents', requireAdminJson, async (req, res) => {
   )) as Array<Record<string, unknown>>;
   const total = Number(totalRows[0]?.c ?? 0);
   const agents = (await query(
-    `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.agent_cli, a.status, a.last_seen_at, a.created_at
-       FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
-    [...filterParams, pageSize, offset],
+    fetchAll
+      ? `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.agent_cli, a.status, a.last_seen_at, a.created_at
+           FROM agents a${join}${where} ORDER BY a.created_at DESC`
+      : `SELECT DISTINCT a.id, a.agent_id, a.name, a.hostname, a.description, a.tags, a.accept_external, a.run_user, a.agent_cli, a.status, a.last_seen_at, a.created_at
+           FROM agents a${join}${where} ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
+    fetchAll ? filterParams : [...filterParams, pageSize, offset],
   )) as Array<Record<string, unknown>>;
   const tagsByAgent = await tagsDetailForAgents(agents.map((a) => Number(a.id)));
   const list = agents.map((a) => ({
@@ -614,6 +630,16 @@ apiRouter.post('/tasks', requireAdminJson, async (req, res) => {
             [Number((ins as unknown as { insertId: unknown }).insertId), '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
           );
         }
+        await recordEvent(
+          'task.created',
+          {
+            actor: 'admin',
+            ref_task: taskId,
+            ref_plan: planIdNum,
+            summary: `管理员创建任务「${title}」（${status}）`,
+          },
+          conn,
+        );
       }
     });
   } catch (err) {
@@ -686,6 +712,11 @@ apiRouter.post('/tasks/:taskId/reply', requireAdminJson, async (req, res) => {
     body.content,
   ]);
   await query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), task[0].id]);
+  await recordEvent('task.replied', {
+    actor: 'admin',
+    ref_task: task[0].id as string | number,
+    summary: `管理员回复任务 ${req.params.taskId}`,
+  });
   res.json({ ok: true });
 });
 
@@ -721,6 +752,11 @@ apiRouter.post('/tasks/:taskId/resolve', requireAdminJson, async (req, res) => {
       [tid, `[验收通过 by 管理员] ${body.final_result.trim()}`],
     );
   }
+  await recordEvent('task.approved', {
+    actor: 'admin',
+    ref_task: tid as string | number,
+    summary: `管理员验收通过任务 ${req.params.taskId}`,
+  });
   res.json({ ok: true, status: terminal });
 });
 
@@ -755,6 +791,15 @@ apiRouter.post('/tasks/:taskId/reject', requireAdminJson, async (req, res) => {
           `[验收打回 by 管理员] ${opinion}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`,
         ],
       );
+      await recordEvent(
+        'task.rejected',
+        {
+          actor: 'admin',
+          ref_task: t.id as string | number,
+          summary: `管理员打回任务 ${req.params.taskId}，${terminal === 'failed' ? '任务失败' : '回到 claimed 续做'}`,
+        },
+        conn,
+      );
       return { status: 200, data: { ok: true, status: terminal, attempts } };
     });
     if (outcome.status !== 200) {
@@ -778,6 +823,12 @@ apiRouter.post('/tasks/:taskId/cancel', requireAdminJson, async (req, res) => {
     res.status(400).json({ error: '任务不存在或状态不允许取消' });
     return;
   }
+  const taskRows = await query(`SELECT id FROM tasks WHERE task_id = ? LIMIT 1`, [req.params.taskId]);
+  await recordEvent('task.cancelled', {
+    actor: 'admin',
+    ref_task: (taskRows[0] as Record<string, unknown> | undefined)?.id as string | number | undefined,
+    summary: `管理员取消任务 ${req.params.taskId}`,
+  });
   res.json({ ok: true });
 });
 
@@ -851,6 +902,11 @@ async function reportFailedDisposition(taskId: string, landingExpr: string, mess
     `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES ((SELECT id FROM tasks WHERE task_id = ?), NULL, 'admin', 'verdict', ?)`,
     [taskId, message.replace('{s}', s)],
   );
+  await recordEvent('task.disposition', {
+    actor: 'admin',
+    ref_task: taskId,
+    summary: message.replace('{s}', s),
+  });
   return s;
 }
 
@@ -876,6 +932,11 @@ apiRouter.post('/tasks/:taskId/reopen', requireAdminJson, async (req, res) => {
       ? '[处置] 发起人重开：尝试次数清零，任务回到 {s}'
       : `[处置] 管理员重开任务（原 ${prev}，补充信息）：回到 {s}，可继续交流`,
   );
+  await recordEvent('task.reopened', {
+    actor: 'admin',
+    ref_task: req.params.taskId,
+    summary: `管理员重开任务 ${req.params.taskId}（原 ${prev}，回到 ${s}）`,
+  });
   res.json({ ok: true, status: s, from: prev });
 });
 
@@ -905,6 +966,11 @@ apiRouter.post('/tasks/:taskId/reassign', requireAdminJson, async (req, res) => 
     REASSIGN_LANDING,
     `[处置] 发起人改派执行方为 ${target[0].name}（${body.assignee_agent_id}），尝试次数清零，任务回到 {s}`,
   );
+  await recordEvent('task.reassigned', {
+    actor: 'admin',
+    ref_task: req.params.taskId,
+    summary: `管理员改派任务 ${req.params.taskId} 给 ${target[0].name}（回到 ${s}）`,
+  });
   res.json({ ok: true, status: s });
 });
 
@@ -929,6 +995,11 @@ apiRouter.post('/tasks/:taskId/deliverable-visibility', requireAdminJson, async 
     `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'admin', 'verdict', ?)`,
     [rows[0].id, `[交付物可见性] ${old} → ${value}（改档回溯改变存量交付物暴露面）`],
   );
+  await recordEvent('task.visibility_changed', {
+    actor: 'admin',
+    ref_task: rows[0].id as string | number,
+    summary: `管理员将任务 ${req.params.taskId} 的交付物可见性从 ${old} 改为 ${value}`,
+  });
   res.json({ ok: true, value });
 });
 

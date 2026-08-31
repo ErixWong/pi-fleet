@@ -204,7 +204,13 @@ try {
   // 发起人 B 验收关闭私有任务（验收权跟随发起权）
   const privDone = await task(clientB, 'approve', { task_id: privTask.task_id, opinion: 'ok' });
   check('私有任务验收通过 → done', privDone.ok === true && privDone.status === 'done', JSON.stringify(privDone));
-  const pool = createPool({ host: process.env.DB_HOST ?? '127.0.0.1', port: Number(process.env.DB_PORT ?? 3306), user: process.env.DB_USER ?? 'root', password: process.env.DB_PASSWORD ?? '', database: process.env.DB_NAME ?? 'task_dispatch' });
+  const pool = createPool({
+    host: process.env.DB_HOST ?? '127.0.0.1',
+    port: Number(process.env.DB_PORT ?? 3306),
+    user: process.env.DB_USER ?? 'root',
+    password: process.env.DB_PASSWORD ?? '',
+    database: process.env.DB_NAME ?? 'task_dispatch',
+  });
   // 5. 开放生态：公共池 / 原子认领 / 验收链路（全部附件引用）
   console.log('== 5. 开放生态：公共池 + 认领 + 验收 ==');
   const agentC = await api('POST', '/api/agents', { name: 'sess-C', hostname: '10.0.0.3', accept_external: true });

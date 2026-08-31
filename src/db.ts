@@ -134,6 +134,19 @@ CREATE TABLE IF NOT EXISTS tasks (
   CONSTRAINT fk_tasks_stage FOREIGN KEY (stage_id) REFERENCES plan_stages(id)
 ) ENGINE=InnoDB;
 
+-- 全局活动流（指挥中心 timeline；引用业务表但不建立外键，保留历史事件）
+CREATE TABLE IF NOT EXISTS events (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  type VARCHAR(64) NOT NULL,
+  actor VARCHAR(16) NOT NULL COMMENT 'agent|admin|system',
+  ref_task BIGINT NULL,
+  ref_plan BIGINT NULL,
+  summary VARCHAR(500) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+
 -- 任务消息流（原 messages 表，2026-08-15 改名：语义=任务内帖子流，与 chat_messages 对话消息区分；旧库由 initDb RENAME 迁移）
 CREATE TABLE IF NOT EXISTS task_messages (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,

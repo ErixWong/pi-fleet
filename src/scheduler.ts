@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { query } from './db.js';
+import { recordEvent } from './service/events.js';
 
 /**
  * 定时任务调度：周期 + 时间窗口（错峰）。
@@ -107,6 +108,11 @@ export function daysAgoString(days: number): string {
  * 标记为 failed。长任务通过 report_progress 续期（last_activity_at 刷新）避免被误杀。
  */
 export async function recoverStaleRunningTasks(timeoutHours = 2): Promise<number> {
+  const stale = await query(
+    `SELECT id, task_id FROM tasks
+      WHERE status = 'running' AND last_activity_at IS NOT NULL AND last_activity_at < ?`,
+    [hoursAgoString(timeoutHours)],
+  );
   const result = await query(
     `UPDATE tasks
         SET status = 'failed', result_status = 'failed',
@@ -117,7 +123,15 @@ export async function recoverStaleRunningTasks(timeoutHours = 2): Promise<number
         AND last_activity_at < ?`,
     [nowString(), hoursAgoString(timeoutHours)],
   );
-  return (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
+  const affected = (result as unknown as { affectedRows?: number }).affectedRows ?? 0;
+  for (const row of stale) {
+    await recordEvent('task.failed', {
+      actor: 'system',
+      ref_task: (row as Record<string, unknown>).id as string | number,
+      summary: `任务 ${(row as Record<string, unknown>).task_id} 执行超时，自动标记 failed`,
+    });
+  }
+  return affected;
 }
 
 /**
@@ -146,6 +160,11 @@ export async function recoverStaleClaimedTasks(timeoutHours = 2): Promise<number
        VALUES (?, NULL, 'platform', 'system', ?)`,
       [rr.id, `[平台] 认领超时无活动，任务回到公共池重新可认领（不计交付尝试次数）`],
     );
+    await recordEvent('task.reclaimed', {
+      actor: 'system',
+      ref_task: rr.id as string | number,
+      summary: `任务 ${String(rr.task_id)} 认领超时，回到公共池`,
+    });
   }
   return rows.length;
 }
@@ -174,6 +193,11 @@ export async function autoConfirmPendingConfirm(days = 7): Promise<number> {
        VALUES (?, NULL, 'platform', 'system', ?)`,
       [(r as Record<string, unknown>).id, `[平台] 待发起人确认超过 ${days} 天，自动确认通过`],
     );
+    await recordEvent('task.auto_approved', {
+      actor: 'system',
+      ref_task: (r as Record<string, unknown>).id as string | number,
+      summary: `任务待发起人确认超过 ${days} 天，自动确认通过`,
+    });
   }
   return rows.length;
 }

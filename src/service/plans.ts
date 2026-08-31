@@ -3,6 +3,7 @@ import { query, withTransaction } from '../db.js';
 import type { AgentIdentity } from '../auth.js';
 import { computeNextDue, nowString, toLocalString } from '../scheduler.js';
 import { llmConfigured } from './llm.js';
+import { recordEvent } from './events.js';
 
 /**
  * 编排体系（orchestration.md）：plan → stage → task 三层。
@@ -170,12 +171,31 @@ export async function createPlan(
             [taskDbId, '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）；任务已发布'],
           );
         }
+        await recordEvent(
+          'task.created',
+          {
+            actor: creatorAgentId === null ? 'admin' : 'agent',
+            ref_task: taskDbId,
+            ref_plan: planIdNum,
+            summary: `${creatorAgentId === null ? '管理员' : 'agent'} 创建任务「${t.title.trim()}」（${status}）`,
+          },
+          conn,
+        );
       }
       // 定时 stage：首实例任务创建后设置下一次生成时刻（窗口内随机）
       if (rec !== 'none') {
         await conn.query(`UPDATE plan_stages SET next_due_at = ? WHERE id = ?`, [toLocalString(computeNextDue(rec, windowStart ?? '03:00', windowEnd ?? '06:00', new Date())), stageId]);
       }
     }
+    await recordEvent(
+      'plan.created',
+      {
+        actor: creatorAgentId === null ? 'admin' : 'agent',
+        ref_plan: planIdNum,
+        summary: `${creatorAgentId === null ? '管理员' : 'agent'} 创建计划「${name}」`,
+      },
+      conn,
+    );
     return { ok: true, plan_id: planId };
   });
 }
@@ -342,7 +362,14 @@ export async function runStageGates(): Promise<number> {
       if (blocked.length === 0) {
         // 最后 stage 已完成（无 blocked 且完成）→ plan done
         if (i === stages.length - 1 && (await isStageComplete(Number(cur.id)))) {
-          await query(`UPDATE plans SET status = 'done' WHERE id = ? AND status = 'active'`, [planId]);
+            const result = await query(`UPDATE plans SET status = 'done' WHERE id = ? AND status = 'active'`, [planId]);
+            if (Number((result as unknown as { affectedRows?: number }).affectedRows ?? 0) > 0) {
+              await recordEvent('plan.completed', {
+                actor: 'system',
+                ref_plan: planId,
+                summary: `计划 ${String(p.plan_id)} 已完成`,
+              });
+            }
         }
         continue;
       }
@@ -364,6 +391,12 @@ export async function runStageGates(): Promise<number> {
           `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
           [bt.id, `[闸门放行] ${i === 0 || Number(cur.wait_prev ?? 1) === 0 ? '并发 stage 激活' : '前序 stage 完成'}，本任务放行${skipNote}`],
         );
+        await recordEvent('stage.released', {
+          actor: 'system',
+          ref_task: bt.id as string | number,
+          ref_plan: planId,
+          summary: `计划 ${String(p.plan_id)} 的 stage ${String(cur.seq)} 放行任务「${String(bt.title)}」`,
+        });
         released++;
       }
     }
@@ -417,6 +450,12 @@ export async function runPeriodicClones(): Promise<number> {
         `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'system', ?)`,
         [src.id, `[周期] 本轮到点但上一实例未终结（${srcStatus}），跳过本轮（防堆积）`],
       );
+      await recordEvent('periodic.skipped', {
+        actor: 'system',
+        ref_task: src.id as string | number,
+        ref_plan: st.plan_id as string | number,
+        summary: `计划周期任务「${String(src.title)}」因上一实例 ${srcStatus} 未终结，跳过本轮`,
+      });
       continue;
     }
 
@@ -463,6 +502,12 @@ export async function runPeriodicClones(): Promise<number> {
         [newTaskId, '[平台] LLM 审核未配置，降级放行（未经 LLM 审核）'],
       );
     }
+    await recordEvent('task.periodic_clone', {
+      actor: 'system',
+      ref_task: newTaskId,
+      ref_plan: st.plan_id as string | number,
+      summary: `计划周期生成任务「${String(src.title)}」`,
+    });
     cloned++;
   }
   return cloned;

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 // REST 端点验收：heartbeat / info / poll / tasks/result / renew / reports（Bearer key）
+
 const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
 let cookie = '';
@@ -47,7 +48,13 @@ const restoreLlm = async () => {
 };
 
 const { createPool } = await import('mariadb');
-const pool = createPool({ host: process.env.DB_HOST ?? '127.0.0.1', port: Number(process.env.DB_PORT ?? 3306), user: process.env.DB_USER ?? 'root', password: process.env.DB_PASSWORD ?? '', database: process.env.DB_NAME ?? 'task_dispatch' });
+const pool = createPool({
+  host: process.env.DB_HOST ?? '127.0.0.1',
+  port: Number(process.env.DB_PORT ?? 3306),
+  user: process.env.DB_USER ?? 'root',
+  password: process.env.DB_PASSWORD ?? '',
+  database: process.env.DB_NAME ?? 'task_dispatch',
+});
 
 let exitCode = 0;
 try {
