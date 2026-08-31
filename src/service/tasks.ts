@@ -1,6 +1,7 @@
 import { query, withTransaction } from '../db.js';
 import type { AgentIdentity } from '../auth.js';
 import { computeNextDue, nowString, toLocalString } from '../scheduler.js';
+import { recordEvent } from './events.js';
 
 /**
  * 共享业务层：REST（调度脚本）与 MCP（pi）共用同一套任务/会话逻辑。
@@ -226,6 +227,11 @@ export async function postMessageToTask(
       [tasks[0].id, agent.id, type, content],
     );
     await conn.query(`UPDATE tasks SET last_activity_at = ? WHERE id = ?`, [nowString(), tasks[0].id]);
+    await recordEvent(
+      'task.replied',
+      { actor: 'agent', ref_task: tasks[0].id as string | number, summary: `${agent.name} 回复任务 ${taskId}` },
+      conn,
+    );
     return { ok: true };
   });
 }
@@ -254,6 +260,11 @@ export async function resolveTask(
     await conn.query(
       `UPDATE tasks SET status='resolved', result=?, result_status='success', result_at=?, last_activity_at=?, resolved_by_id=? WHERE id=?`,
       [finalResult ?? null, nowString(), nowString(), agent.id, tasks[0].id],
+    );
+    await recordEvent(
+      'task.resolved',
+      { actor: 'agent', ref_task: tasks[0].id as string | number, summary: `${agent.name} 关闭任务 ${taskId}` },
+      conn,
     );
     return { ok: true };
   });
@@ -293,6 +304,11 @@ export async function requestTask(
     await conn.query(
       `INSERT INTO task_messages (task_id, sender_id, sender_role, content) VALUES (?, ?, 'agent', ?)`,
       [Number((ins as unknown as { insertId: unknown }).insertId), agent.id, instruction],
+    );
+    await recordEvent(
+      'task.created',
+      { actor: 'agent', ref_task: taskId, ref_plan: stage[0].plan_id as string | number, summary: `${agent.name} 创建任务「${title}」（open）` },
+      conn,
     );
     return { ok: true, task_id: taskId };
   });
@@ -356,6 +372,11 @@ export async function submitTaskResult(
   if (affected === 0) {
     return { ok: false, error: `任务 ${taskId} 不存在、未指派给当前 agent，或状态不允许提交（可能已完成）` };
   }
+  await recordEvent('task.submitted', {
+    actor: 'agent',
+    ref_task: taskId,
+    summary: `${agent.name} 提交任务 ${taskId}，状态变为 ${status === 'success' ? 'done' : 'failed'}`,
+  });
   return { ok: true };
 }
 

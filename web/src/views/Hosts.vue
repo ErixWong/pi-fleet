@@ -7,6 +7,7 @@ import Pagination from '../components/Pagination.vue';
 import TagBadge from '../components/TagBadge.vue';
 import TagPicker from '../components/TagPicker.vue';
 import ChatPanel from '../components/ChatPanel.vue';
+import StatusBadge from '../components/StatusBadge.vue';
 
 /** 主机工作台（占屏 ~90%）：
  *  左侧 4/12 主机列表侧边栏；右侧 8/12 内容区——
@@ -403,20 +404,10 @@ function fmtTime(ts) {
   return d.toLocaleString();
 }
 
-function badge(status) {
-  return {
-    done: 'text-bg-success',
-    failed: 'text-bg-danger',
-    running: 'text-bg-info',
-    assigned: 'text-bg-warning',
-    pending: 'text-bg-warning',
-    cancelled: 'text-bg-secondary',
-  }[status] || 'text-bg-secondary';
-}
 </script>
 
 <template>
-  <div class="hosts-workspace d-flex flex-column" style="height: calc(100vh - 88px)">
+  <div class="hosts-workspace d-flex flex-column" style="height: calc(100vh - 154px)">
     <!-- ========== 顶部横条：主机标题 + 展开/收起/注册 ========== -->
     <div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom flex-shrink-0">
       <button v-if="sidebarCollapsed" class="btn btn-sm btn-outline-primary" title="展开主机列表" @click="sidebarCollapsed = false">
@@ -446,8 +437,8 @@ function badge(status) {
             <div class="fw-bold small text-truncate">{{ a.name }}</div>
             <div class="text-secondary small text-truncate">{{ a.hostname || a.agent_id }}</div>
             <div class="d-flex gap-1 mt-1">
-              <span class="badge" :class="a.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ a.status }}</span>
-              <span v-if="a.offline" class="badge text-bg-danger" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${a.last_seen_at || '从未连接'}）`">失联</span>
+              <StatusBadge kind="host" :status="a.status" :offline="a.offline"
+                :title="a.offline ? `超过 ${offlineMin} 分钟无心跳（最近活跃：${a.last_seen_at || '从未连接'}）` : ''" />
             </div>
           </div>
           <button class="btn btn-sm btn-outline-primary flex-shrink-0" title="会话" @click.stop="openChat(a)">
@@ -551,8 +542,8 @@ function badge(status) {
                     <tr><th class="text-secondary">运行用户</th>
                       <td class="small">{{ agent.run_user || 'bridge 当前用户（未指定）' }}</td></tr>
                     <tr><th class="text-secondary">状态</th>
-                      <td><span class="badge" :class="agent.status === 'active' ? 'text-bg-success' : 'text-bg-secondary'">{{ agent.status }}</span>
-                        <span v-if="agent.offline" class="badge text-bg-danger ms-1" :title="`超过 ${offlineMin} 分钟无心跳（最近活跃：${agent.last_seen_at || '从未连接'}）`">失联</span>
+                      <td><StatusBadge kind="host" :status="agent.status" :offline="agent.offline"
+                        :title="agent.offline ? `超过 ${offlineMin} 分钟无心跳（最近活跃：${agent.last_seen_at || '从未连接'}）` : ''" />
                       </td></tr>
                     <tr><th class="text-secondary">最近活跃</th><td>{{ agent.last_seen_at || '从未连接' }}</td></tr>
                     <tr><th class="text-secondary">创建时间</th><td>{{ agent.created_at }}</td></tr>
@@ -583,7 +574,7 @@ function badge(status) {
             <tr v-for="t in tasks" :key="t.task_id">
               <td><router-link :to="`/tasks/${t.task_id}`">{{ t.title }}</router-link>
                 <div class="text-secondary small">{{ t.task_id }}</div></td>
-              <td><span class="badge badge-status" :class="badge(t.status)">{{ t.status }}</span></td>
+              <td><StatusBadge :status="t.status" /></td>
               <td>{{ t.result_status || '—' }}</td>
             </tr>
           </tbody>

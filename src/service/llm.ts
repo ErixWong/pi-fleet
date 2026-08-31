@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { query } from '../db.js';
 import { getSetting, getSettingInt } from './settings.js';
+import { recordEvent } from './events.js';
 
 /**
  * LLM 审核/验收（§3.4 平台接 LLM）：
@@ -447,6 +448,11 @@ async function finalizeAudit(t: Record<string, unknown>, passed: boolean, reason
     `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
     [id, passed ? `[LLM 审核通过] ${reason}` : `[LLM 审核未通过] ${reason}（请用 task(revise) 修订后重新提交审核）`],
   );
+  await recordEvent(passed ? 'task.audit_passed' : 'task.audit_rejected', {
+    actor: 'system',
+    ref_task: id as string | number,
+    summary: passed ? `LLM 审核通过任务 ${String(t.task_id)}` : `LLM 审核拒绝任务 ${String(t.task_id)}`,
+  });
 }
 
 // ─────────────────────────── 验收（submitted 队列，支持识图） ───────────────────────────
@@ -589,6 +595,11 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `[LLM 验收通过] ${reason}`],
     );
+    await recordEvent('task.verify_passed', {
+      actor: 'system',
+      ref_task: id as string | number,
+      summary: `LLM 验收通过任务 ${String(t.task_id)}`,
+    });
     return;
   }
   const attempts = Number(t.deliver_attempts) + 1;
@@ -601,6 +612,11 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，已达上限，任务失败）`],
     );
+    await recordEvent('task.failed', {
+      actor: 'system',
+      ref_task: id as string | number,
+      summary: `LLM 验收拒绝任务 ${String(t.task_id)}，达到尝试上限并失败`,
+    });
   } else {
     const updated = await query(`UPDATE tasks SET status='claimed', deliver_attempts=? WHERE id = ? AND status = 'submitted'`, [attempts, id]);
     if ((updated as { affectedRows?: number }).affectedRows === 0) return;
@@ -608,6 +624,11 @@ async function finalizeVerification(t: Record<string, unknown>, passed: boolean,
       `INSERT INTO task_messages (task_id, sender_id, sender_role, type, content) VALUES (?, NULL, 'platform', 'verdict', ?)`,
       [id, `${note}（第 ${attempts}/${maxAttempts} 次，请按原因续做；任务目录保留=工作现场保留）`],
     );
+    await recordEvent('task.verify_rejected', {
+      actor: 'system',
+      ref_task: id as string | number,
+      summary: `LLM 验收拒绝任务 ${String(t.task_id)}，回到 claimed 续做`,
+    });
   }
 }
 

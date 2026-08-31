@@ -1,7 +1,8 @@
 <script setup>
-import { onMounted, onBeforeUnmount, ref, nextTick, watch } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, nextTick, watch } from 'vue';
 import { api } from '../api';
 import { renderMd } from '../md';
+import StatusBadge from './StatusBadge.vue';
 
 /** 管理员 ↔ agent 对话面板（4/12 侧栏，任务页/主机详情页复用）
  *  props.target：{ agent_id, agent_name, task_id?, task_title? }——任务对话带 task_id/task_title
@@ -26,6 +27,24 @@ const inputEl = ref(null);
 const sinceId = ref(0);
 const loading = ref(false);
 let pollTimer = null;
+
+const messageGroups = computed(() => {
+  const groups = [];
+  for (const message of messages.value) {
+    const date = new Date(message.created_at);
+    const valid = !Number.isNaN(date.getTime());
+    const key = valid
+      ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}`
+      : 'unknown';
+    let group = groups[groups.length - 1];
+    if (!group || group.key !== key) {
+      group = { key, label: valid ? groupLabel(date) : '时间未知', messages: [] };
+      groups.push(group);
+    }
+    group.messages.push(message);
+  }
+  return groups;
+});
 
 onMounted(async () => {
   await loadAgents();
@@ -134,7 +153,7 @@ async function poll() {
       const idx = messages.value.findIndex((x) => String(x.id) === String(m.id));
       if (idx >= 0) {
         // 同 id 内容更新（打字机）：合并；仅当用户贴底时保持滚动跟随，不打断向上浏览
-        if (!m.streaming || m.content.length > messages.value[idx].content.length) {
+        if (!m.streaming || String(m.content ?? '').length > String(messages.value[idx].content ?? '').length) {
           messages.value[idx].content = m.content;
           messages.value[idx].streaming = m.streaming;
         }
@@ -167,6 +186,28 @@ function fmtTime(ts) {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return '';
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function groupLabel(date) {
+  const now = new Date();
+  const today = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).toDateString() === date.toDateString();
+  const hour = `${String(date.getHours()).padStart(2, '0')}:00`;
+  if (today) return `今天 ${hour}`;
+  if (yesterday) return `昨天 ${hour}`;
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${hour}`;
+}
+
+function isAdminMessage(message) {
+  return message.sender_role === 'admin';
+}
+
+function senderName(message) {
+  return isAdminMessage(message) ? '你' : (agentInfo.value?.name || conversation.value?.agent_name || 'agent');
+}
+
+function senderInitial(message) {
+  return isAdminMessage(message) ? '我' : String(senderName(message)).slice(0, 1).toUpperCase();
 }
 
 function md(src) {
@@ -219,8 +260,8 @@ async function archive() {
               {{ agentInfo?.name || conversation.agent_name || '对话' }}
               <span v-if="conversation.agent_id" class="text-secondary fw-normal">#{{ conversation.agent_id }}</span>
             </div>
-            <div v-if="props.task" class="text-secondary small text-truncate chat-task-ctx">
-              <i class="bi bi-briefcase me-1"></i>{{ props.task.task_id }} · {{ props.task.task_title }}
+            <div v-if="props.target?.task_id" class="text-secondary small text-truncate chat-task-ctx">
+              <i class="bi bi-briefcase me-1"></i>{{ props.target.task_id }} · {{ props.target.task_title }}
             </div>
             <div v-else-if="conversation.task_id && conversation.task_title" class="text-secondary small text-truncate chat-task-ctx">
               <i class="bi bi-briefcase me-1"></i>{{ conversation.task_id }} · {{ conversation.task_title }}
@@ -252,24 +293,29 @@ async function archive() {
       <div v-if="loading" class="text-center text-secondary small py-4">
         <span class="spinner-border spinner-border-sm me-1"></span>正在打开对话…
       </div>
-      <div v-else-if="!conversation" class="text-center text-secondary small py-4">
-        <i class="bi bi-chat-square-dots d-block mb-2" style="font-size: 2rem; opacity: 0.4"></i>
+      <div v-else-if="!conversation" class="text-center text-secondary small py-4 chat-empty">
+        <i class="bi bi-chat-square-dots d-block mb-2"></i>
         在任务列表点击任务的 💬 图标，<br>与执行该任务的 agent 对话。
       </div>
-      <div v-else-if="messages.length === 0" class="text-center text-secondary small py-4">
+      <div v-else-if="messages.length === 0" class="text-center text-secondary small py-4 chat-empty">
         暂无消息，围绕任务说点什么吧 👋
       </div>
       <template v-else>
-        <div v-for="m in messages" :key="m.id" class="d-flex mb-2" :class="m.sender_role === 'admin' ? 'justify-content-end' : 'justify-content-start'">
-          <div class="chat-bubble px-2 py-1 rounded-3" :class="m.sender_role === 'admin' ? 'bg-primary text-white' : 'bg-light border'"
-               style="max-width: 88%">
-            <div class="d-flex justify-content-between gap-2" style="font-size: 0.68rem; opacity: 0.75">
-              <span>{{ m.sender_role === 'admin' ? '你' : (agentInfo?.name || conversation?.agent_name || 'agent') }}</span>
-              <span>{{ fmtTime(m.created_at) }}</span>
+        <div v-for="group in messageGroups" :key="group.key" class="chat-message-group">
+          <div class="chat-time-divider"><span>{{ group.label }}</span></div>
+          <div v-for="m in group.messages" :key="m.id" class="chat-message" :class="{ 'is-admin': isAdminMessage(m) }">
+            <div class="chat-avatar" :class="{ 'is-admin': isAdminMessage(m) }">{{ senderInitial(m) }}</div>
+            <div class="chat-message-stack">
+              <div class="chat-message-meta">
+                <strong>{{ senderName(m) }}</strong>
+                <time :datetime="m.created_at">{{ fmtTime(m.created_at) }}</time>
+              </div>
+              <div class="chat-bubble" :class="{ 'is-admin': isAdminMessage(m) }">
+                <div v-if="m.sender_role === 'agent'" class="chat-md" v-html="md(m.content)"></div>
+                <div v-else class="chat-plain">{{ m.content || (m.streaming ? '正在思考…' : '') }}</div>
+                <span v-if="m.streaming" class="chat-cursor" aria-label="正在输入"></span>
+              </div>
             </div>
-            <div v-if="m.sender_role === 'agent'" class="chat-md" v-html="md(m.content)"></div>
-            <div v-else class="chat-plain" style="white-space: pre-wrap; word-break: break-word">{{ m.content || (m.streaming ? '正在思考…' : '') }}</div>
-            <span v-if="m.streaming" class="chat-cursor"></span>
           </div>
         </div>
       </template>
@@ -300,7 +346,7 @@ async function archive() {
   max-height: calc(100vh - 120px);
 }
 .chat-panel-full {
-  height: calc(100vh - 88px);
+  height: calc(100vh - 154px);
   min-height: 480px;
 }
 .chat-body {
@@ -309,10 +355,10 @@ async function archive() {
   overflow-y: auto;
 }
 .chat-header {
-  border-bottom: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
+  border-bottom: 1px solid var(--border-soft);
 }
 .chat-task-ctx {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--surface-strong);
   border-radius: 4px;
   padding: 1px 6px;
   margin-top: 2px;
@@ -324,7 +370,7 @@ async function archive() {
   margin-bottom: 0;
 }
 .chat-md :deep(code) {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--code-inline-bg);
   padding: 0 3px;
   border-radius: 3px;
   font-size: 0.85em;
@@ -338,6 +384,75 @@ async function archive() {
   resize: none;
   line-height: 1.35;
 }
+.chat-empty i {
+  color: var(--text-faint);
+  font-size: 2rem;
+  opacity: 0.5;
+}
+.chat-message-group { position: relative; }
+.chat-time-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.75rem 0 0.55rem;
+  color: var(--text-faint);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.chat-time-divider::before, .chat-time-divider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--border-soft);
+}
+.chat-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+}
+.chat-message.is-admin { flex-direction: row-reverse; }
+.chat-avatar {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 0.55rem;
+  color: var(--badge-success-color);
+  background: var(--badge-success-bg);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+.chat-avatar.is-admin { color: var(--badge-primary-color); background: var(--badge-primary-bg); }
+.chat-message-stack { display: flex; flex-direction: column; align-items: flex-start; max-width: min(88%, 720px); }
+.chat-message.is-admin .chat-message-stack { align-items: flex-end; }
+.chat-message-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin: 0 0.35rem 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.chat-message-meta strong { color: var(--text-body); font-size: 0.7rem; }
+.chat-message-meta time { color: var(--text-faint); }
+.chat-bubble {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.85rem 0.85rem 0.85rem 0.25rem;
+  color: var(--text-body);
+  background: var(--surface-strong);
+  overflow-wrap: anywhere;
+}
+.chat-bubble.is-admin {
+  border-color: var(--accent-border-hover);
+  border-radius: 0.85rem 0.85rem 0.25rem 0.85rem;
+  color: var(--text-strong);
+  background: var(--accent-soft);
+}
+.chat-plain { white-space: pre-wrap; word-break: break-word; }
 .project-chip {
   font-size: 0.75rem;
   max-width: 180px;
