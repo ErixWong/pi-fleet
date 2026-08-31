@@ -100,12 +100,34 @@ function configuredPiCli() {
   return null;
 }
 
-/** 探测本机已安装的 CLI；systemd 环境也使用 which/where，避免依赖交互 shell。 */
+/** 常见 npm/本地 bin 目录（systemd/非登录 shell 的 PATH 常缺 npm 全局目录，需兑底探测） */
+function extraBinDirs() {
+  const dirs = [];
+  if (process.platform === 'win32' && process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
+  const home = os.homedir();
+  dirs.push(path.join(home, '.npm-global', 'bin'), path.join(home, '.local', 'bin'), path.join(home, 'bin'));
+  if (process.env.NVM_BIN) dirs.push(process.env.NVM_BIN);
+  return [...new Set(dirs)];
+}
+
+/** 探测本机已安装的 CLI；systemd 环境也使用 which/where，避免依赖交互 shell。
+ * PATH 未命中时补充常见 bin 目录（npm 全局等），保证 `npm i -g` 装的 copilot/claude 能上报。 */
 function commandExists(command) {
   if (command === 'pi' && configuredPiCli()) return true;
   const probe = process.platform === 'win32' ? 'where' : 'which';
-  const result = spawnSync(probe, [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  return result.status === 0;
+  let result = spawnSync(probe, [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  if (result.status === 0) return true;
+  // PATH 未命中：逐个常见目录查可执行文件（Windows 加 .cmd/.exe 后缀）
+  for (const dir of extraBinDirs()) {
+    const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
+    for (const ext of exts) {
+      const p = path.join(dir, command + ext);
+      try {
+        if (existsSync(p)) return true;
+      } catch { /* 目录不可访问忽略 */ }
+    }
+  }
+  return false;
 }
 
 export function detectAvailableClis() {
@@ -132,7 +154,18 @@ function cliInvocation(cli) {
   const probe = process.platform === 'win32' ? 'where' : 'which';
   const result = spawnSync(probe, [selected], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   const found = String(result.stdout ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  return { cmd: found || selected, args: [] };
+  if (found) return { cmd: found, args: [] };
+  // PATH 未命中：常见 bin 目录兑底（与 commandExists 同源），保证 systemd/非登录 shell 也能拉起
+  for (const dir of extraBinDirs()) {
+    const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
+    for (const ext of exts) {
+      const p = path.join(dir, selected + ext);
+      try {
+        if (existsSync(p)) return { cmd: p, args: [] };
+      } catch { /* 忽略 */ }
+    }
+  }
+  return { cmd: selected, args: [] };
 }
 
 function mcpConfig() {
