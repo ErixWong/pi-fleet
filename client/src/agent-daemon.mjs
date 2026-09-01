@@ -205,15 +205,16 @@ export function buildAgentInvocation(cli, { mode, prompt = '', sessionId = '', c
   }
 
   if (selected === 'copilot') {
+    // 注意：copilot 的 `-p <prompt>` 必须相邻（prompt 紧跟 -p），选项插在中间会报“prompt 未加引号”
     return {
       ...invocation,
       args: [
         ...invocation.args,
-        '-p',
         '-s',
         '--allow-all-tools',
         '--additional-mcp-config',
         JSON.stringify(mcpConfig()),
+        '-p',
         prompt,
       ],
       env: invocationEnv(),
@@ -222,7 +223,7 @@ export function buildAgentInvocation(cli, { mode, prompt = '', sessionId = '', c
   if (selected === 'claude') {
     return {
       ...invocation,
-      args: [...invocation.args, '-p', '--mcp-config', JSON.stringify(mcpConfig()), prompt],
+      args: [...invocation.args, '--mcp-config', JSON.stringify(mcpConfig()), '-p', prompt],
       env: invocationEnv(),
     };
   }
