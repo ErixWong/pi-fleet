@@ -60,7 +60,7 @@ async function ensureCliInstalled(cli) {
     const found = detectClis();
     if (found.length === 0) {
       console.log('未检测到任何执行器（pi/copilot/claude/codex）。建议先安装一个，例如：');
-      console.log(`  ${INSTALL_HINTS.pi}`);
+      console.log(`  ${installCommandFor('pi')}`);
       console.log('auto 模式下将回退 pi（若之后安装，重启 pi-agent run 即生效）。');
     } else {
       console.log(`已检测到执行器：${found.join('、')}（auto 将优先用 ${found[0]}）`);
@@ -75,9 +75,9 @@ async function ensureCliInstalled(cli) {
     console.log(`暂不支持自动安装 ${cli}，请手动安装。`);
     return;
   }
-  const ans = await ask('是否现在代装？', 'y');
+  const ans = await ask('是否现在代装？（将执行远程安装脚本）', 'n');
   if (!/^y/i.test(ans)) {
-    console.log(`跳过代装。安装 ${cli} 后重新运行 pi-agent setup 或直接 pi-agent run（未安装时任务会兜底报错）。`);
+    console.log(`已跳过代装。安装 ${cli} 后重新运行 pi-agent setup 或直接 pi-agent run（未安装时任务会兜底报错）。`);
     return;
   }
   console.log(`执行：${installCmd}`);
@@ -104,6 +104,20 @@ function writeJsonAtomic(filePath, value) {
   fs.chmodSync(tempPath, 0o600);
   fs.renameSync(tempPath, filePath);
   fs.chmodSync(filePath, 0o600);
+}
+
+// 共享 readline 单例（管道/EOF 下多次提问稳定；EOF 时用默认值兑底，避免挂起或静默退出）
+let sharedRl = null;
+const pendingAsks = new Set();
+function getRl() {
+  if (sharedRl) return sharedRl;
+  sharedRl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  sharedRl.on('close', () => {
+    // EOF：所有未回答的 ask 用默认值兑底（已回答的已从 pending 移除，resolve 幂等）
+    for (const handler of [...pendingAsks]) handler('');
+    pendingAsks.clear();
+  });
+  return sharedRl;
 }
 
 async function ask(question, defaultValue = '') {
@@ -141,12 +155,16 @@ async function ask(question, defaultValue = '') {
       process.stdin.on('data', onData);
     });
   }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await new Promise((resolve) => rl.question(`${question}${suffix}：`, resolve));
-  } finally {
-    rl.close();
-  }
+  if (sharedRl?.closed) return defaultValue; // stdin 已 EOF，直接默认值
+  const rl = getRl();
+  return new Promise((resolve) => {
+    const handler = (raw) => {
+      pendingAsks.delete(handler);
+      resolve(raw || defaultValue); // 回车 = 接受默认值
+    };
+    pendingAsks.add(handler);
+    rl.question(`${question}${suffix}：`, handler);
+  });
 }
 
 function normalizeUrl(value) {
