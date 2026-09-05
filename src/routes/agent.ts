@@ -50,7 +50,7 @@ agentRouter.post('/projects', async (req, res) => {
   const hasDirs = Object.prototype.hasOwnProperty.call(body, 'dirs');
   const hasClis = Object.prototype.hasOwnProperty.call(body, 'clis');
   const dirs = Array.isArray(body.dirs) ? body.dirs.map(String) : [];
-  const supportedClis = new Set(['pi', 'copilot', 'claude', 'codex']);
+  const supportedClis = new Set(['pi', 'erix', 'copilot', 'claude', 'codex']);
   const clis = Array.isArray(body.clis)
     ? [...new Set(body.clis.map((cli) => String(cli).trim().toLowerCase()).filter((cli) => supportedClis.has(cli)))]
     : [];

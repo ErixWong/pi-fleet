@@ -29,9 +29,10 @@ pi-agent uninstall-service
 
 ## 执行器
 
-`AGENT_CMD` 环境变量或 setup 的 `--cli` / 平台 Web「执行器」下拉控制，取值：`pi`（默认，全链路验证）/ `copilot` / `claude` / `codex` / `auto`（探测已装优先第一个）。
+`AGENT_CMD` 环境变量或 setup 的 `--cli` / 平台 Web「执行器」下拉控制，取值：`pi`（默认）/ `erix`（自研无头 agent）/ `copilot` / `claude` / `codex` / `auto`（探测已装优先第一个）。
 
-> 多执行器（copilot/claude/codex）当前为 beta：仅 pi 完成全链路验证。对话桥接暂仅 pi（`--mode rpc`）；其他执行器收到对话会回退 pi。
+> 已验证全链路：pi、copilot、erix。claude/codex 为 beta（参数按官方文档实现，未真机验证）。对话桥接暂仅 pi（`--mode rpc`）；其他执行器收到对话会回退 pi。
+> erix-agent 的 MCP 配置：setup 预写 `~/.erix/mcp.json`（标准 url+headers 格式），LLM 走 erix 自己的 `~/.erix/config.json` / `LLM_KIT_*` 环境变量（用户自理）。
 
 ## 环境变量（run 时覆盖 config）
 

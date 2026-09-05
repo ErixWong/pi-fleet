@@ -9,7 +9,7 @@ export const AGENT_CONFIG_PATH = path.join(AGENT_CONFIG_DIR, 'config.json');
 const PI_AGENT_DIR = path.join(os.homedir(), '.pi', 'agent');
 const PI_MCP_PATH = path.join(PI_AGENT_DIR, 'mcp.json');
 const PI_MCP_BACKUP_PATH = path.join(PI_AGENT_DIR, 'mcp.json.bak-pi-agent');
-const SUPPORTED_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'auto']);
+const SUPPORTED_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'erix', 'auto']);
 
 /** 执行器代装命令（平台相关；LLM 订阅/models.json 仍用户自理） */
 function installCommandFor(cli) {
@@ -19,6 +19,7 @@ function installCommandFor(cli) {
     case 'copilot': return 'npm install -g @github/copilot';
     case 'claude': return 'npm install -g @anthropic-ai/claude-code';
     case 'codex': return 'npm install -g @openai/codex';
+    case 'erix': return 'npm install -g erix-agent || (cd ~/projects/erix-llm-kit && npm link)';
     default: return '';
   }
 }
@@ -206,7 +207,7 @@ export async function runSetup(options = {}) {
   const url = normalizeUrl(options.url ?? await ask('平台地址', 'http://127.0.0.1:3200'));
   const key = String(options.key ?? await ask('Agent key（不回显）')).trim();
   const name = String(options.name ?? await ask('主机名', os.hostname())).trim() || os.hostname();
-  const cli = normalizeCli(options.cli ?? await ask('执行器（pi|copilot|claude|codex|auto）', 'auto'));
+  const cli = normalizeCli(options.cli ?? await ask('执行器（pi|erix|copilot|claude|codex|auto）', 'auto'));
   if (!key) throw new Error('agent key 不能为空');
   if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(key)) throw new Error('主机名和 agent key 不能包含换行符');
 
@@ -234,6 +235,30 @@ export async function runSetup(options = {}) {
   };
   writeJsonAtomic(PI_MCP_PATH, mcp);
   console.log(`已写入 ${PI_MCP_PATH}`);
+
+  // erix-agent：标准 .mcp.json（url + headers）；本机装了 erix 就预写（幂等——即使当前用 pi，切 erix 即用）
+  if (hasCli('erix')) {
+    const erixHome = path.join(os.homedir(), '.erix');
+    const ERIX_MCP_PATH = path.join(erixHome, 'mcp.json');
+    const ERIX_MCP_BACKUP = path.join(erixHome, 'mcp.json.bak-pi-agent');
+    fs.mkdirSync(erixHome, { recursive: true, mode: 0o700 });
+    let emcp = {};
+    if (fs.existsSync(ERIX_MCP_PATH)) {
+      fs.copyFileSync(ERIX_MCP_PATH, ERIX_MCP_BACKUP);
+      fs.chmodSync(ERIX_MCP_BACKUP, 0o600);
+      emcp = readObject(ERIX_MCP_PATH);
+    }
+    if (!emcp.mcpServers) emcp.mcpServers = {};
+    const oldErix = emcp.mcpServers['task-dispatch'];
+    emcp.mcpServers['task-dispatch'] = {
+      ...(oldErix && typeof oldErix === 'object' && !Array.isArray(oldErix) ? oldErix : {}),
+      url: `${url}/mcp`,
+      headers: { Authorization: `Bearer ${key}` },
+    };
+    writeJsonAtomic(ERIX_MCP_PATH, emcp);
+    console.log(`已写入 ${ERIX_MCP_PATH}`);
+  }
+
   fs.mkdirSync(AGENT_CONFIG_DIR, { recursive: true, mode: 0o700 });
   writeJsonAtomic(AGENT_CONFIG_PATH, { ...existing, url, key, name, cli });
   console.log(`已写入 ${AGENT_CONFIG_PATH}`);

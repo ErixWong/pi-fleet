@@ -35,7 +35,7 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 
-const SUPPORTED_CLIS = ['pi', 'copilot', 'claude', 'codex'];
+const SUPPORTED_CLIS = ['pi', 'copilot', 'claude', 'codex', 'erix'];
 const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'config.json');
 const PI_MCP_CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json');
 
@@ -231,6 +231,15 @@ export function buildAgentInvocation(cli, { mode, prompt = '', sessionId = '', c
     return {
       ...invocation,
       args: [...invocation.args, 'exec', '--mcp-config', JSON.stringify(mcpConfig()), prompt],
+      env: invocationEnv(),
+    };
+  }
+  if (selected === 'erix') {
+    // erix-agent（自研无头 agent）：erix chat 无头单任务；MCP 经 ~/.erix/mcp.json（setup 预写 task-dispatch，
+    // 与 pi 的 ~/.pi/agent/mcp.json 对称——erix 读 cwd .mcp.json 或 ~/.erix/mcp.json）
+    return {
+      ...invocation,
+      args: [...invocation.args, 'chat', prompt],
       env: invocationEnv(),
     };
   }

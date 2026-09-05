@@ -67,12 +67,12 @@ function agentOffline(lastSeen: unknown, offlineAfterMin: number): boolean {
   return Date.now() - seen > offlineAfterMin * 60 * 1000;
 }
 
-const SUPPORTED_AGENT_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'auto']);
+const SUPPORTED_AGENT_CLIS = new Set(['pi', 'erix', 'copilot', 'claude', 'codex', 'auto']);
 
 function normalizeAgentCli(value: unknown): string | null {
   if (value === undefined || value === null || String(value).trim() === '') return null;
   const cli = String(value).trim().toLowerCase();
-  if (!SUPPORTED_AGENT_CLIS.has(cli)) throw new Error('执行器必须是 pi|copilot|claude|codex|auto');
+  if (!SUPPORTED_AGENT_CLIS.has(cli)) throw new Error('执行器必须是 pi|erix|copilot|claude|codex|auto');
   return cli;
 }
 
