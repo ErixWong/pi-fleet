@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { spawnSync } from 'node:child_process';
 
 export const AGENT_CONFIG_DIR = path.join(os.homedir(), '.config', 'pi-agent');
 export const AGENT_CONFIG_PATH = path.join(AGENT_CONFIG_DIR, 'config.json');
@@ -9,6 +10,84 @@ const PI_AGENT_DIR = path.join(os.homedir(), '.pi', 'agent');
 const PI_MCP_PATH = path.join(PI_AGENT_DIR, 'mcp.json');
 const PI_MCP_BACKUP_PATH = path.join(PI_AGENT_DIR, 'mcp.json.bak-pi-agent');
 const SUPPORTED_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'auto']);
+
+/** 执行器代装命令（平台相关；LLM 订阅/models.json 仍用户自理） */
+function installCommandFor(cli) {
+  const isWin = process.platform === 'win32';
+  switch (cli) {
+    case 'pi': return isWin ? 'powershell -c "irm https://pi.dev/install.ps1 | iex"' : 'curl -fsSL https://pi.dev/install.sh | sh';
+    case 'copilot': return 'npm install -g @github/copilot';
+    case 'claude': return 'npm install -g @anthropic-ai/claude-code';
+    case 'codex': return 'npm install -g @openai/codex';
+    default: return '';
+  }
+}
+
+/** 常见 npm/本地 bin 目录（systemd/非登录 shell 的 PATH 常缺 npm 全局目录） */
+function extraBinDirs() {
+  const dirs = [];
+  if (process.platform === 'win32' && process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
+  const home = os.homedir();
+  dirs.push(path.join(home, '.npm-global', 'bin'), path.join(home, '.local', 'bin'), path.join(home, 'bin'));
+  if (process.env.NVM_BIN) dirs.push(process.env.NVM_BIN);
+  return [...new Set(dirs)];
+}
+
+/** 探测指定 CLI 是否已安装（PATH + 常见 bin 目录兑底） */
+export function hasCli(cli) {
+  const probe = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(probe, [cli], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  if (result.status === 0) return true;
+  for (const dir of extraBinDirs()) {
+    const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
+    for (const ext of exts) {
+      try {
+        if (fs.existsSync(path.join(dir, cli + ext))) return true;
+      } catch { /* 忽略 */ }
+    }
+  }
+  return false;
+}
+
+/** 已安装的候选执行器（auto 时选第一个） */
+export function detectClis() {
+  return [...SUPPORTED_CLIS].filter((cli) => cli !== 'auto' && hasCli(cli));
+}
+
+/** 提示 + 可选代装缺失的执行器；拒绝代装只 warn 不阻断（用户可事后自装） */
+async function ensureCliInstalled(cli) {
+  if (cli === 'auto') {
+    const found = detectClis();
+    if (found.length === 0) {
+      console.log('未检测到任何执行器（pi/copilot/claude/codex）。建议先安装一个，例如：');
+      console.log(`  ${INSTALL_HINTS.pi}`);
+      console.log('auto 模式下将回退 pi（若之后安装，重启 pi-agent run 即生效）。');
+    } else {
+      console.log(`已检测到执行器：${found.join('、')}（auto 将优先用 ${found[0]}）`);
+    }
+    return;
+  }
+  if (hasCli(cli)) return;
+  const installCmd = installCommandFor(cli);
+  console.log(`未检测到执行器 ${cli}。安装命令：`);
+  console.log(`  ${installCmd || `请参考 ${cli} 官方安装方式`}`);
+  if (!installCmd) {
+    console.log(`暂不支持自动安装 ${cli}，请手动安装。`);
+    return;
+  }
+  const ans = await ask('是否现在代装？', 'y');
+  if (!/^y/i.test(ans)) {
+    console.log(`跳过代装。安装 ${cli} 后重新运行 pi-agent setup 或直接 pi-agent run（未安装时任务会兜底报错）。`);
+    return;
+  }
+  console.log(`执行：${installCmd}`);
+  const r = spawnSync(installCmd, { stdio: 'inherit', shell: true, cwd: os.homedir() });
+  if (r.status !== 0) {
+    console.log(`代装失败（exit=${r.status}），请手动安装 ${cli} 后重试。`);
+    return;
+  }
+  console.log(hasCli(cli) ? `✓ ${cli} 已就绪` : `代装完成但未探测到 ${cli}（可能不在 PATH，新开终端/重启 daemon 即生效）。`);
+}
 
 function readObject(filePath) {
   if (!fs.existsSync(filePath)) return {};
@@ -112,6 +191,9 @@ export async function runSetup(options = {}) {
   const cli = normalizeCli(options.cli ?? await ask('执行器（pi|copilot|claude|codex|auto）', 'auto'));
   if (!key) throw new Error('agent key 不能为空');
   if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(key)) throw new Error('主机名和 agent key 不能包含换行符');
+
+  // 执行器缺失检测 + 代装提示（不阻断：拒绝代装可后续自装）
+  await ensureCliInstalled(cli);
 
   fs.mkdirSync(PI_AGENT_DIR, { recursive: true, mode: 0o700 });
   let mcp = {};
