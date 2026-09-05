@@ -349,7 +349,7 @@ function spawnTaskAgent(t) {
   const invocation = buildAgentInvocation(AGENT_CMD, { mode: 'task', prompt, sessionId: tid, cwd });
   const outLog = sandbox ? path.join(sandbox, 'output', 'stdout.txt') : null;
   console.log(`[daemon] 执行任务 ${tid} cwd=${cwd}` + (t.workdir ? '（项目目录）' : '（沙箱）'));
-  const child = spawn(invocation.cmd, invocation.args, {
+  const child = spawnCli(invocation.cmd, invocation.args, {
     cwd, env: invocation.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   const s = { proc: child, startedAt: Date.now(), timeoutTimer: null, outBuf: '' };
@@ -464,6 +464,12 @@ function scheduleIdleKill(convId) {
   s.idleTimer = setTimeout(() => killSession(convId), IDLE_KILL_MS);
 }
 
+/** spawn 包装：Windows 下 .cmd shim（copilot.cmd/claude.cmd 等 npm 全局）无法直接 spawn，需 shell:true */
+function spawnCli(cmd, args, options) {
+  const needsShell = process.platform === 'win32' && /\.cmd$/i.test(cmd);
+  return spawn(cmd, args, { ...options, shell: needsShell ? true : (options.shell ?? false) });
+}
+
 function spawnPiProcess(convId, s, cwd) {
   const invocation = buildAgentInvocation(AGENT_CMD, {
     mode: 'chat',
@@ -478,7 +484,7 @@ function spawnPiProcess(convId, s, cwd) {
     const sudoArgs = ['-n', '-u', runUser, '-H', '--', invocation.cmd, ...args];
     return spawn('sudo', sudoArgs, { cwd, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   }
-  return spawn(invocation.cmd, args, { cwd, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  return spawnCli(invocation.cmd, args, { cwd, env: invocation.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 }
 
 function spawnPi(convId, onEvent) {
