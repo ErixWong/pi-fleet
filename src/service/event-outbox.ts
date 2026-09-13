@@ -128,25 +128,52 @@ export async function publishPending({
   limit?: number;
 } = {}): Promise<EventRecord[]> {
   const batchSize = Math.min(1000, Math.max(1, Math.floor(limit) || 100));
+  const candidateSize = batchSize * 2;
   return withTransaction(async (conn) => {
     const now = nowString();
-    const result = await conn.query(
-      `SELECT id, account_id, actor_principal_id, action, resource_type,
-              resource_id, before_state, after_state, payload, retention,
-              occurred_at, published_at, attempts, next_attempt_at, last_error
+    const candidateResult = await conn.query(
+      `SELECT id
          FROM event
         WHERE published_at IS NULL
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY id
-        LIMIT ? FOR UPDATE SKIP LOCKED`,
-      [now, batchSize],
+        LIMIT ?`,
+      [now, candidateSize],
     );
-    const pending = rows(result);
+
+    const candidateIds = rows(candidateResult)
+      .map((row) => stringValue(row.id))
+      .filter((id) => id.length > 0);
+    if (candidateIds.length === 0) return [];
+
+    const placeholders = candidateIds.map(() => '?').join(', ');
+    const lockedResult = await conn.query(
+      `SELECT id, account_id, actor_principal_id, action, resource_type,
+              resource_id, before_state, after_state, payload, retention,
+              occurred_at, published_at, attempts, next_attempt_at, last_error
+         FROM event IGNORE INDEX (idx_evt_outbox)
+        WHERE id IN (${placeholders})
+          AND published_at IS NULL
+        LIMIT ? FOR UPDATE SKIP LOCKED`,
+      [...candidateIds, batchSize],
+    );
+    const lockedById = new Map(
+      rows(lockedResult).map((row) => [stringValue(row.id), row]),
+    );
+    const pending = candidateIds
+      .map((id) => lockedById.get(id))
+      .filter((row): row is Record<string, unknown> => row !== undefined);
+    if (pending.length === 0) return [];
+
+    const lockedPlaceholders = pending.map(() => '?').join(', ');
+    await conn.query(
+      `UPDATE event
+          SET published_at = ?
+        WHERE id IN (${lockedPlaceholders})
+          AND published_at IS NULL`,
+      [now, ...pending.map((row) => row.id)],
+    );
     for (const row of pending) {
-      await conn.query(
-        `UPDATE event SET published_at = ? WHERE id = ? AND published_at IS NULL`,
-        [now, row.id],
-      );
       row.published_at = now;
     }
     return pending.map(eventFromRow);

@@ -81,6 +81,7 @@ test('recordEvent 未传 account_id 时从 actor principal 推导账号', { conc
   eventIds.push(id);
   const rows = await getPool().query('SELECT account_id FROM event WHERE id = ?', [id]);
   assert.equal(rows[0].account_id, actorAccountId);
+  await markPublished(id);
 });
 
 test('markFailed 递增 attempts、写入错误并应用 next_attempt_at', { concurrency: false }, async () => {
@@ -110,6 +111,44 @@ test('SKIP LOCKED 不重复消费：两个连接并发消费同一批事件', { 
   const consumed = [...first, ...second].filter((event) => ids.includes(event.id));
   assert.equal(consumed.length, 2);
   assert.equal(new Set(consumed.map((event) => event.id)).size, 2);
+});
+
+test('历史事件很多时并发消费仍返回全部未投递事件', { concurrency: false }, async () => {
+  const historicalIds = [];
+  await withTransaction(async (conn) => {
+    for (let index = 0; index < 200; index += 1) {
+      const id = await recordEvent(conn, {
+        action: 'test.historical',
+        resource_type: 'test',
+        resource_id: `${uniqueResource}-historical-${index}`,
+        payload: { historical: true },
+      });
+      historicalIds.push(id);
+      eventIds.push(id);
+    }
+  });
+  await getPool().query(
+    `UPDATE event SET published_at = NOW()
+      WHERE id IN (${historicalIds.map(() => '?').join(',')})`,
+    historicalIds,
+  );
+
+  const pendingIds = [];
+  for (let index = 0; index < 3; index += 1) {
+    pendingIds.push(await createEvent({ action: `test.concurrent-history-${index}` }));
+  }
+  const [first, second] = await Promise.all([
+    publishPending({ limit: 2 }),
+    publishPending({ limit: 2 }),
+  ]);
+  const consumed = [...first, ...second].filter((event) => pendingIds.includes(event.id));
+  assert.equal(consumed.length, 3);
+  assert.equal(new Set(consumed.map((event) => event.id)).size, 3);
+  assert.deepEqual([...consumed].map((event) => event.id).sort(), [...pendingIds].sort());
+  for (const batch of [first, second]) {
+    const batchIds = batch.map((event) => event.id);
+    assert.deepEqual(batchIds, [...batchIds].sort());
+  }
 });
 
 test('markPublished 可确认事件，pruneNotified 不删除 audit', { concurrency: false }, async () => {
