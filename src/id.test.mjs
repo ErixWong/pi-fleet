@@ -45,6 +45,13 @@ test('同一毫秒内连续生成的 ID 严格按字典序递增', () => {
   }
 });
 
+test('跨多个真实毫秒生成的 ID 严格按字典序递增', () => {
+  const ids = Array.from({ length: 20000 }, () => newID(16));
+  for (let i = 1; i < ids.length; i += 1) {
+    assert.equal(ids[i - 1] < ids[i], true, `第 ${i} 个 ID 未递增`);
+  }
+});
+
 test('时钟回拨时生成的 ID 仍严格按字典序递增', () => {
   const originalNow = Date.now;
   const t0 = originalNow() + 1000;
@@ -60,10 +67,8 @@ test('时钟回拨时生成的 ID 仍严格按字典序递增', () => {
 });
 
 test('跨毫秒生成的 ID 按时间字典序递增', async () => {
-  const firstBatch = Array.from({ length: 20 }, () => newID());
+  const first = newID();
   await new Promise((resolve) => setTimeout(resolve, 5));
-  const secondBatch = Array.from({ length: 20 }, () => newID());
-  const lastFirst = [...firstBatch].sort().at(-1);
-  const firstSecond = [...secondBatch].sort().at(0);
-  assert.equal(lastFirst < firstSecond, true);
+  const second = newID();
+  assert.equal(first < second, true);
 });
