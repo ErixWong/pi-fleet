@@ -11,13 +11,14 @@ const CONTENT_TABLES = [
   'deliverables',
   'events',
 ];
+const MIGRATION_SOURCE = 'task_dispatch.content';
 const ID_RULES = [
   ['post', 'pst'],
   ['attachment', 'att'],
   ['deliverable', 'dlv'],
   ['event', 'evt'],
 ];
-const EVENT_MIGRATION_MARKER = '"migration":"task_dispatch.content"';
+const EVENT_MIGRATION_MARKER = `"migration":"${MIGRATION_SOURCE}"`;
 
 function usageError(message) {
   throw new Error(
@@ -221,24 +222,42 @@ async function verifyContent(source, target, check) {
     invalidDetails.length === 0 ? 'invalid=0' : invalidDetails.join(', '),
   );
 
+  const baselineRows = await target.query(
+    `SELECT id, payload
+       FROM event
+      WHERE action = 'migration.baseline'`,
+  );
+  const baseline = baselineRows
+    .map((row) => {
+      try {
+        return { id: row.id, payload: JSON.parse(String(row.payload)) };
+      } catch {
+        return null;
+      }
+    })
+    .find((row) => row?.payload?.source === MIGRATION_SOURCE);
   const before = await contentCounts(source);
   const after = await contentCounts(source);
   check(
-    'G 老库行数在迁移前后不变（仅执行 SELECT 证明源库未写入）',
+    'G 老库实时快照在验证前后不变（仅执行 SELECT 证明源库未写入）',
     countsEqual(before, after),
-    `before=${JSON.stringify(before)}, after=${JSON.stringify(after)}`,
+    `realtime_snapshot_before=${JSON.stringify(before)}, realtime_snapshot_after=${JSON.stringify(after)}, baseline=${JSON.stringify(baseline?.payload?.counts ?? null)}`,
   );
 
   const migratedEvents = await target.query(
     `SELECT COUNT(*) AS count
        FROM event
-      WHERE payload LIKE ?`,
+      WHERE action <> 'migration.baseline'
+        AND payload LIKE ?`,
     [`%${EVENT_MIGRATION_MARKER}%`],
   );
+  const baselineEventCount = Number(baseline?.payload?.counts?.events);
   check(
-    'H event 迁移行数 = 老库 events 行数',
-    count(migratedEvents[0]) === before.events,
-    `marker=payload.migration:"task_dispatch.content", target=${count(migratedEvents[0])}, source=${before.events}`,
+    'H event 迁移行数 = 迁移基线 events 条数',
+    baseline !== undefined
+      && Number.isInteger(baselineEventCount)
+      && count(migratedEvents[0]) === baselineEventCount,
+    `marker=payload.migration:"task_dispatch.content", target=${count(migratedEvents[0])}, baseline=${baselineEventCount}, baseline_event_id=${baseline?.id ?? 'missing'}`,
   );
 }
 

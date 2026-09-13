@@ -17,6 +17,7 @@ const CONTENT_TABLES = [
   'deliverables',
   'events',
 ];
+const MIGRATION_SOURCE = 'task_dispatch.content';
 const CLEAR_TABLES = [
   'deliverable',
   'post_verdict',
@@ -924,12 +925,13 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
   const existingRows = await connection.query(
     `SELECT id, payload FROM event
       WHERE resource_type = 'legacy'
-        AND payload LIKE '%"migration":"task_dispatch.content"%'`,
+        AND payload LIKE ?`,
+    [`%"migration":"${MIGRATION_SOURCE}"%`],
   );
   const migratedIds = new Set();
   for (const row of existingRows) {
     const payload = JSON.parse(String(row.payload));
-    if (payload.migration === 'task_dispatch.content' && payload.legacy_event_id !== undefined) {
+    if (payload.migration === MIGRATION_SOURCE && payload.legacy_event_id !== undefined) {
       migratedIds.add(String(payload.legacy_event_id));
       await connection.query(
         `UPDATE event
@@ -945,7 +947,7 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
     const legacyEventId = String(row.id);
     if (migratedIds.has(legacyEventId)) continue;
     const payload = JSON.stringify({
-      migration: 'task_dispatch.content',
+      migration: MIGRATION_SOURCE,
       legacy_event_id: legacyEventId,
       legacy_actor: row.actor === null ? null : String(row.actor),
       legacy_ref_task: row.ref_task === null ? null : String(row.ref_task),
@@ -970,6 +972,47 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
     created += 1;
   }
   return created;
+}
+
+async function writeMigrationBaseline(connection, sourceCountsValue, sourceRowsValue, accountId) {
+  const payload = JSON.stringify({
+    source: MIGRATION_SOURCE,
+    counts: sourceCountsValue,
+    max_legacy_event_id: sourceRowsValue.length > 0
+      ? String(sourceRowsValue[sourceRowsValue.length - 1].id)
+      : null,
+    migrated_at: nowString(),
+  });
+  const existingRows = await connection.query(
+    `SELECT id, payload
+       FROM event
+      WHERE action = 'migration.baseline'`,
+  );
+  const existing = existingRows.find((row) => {
+    try {
+      return JSON.parse(String(row.payload)).source === MIGRATION_SOURCE;
+    } catch {
+      return false;
+    }
+  });
+  if (existing) {
+    await connection.query(
+      `UPDATE event
+          SET account_id = ?, payload = ?, retention = 'audit',
+              occurred_at = ?, published_at = COALESCE(published_at, ?)
+        WHERE id = ?`,
+      [accountId, payload, nowString(), nowString(), existing.id],
+    );
+    return;
+  }
+  const occurredAt = nowString();
+  await connection.query(
+    `INSERT INTO event
+       (id, account_id, actor_principal_id, action, resource_type, resource_id,
+        before_state, after_state, payload, retention, occurred_at, published_at)
+     VALUES (?, ?, NULL, 'migration.baseline', 'migration', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
+    [newId('evt'), accountId, payload, occurredAt, occurredAt],
+  );
 }
 
 async function refreshReplyCounts(connection, roots) {
@@ -1061,6 +1104,7 @@ async function main() {
       attachmentsResult.attachmentByLegacyId,
     );
     const eventsCreated = await migrateEvents(target, sourceData.events, accountId);
+    await writeMigrationBaseline(target, sourceBefore, sourceData.events, accountId);
     await refreshReplyCounts(
       target,
       new Set([
