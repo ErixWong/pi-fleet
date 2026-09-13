@@ -120,6 +120,31 @@ test('key 轮换保留宽限期并继承旧 scopes，宽限期后拒绝旧 key',
   assert.equal((await verifyApiKey(rotated.key))?.key_id, rotated.apiKey.id);
 });
 
+test('key 轮换只宽限指定 key，其他未撤销 key 的过期时间不变', async () => {
+  const first = await createApiKey({
+    principal_id: agent.id,
+    scopes: ['post:read'],
+  });
+  const second = await createApiKey({
+    principal_id: agent.id,
+    scopes: ['task:read'],
+    expires_at: '2099-01-01 00:00:00',
+  });
+  createdApiKeyIds.push(first.apiKey.id, second.apiKey.id);
+
+  const rotated = await rotateApiKey(agent.id, {
+    key_id: first.apiKey.id,
+    grace_hours: 1,
+  });
+  createdApiKeyIds.push(rotated.apiKey.id);
+
+  const keys = await listApiKeys(agent.id);
+  const firstAfter = keys.find((key) => key.id === first.apiKey.id);
+  const secondAfter = keys.find((key) => key.id === second.apiKey.id);
+  assert.ok(firstAfter?.expires_at);
+  assert.equal(secondAfter?.expires_at, '2099-01-01 00:00:00');
+});
+
 test('hasScope 支持单 scope 和 all-of 检查', () => {
   assert.equal(hasScope(['task:read', 'task:submit'], 'task:read'), true);
   assert.equal(hasScope(['task:read'], 'task:write'), false);

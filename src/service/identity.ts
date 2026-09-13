@@ -107,6 +107,7 @@ export interface CreateApiKeyInput {
 }
 
 export interface RotateApiKeyOptions {
+  key_id?: string;
   label?: string;
   scopes?: string[];
   grace_hours?: number;
@@ -608,18 +609,24 @@ export async function rotateApiKey(
   return withTransaction(async (conn) => {
     const principal = await getPrincipalWithConnection(conn, principalId);
     if (!principal) throw new Error(`Principal not found: ${principalId}`);
+    const targetResult = await conn.query(
+      `SELECT id, scopes
+         FROM api_key
+        WHERE id = COALESCE(?, id)
+          AND principal_id = ?
+          AND revoked_at IS NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [options.key_id ?? null, principalId],
+    );
+    const target = rows(targetResult)[0];
+    if (options.key_id !== undefined && !target) {
+      throw new Error(`API key not found or revoked: ${options.key_id}`);
+    }
     let scopes = options.scopes;
     if (scopes === undefined) {
-      const previous = await conn.query(
-        `SELECT scopes
-           FROM api_key
-          WHERE principal_id = ? AND revoked_at IS NULL
-          ORDER BY id DESC
-          LIMIT 1`,
-        [principalId],
-      );
-      const previousRow = rows(previous)[0];
-      scopes = previousRow ? parseScopes(previousRow.scopes) : [];
+      scopes = target ? parseScopes(target.scopes) : [];
     }
     const creation = await insertApiKey(
       conn,
@@ -630,13 +637,15 @@ export async function rotateApiKey(
       },
       issuedAt,
     );
-    await conn.query(
-      `UPDATE api_key
-          SET expires_at = ?
-        WHERE principal_id = ? AND id <> ? AND revoked_at IS NULL
-          AND (expires_at IS NULL OR expires_at > ?)`,
-      [expiresAt, principalId, creation.apiKey.id, issuedAt],
-    );
+    if (target) {
+      await conn.query(
+        `UPDATE api_key
+            SET expires_at = ?
+          WHERE id = ? AND principal_id = ? AND revoked_at IS NULL
+            AND (expires_at IS NULL OR expires_at > ?)`,
+        [expiresAt, target.id, principalId, issuedAt],
+      );
+    }
     return creation;
   });
 }

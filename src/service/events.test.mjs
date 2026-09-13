@@ -4,7 +4,7 @@ import { tsImport } from 'tsx/esm/api';
 
 process.env.DB_NAME = 'erix';
 
-const events = await tsImport('./events.ts', import.meta.url);
+const events = await tsImport('./event-outbox.ts', import.meta.url);
 const { recordEvent, publishPending, markPublished, markFailed, pruneNotified } = events;
 const { getPool, initSchema, withTransaction } = events;
 
@@ -12,6 +12,18 @@ await initSchema();
 
 const eventIds = [];
 const uniqueResource = `evt-${Date.now().toString(36)}`;
+const actorAccountId = `acct-${Date.now().toString(36)}`;
+const actorPrincipalId = `prn-${Date.now().toString(36)}`;
+
+await getPool().query(
+  `INSERT INTO account (id, name, created_at) VALUES (?, ?, NOW())`,
+  [actorAccountId, actorAccountId],
+);
+await getPool().query(
+  `INSERT INTO principal (id, account_id, kind, name, created_at)
+   VALUES (?, ?, 'agent', ?, NOW())`,
+  [actorPrincipalId, actorAccountId, actorPrincipalId],
+);
 
 async function createEvent(input = {}) {
   const id = await withTransaction((conn) =>
@@ -55,6 +67,20 @@ test('outbox 返回未投递事件并标记，第二次不重复返回', { concu
   assert.equal(published.find((event) => event.id === id)?.published_at !== null, true);
   const second = await publishPending({ limit: 100 });
   assert.equal(second.some((event) => event.id === id), false);
+});
+
+test('recordEvent 未传 account_id 时从 actor principal 推导账号', { concurrency: false }, async () => {
+  const id = await withTransaction((conn) =>
+    recordEvent(conn, {
+      actor_principal_id: actorPrincipalId,
+      action: 'test.account-derived',
+      resource_type: 'test',
+      resource_id: `${uniqueResource}-account-derived`,
+    }),
+  );
+  eventIds.push(id);
+  const rows = await getPool().query('SELECT account_id FROM event WHERE id = ?', [id]);
+  assert.equal(rows[0].account_id, actorAccountId);
 });
 
 test('markFailed 递增 attempts、写入错误并应用 next_attempt_at', { concurrency: false }, async () => {
@@ -108,5 +134,7 @@ test.after(async () => {
       eventIds,
     );
   }
+  await getPool().query('DELETE FROM principal WHERE id = ?', [actorPrincipalId]);
+  await getPool().query('DELETE FROM account WHERE id = ?', [actorAccountId]);
   await getPool().end();
 });
