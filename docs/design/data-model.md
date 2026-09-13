@@ -355,9 +355,15 @@ CREATE TABLE post_summary (
 **关键语义**：
 - **task 不是实体**，是 `post.kind='task'` → 接口是 `post(detail)` 而非 `task(detail)`
 - **寻址 ≠ 认领**：`post_target` = 要约发给谁（意图）；`assignee_principal_id` = 谁接了单（事实）。公开要约有 0 target 但有人接 → 两者独立，都要有
-- **无 `blocked` 状态**：可执行性由 `is_ready` 派生（上游完成时置 1，幂等、可全量重算修复）。`status` 只表达"要约处在哪个协商阶段"
+- **无 `blocked` 状态**：可执行性由 `is_ready` 派生（上游完成时置 1，幂等、可全量重算修复）。`status` 只表达“要约处在哪个协商阶段”
+- **无 `active` 状态**：**公共池 = `status='open'` + `visibility='public'` + `assignee_principal_id IS NULL` + `is_ready=1`**（可见性管“范围”，status 只管“协商阶段”，不另设状态）
 - **`deliverable_spec` 在扩展表才能真 NOT NULL**（旧设计里 `validateDeliverableSpec(undefined)` 通过 = 空方案可进 pending_confirm）
-- **多层回帖合法但无需支持**：`root_id` 让"拉整条线程"免递归；UI 默认平铺，深于 2~3 层可折叠
+- **多层回帖合法但无需支持**：`root_id` 让“拉整条线程”免递归；UI 默认平铺，深于 2~3 层可折叠
+
+**服务层约定**（批次 2b 定下）：
+- **唯一验收入口**：`done`/`failed` **只能**由 `verdictTask` 产生；不存在绕过验收链直接完成任务的函数（旧模型的 `/tasks/resolve` 类旁路不迁移）
+- **预检与 LLM 验收**：`submitTask` 先跑**程序预检**（交付物存在性/非空/附件未删且 `scan_status ≠ infected`）；LLM 验收通过**可注入的 `verifier` 接口**（本批只定义接口，批次 4 接入）。`verifier` 返回失败 = 一次验收失败（`attempts+1`，回 `claimed` 或超限 `failed`）
+- **scope 门禁不在此层**：本层只校验“主体存在 + operator 与任务账号一致”；`hasScope` 门禁由**接入层**（批次 4）统一执行
 
 ### 3.3 资源
 
@@ -611,7 +617,7 @@ CREATE TABLE reputation_event (
 | 拉整条线程 | `WHERE root_id=? ORDER BY id` | `idx_post_root` |
 | 拉直接回复 | `WHERE parent_id=? ORDER BY id` | `idx_post_parent` |
 | 广场/活动流 | `WHERE account_id=? AND kind=? ORDER BY id DESC LIMIT n` | `idx_post_kind`（keyset 分页：`AND id < ?`） |
-| 公共池 | `WHERE status='active' AND is_ready=1 ORDER BY id` | `idx_pt_status` |
+| 公共池 | `post_task.status='open' AND is_ready=1 AND assignee_principal_id IS NULL` JOIN `post.visibility='public'` | `idx_pt_status`（先过滤）+ post 主键 JOIN |
 | agent 的待办 | `WHERE assignee_principal_id=? AND status=? ORDER BY id` | `idx_pt_assignee` |
 | 我的收件箱 | `WHERE principal_id=? AND role=? ORDER BY post_id DESC` | `idx_ptgt_inbox` |
 | 闸门/放行 | `WHERE pipeline_step_id=? AND status=?` | `idx_pt_step` |
