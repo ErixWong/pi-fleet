@@ -84,6 +84,8 @@ docs/agent-onboarding.md  # agent 接入指南（通用契约 + pi 参考实现�
 - **及时提交 + 提醒 push**：完成一个功能/修复（跑完验收后）就 git commit（message 用中文详细概括：`feat:`/`fix:` 前缀 + 要点列表），并**明确提醒用户 push 到远程仓库**；不要攒一堆改动到最后才提交
 - **大变更先与用户确认 issue/PR**：涉及架构调整、破坏性变更、多模块重构、或用户明确要求走评审流程的大变更——**先与用户确认**是否需要：① 建 issue（记录需求/设计/验收口径）② 建 PR（分支提交走评审）③ 直接 push main；用户确认后再动手，不擅自创建；小变更（bugfix/小功能）直接提交 main 即可
 - **业务逻辑只写一份**：新功能先放 `src/service/tasks.ts` / `market.ts`，REST 和 MCP 都调它
+- **数据模型目标态**：见 **`docs/design/data-model.md`**（post 原语模型，issue **#11**）——开发阶段**直接重建**，不迁移历史数据；8 条原语 + 砍单清单是后续所有 schema 决策的准则
+- **ID 约定**（重建后生效）：主键**一律字符串单层**（`newId(prefix)` = 类型前缀 + 无混淆字符 + 时间前缀），规则见 `~/projects/AGENTS.md` §3.4，前缀登记表在 `docs/design/data-model.md` §2；当前代码仍是 BIGINT + 业务串双层，重建时改造（issue **#13**）
 - **时间**：Node 侧生成本地字符串，数据库不做时间判断
 - **BIGINT 是字符串**：连接池配置了 bigNumberStrings，id 字段是字符串类型
 - **Windows 端口残留**：`npm run dev`（tsx）停止时子进程可能残留占 3000 端口，
