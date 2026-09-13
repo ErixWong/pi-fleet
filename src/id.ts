@@ -9,6 +9,7 @@ const CONFUSABLE_MAP: Record<string, string> = {
   i: 'j',
   l: 'm',
 };
+const BASE = SAFE_CHARS.length;
 
 function toSafeChars(s: string): string {
   let out = '';
@@ -16,13 +17,40 @@ function toSafeChars(s: string): string {
   return out;
 }
 
+let lastMs = 0;
+let lastDigits: number[] = [];
+
+function randomDigits(length: number): number[] {
+  return [...crypto.randomBytes(length)].map((b) => b % BASE);
+}
+
+function increment(digits: number[]): boolean {
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    if (digits[i] < BASE - 1) {
+      digits[i] += 1;
+      return true;
+    }
+    digits[i] = 0;
+  }
+  return false;
+}
+
 export function newID(length = 16): string {
   const len = Math.max(length, 10);
-  let value = [...crypto.randomBytes(len)]
-    .map((b) => SAFE_CHARS[b % SAFE_CHARS.length])
-    .join('');
-  if (len > 15) value = toSafeChars(Date.now().toString(36)) + value;
-  return value.substring(0, len);
+  const tsLen = len > 15 ? 8 : 0;
+  const randLen = len - tsLen;
+  const now = Date.now();
+
+  if (now <= lastMs && lastDigits.length === randLen) {
+    if (!increment(lastDigits)) lastDigits = randomDigits(randLen);
+  } else {
+    lastMs = now;
+    lastDigits = randomDigits(randLen);
+  }
+
+  const rand = lastDigits.map((digit) => SAFE_CHARS[digit]).join('');
+  if (tsLen === 0) return rand.substring(0, len);
+  return (toSafeChars(lastMs.toString(36)) + rand).substring(0, len);
 }
 
 export function newId(prefix: string, length = 16): string {

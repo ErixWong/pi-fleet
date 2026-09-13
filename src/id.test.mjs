@@ -29,6 +29,36 @@ test('同一毫秒内快速生成的 ID 全部唯一', () => {
   assert.equal(ids.size, 10000);
 });
 
+test('同一毫秒内连续生成的 ID 严格按字典序递增', () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    let previous = newID();
+    for (let i = 1; i < 5000; i += 1) {
+      const current = newID();
+      assert.equal(previous < current, true);
+      previous = current;
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('时钟回拨时生成的 ID 仍严格按字典序递增', () => {
+  const originalNow = Date.now;
+  const t0 = originalNow() + 1000;
+  const times = [t0 + 100, t0];
+  Date.now = () => times.shift() ?? t0;
+  try {
+    const first = newID();
+    const second = newID();
+    assert.equal(first < second, true);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test('跨毫秒生成的 ID 按时间字典序递增', async () => {
   const firstBatch = Array.from({ length: 20 }, () => newID());
   await new Promise((resolve) => setTimeout(resolve, 5));
