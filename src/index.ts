@@ -9,6 +9,7 @@ import { initDb } from './db.js';
 import { apiRouter } from './routes/api.js';
 import { mcpRouter } from './routes/mcp.js';
 import { agentRouter } from './routes/agent.js';
+import { v2Router } from './routes/v2/index.js';
 import { recoverStaleRunningTasks, recoverStaleClaimedTasks, autoConfirmPendingConfirm } from './scheduler.js';
 import { initSettings } from './service/settings.js';
 import { scanPendingAttachments } from './service/attachments.js';
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
   }
 
   app.use('/api', apiRouter);
+  app.use('/api/v2', v2Router);
   app.use('/api/agent', agentRouter);
   app.use(mcpRouter);
 

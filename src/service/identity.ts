@@ -115,7 +115,7 @@ export interface RotateApiKeyOptions {
 
 export interface VerifiedApiKey {
   principal: Principal;
-  scopes: string[];
+  scopes: Scope[];
   key_id: string;
 }
 
@@ -164,7 +164,7 @@ function validateScopes(scopes: string[]): string[] {
   return unique;
 }
 
-function parseScopes(value: unknown): string[] {
+function parseScopes(value: unknown): Scope[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stringValue(value));
@@ -174,7 +174,11 @@ function parseScopes(value: unknown): string[] {
   if (!Array.isArray(parsed) || parsed.some((scope) => typeof scope !== 'string')) {
     throw new Error('Invalid scopes JSON in api_key');
   }
-  return parsed;
+  const scopes = parsed.filter((scope): scope is Scope => SCOPES.has(scope));
+  if (scopes.length !== parsed.length) {
+    throw new Error('Invalid scope in api_key');
+  }
+  return scopes;
 }
 
 function accountFromRow(row: DbRow): Account {
