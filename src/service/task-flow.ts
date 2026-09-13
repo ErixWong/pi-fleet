@@ -803,7 +803,7 @@ export async function listTasks(
     params.push(filter.account_id);
   }
   if (filter.view === 'pool') {
-    predicates.push(`t.status IN ('open', 'active')`);
+    predicates.push(`t.status = 'open'`);
     predicates.push('t.is_ready = 1');
     predicates.push(`p.visibility = 'public'`);
     predicates.push('t.assignee_principal_id IS NULL');
