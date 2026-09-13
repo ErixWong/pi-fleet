@@ -1,5 +1,8 @@
 import express from 'express';
 import { principalAuthMiddleware, requirePrincipal } from '../../auth-principal.js';
+import { attachmentsV2Router } from './attachments.js';
+import { postsV2Router } from './posts.js';
+import { tasksV2Router } from './tasks.js';
 
 export const v2Router = express.Router();
 
@@ -18,3 +21,7 @@ v2Router.get('/whoami', principalAuthMiddleware(), (_req, res) => {
     key_id: context.key_id,
   });
 });
+
+v2Router.use('/posts', postsV2Router);
+v2Router.use('/tasks', tasksV2Router);
+v2Router.use('/attachments', attachmentsV2Router);
