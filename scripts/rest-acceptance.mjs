@@ -1,5 +1,5 @@
-// REST 端点验收：heartbeat / info / poll / tasks/result / renew / reports（Bearer key）
 import 'dotenv/config';
+// REST 端点验收：heartbeat / info / poll / tasks/result / renew / reports（Bearer key）
 
 const BASE = process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const PASSWORD = 'admin123';
@@ -128,7 +128,7 @@ await api('POST', '/api/agent/claim', { task_id: sTask.task_id }, KEY);
 
 // workdir 写回
 const wd = await api('POST', '/api/agent/tasks/workdir', {
-  task_id: sTask.task_id, workdir: '/opt/work/tasks/' + sTask.task_id,
+  task_id: sTask.task_id, workdir: '~/projects/rest-work/' + sTask.task_id,
 }, KEY);
 check('workdir 写回成功', wd.data.ok === true, JSON.stringify(wd.data));
 

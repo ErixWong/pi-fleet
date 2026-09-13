@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS agents (
   tags VARCHAR(255) NOT NULL DEFAULT '',
   accept_external TINYINT(1) NOT NULL DEFAULT 0 COMMENT '接单开关：是否允许认领公共池(pool)外单',
   run_user VARCHAR(64) NULL COMMENT '运行 pi 的默认用户（部署时指定；空=bridge 当前用户；非当前用户时 bridge 用 sudo -n -u 切换，需 sudoers 白名单）',
+  agent_cli VARCHAR(32) NULL COMMENT '平台指定的任务执行器；空=使用客户端本地配置',
   key_hash CHAR(64) NOT NULL UNIQUE,
   status ENUM('active','disabled') NOT NULL DEFAULT 'active',
   visible TINYINT(1) NOT NULL DEFAULT 1 COMMENT '软删除标记：有关联数据时置 0 不再显示',
@@ -184,6 +185,14 @@ CREATE TABLE IF NOT EXISTS agent_projects (
   projects TEXT NULL COMMENT 'JSON 数组：~/projects 下目录名',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (agent_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS agent_clis (
+  agent_id BIGINT NOT NULL,
+  cli VARCHAR(32) NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (agent_id, cli),
+  CONSTRAINT fk_agent_clis_agent FOREIGN KEY (agent_id) REFERENCES agents(id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -420,6 +429,7 @@ export async function initDb(): Promise<void> {
     for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) {
       await conn.query(stmt);
     }
+    await migrateAgentCapabilities(conn);
     // 迁移：conversations 新列（task_id/name/workdir/run_user）——SCHEMA 建表后执行
     await migrateConversations(conn);
     await migrateLlmProviders(conn);
@@ -427,6 +437,19 @@ export async function initDb(): Promise<void> {
     await migrateLegacyAgentTags(conn);
   } finally {
     conn.release();
+  }
+}
+
+/** 迁移：旧 agents 表补充平台指定执行器列；能力明细由 agent_clis 表保存。 */
+async function migrateAgentCapabilities(conn: DbConn): Promise<void> {
+  const rows = (await conn.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'agents' AND column_name = 'agent_cli'`,
+  )) as Array<Record<string, unknown>>;
+  if (Number(rows[0]?.c ?? 0) === 0) {
+    await conn.query(
+      `ALTER TABLE agents ADD COLUMN agent_cli VARCHAR(32) NULL COMMENT '平台指定的任务执行器；空=使用客户端本地配置' AFTER run_user`,
+    );
+    console.log('[db] agents 加 agent_cli');
   }
 }
 
