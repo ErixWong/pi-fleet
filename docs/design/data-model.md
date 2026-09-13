@@ -186,6 +186,10 @@ CREATE TABLE api_key (
 ) ENGINE=InnoDB;
 ```
 
+**服务层约定**：
+- `verifyApiKey(key)`：校验 `key_hash` + `revoked_at IS NULL` + 未过期 + principal 未软删；命中后刷新 `last_used_at`（泄漏可观测）
+- `rotateApiKey`：签发新 key，**只宽限被轮换的那一个 key**（默认该主体最近创建的未撤销 key；可显式指定），**不批量宽限其他 key**（否则会意外延长其他 key 的寿命，掩盖风险）
+
 **scope 清单**（能力原语，自由组合；平台**不预设角色**）：
 
 | scope | 能力 |
@@ -391,6 +395,11 @@ CREATE TABLE event (
 **免费获得**：断线续传（`Last-Event-ID` = `event.id`）、多实例安全（取代旧 `ChatHub` 内存 Map 单进程归属）、审计完整、失败可观测（`attempts`/`last_error`）。
 
 **保留策略**：`retention='audit'` 永不清理；`'notify'` 投递成功后 N 天清理。
+
+**服务层约定**：
+- `recordEvent(conn, input)`：**必须接受调用方的事务连接**（铁律 #1 的实现方式）；`account_id` 取显式传入，否则从 `actor_principal_id` 对应 principal 推导，两者皆无则 `NULL`
+- `publishPending`：出队即标记 `published_at`（行锁）；`markFailed` 时**清空 `published_at`** 并设 `next_attempt_at`，使失败事件可再次出队
+- 投递（SSE/HTTP）**不在事件服务内**（由 outbox worker/接入层做）——事件服务只保证“可靠出队 + 标记 + 重试计数”
 
 ### 3.5 编排（规则，不是父级）
 
