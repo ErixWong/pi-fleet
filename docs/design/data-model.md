@@ -64,23 +64,59 @@
 // src/id.ts
 import crypto from 'crypto';
 
-// 无混淆字符集：去掉 0/o、1/i/l（LLM 抄写 ID 时看错是真实故障源）
+// 无混淆字符集（顺序 = 数值序，0..30）
 const SAFE_CHARS = '23456789abcdefghjkmnpqrstuvwxyz'; // 31 字符
-const CONFUSABLE_MAP: Record<string, string> = { '0': '2', o: 'p', '1': '3', i: 'j', l: 'm' };
+const BASE = SAFE_CHARS.length; // 31
+const TS_WIDTH = 9; // 定长时间戳位数：31^9 ≈ 2.6e13 ms ≈ 公元 2800 年
 
-function toSafeChars(s: string): string {
+// 定长 31 进制时间戳：进制转换本身保序（字典序 = 数值序）
+function timestampPart(ms: number): string {
   let out = '';
-  for (const ch of s) out += CONFUSABLE_MAP[ch] || ch;
+  let v = ms;
+  for (let i = 0; i < TS_WIDTH; i += 1) {
+    out = SAFE_CHARS[v % BASE] + out;
+    v = Math.floor(v / BASE);
+  }
   return out;
+}
+
+// 单调状态（进程内）：保证同 ms 内生成的 ID 严格递增
+let lastMs = 0;
+let lastDigits: number[] = [];
+
+function randomDigits(n: number): number[] {
+  return [...crypto.randomBytes(n)].map((b) => b % BASE);
+}
+
+function increment(digits: number[]): boolean {
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    if (digits[i] < BASE - 1) {
+      digits[i] += 1;
+      return true;
+    }
+    digits[i] = 0; // 进位
+  }
+  return false;
 }
 
 export function newID(length = 16): string {
   const len = Math.max(length, 10);
-  let value = [...crypto.randomBytes(len)]
-    .map((b) => SAFE_CHARS[b % SAFE_CHARS.length])
-    .join('');
-  if (len > 15) value = toSafeChars(Date.now().toString(36)) + value; // 时间有序
-  return value.substring(0, len);
+  const useTs = len > 15;
+  const tsLen = useTs ? TS_WIDTH : 0;
+  const randLen = len - tsLen; // 如 len=16 → 随机 7 位（31^7 ≈ 2.7e10 /ms）
+  const now = Date.now();
+
+  // now <= lastMs：同 ms 递增；时钟回拨时沿用上一时间戳（保持单调）
+  if (now <= lastMs && lastDigits.length === randLen) {
+    if (!increment(lastDigits)) lastDigits = randomDigits(randLen);
+  } else {
+    lastMs = now;
+    lastDigits = randomDigits(randLen);
+  }
+
+  const ts = useTs ? timestampPart(lastMs) : '';
+  const rand = lastDigits.map((d) => SAFE_CHARS[d]).join('');
+  return (ts + rand).substring(0, len);
 }
 
 export function newId(prefix: string, length = 16): string {
@@ -88,8 +124,12 @@ export function newId(prefix: string, length = 16): string {
 }
 ```
 
-**为什么时间前缀**：主键即时间索引 → `ORDER BY id` = 时间序（InnoDB 聚簇索引顺序读）、**keyset 分页免费**、不需要独立的 `created_at` 排序索引。
-**诚实说明**：时间前缀是 **ms 精度**，同毫秒内并发创建的 ID 顺序由随机后缀决定（近似有序）；精确排序用 `ORDER BY created_at, id`。
+**为什么时间前缀 + 单调**：主键即时间索引 → `ORDER BY id` = **生成序**（InnoDB 聚簇索引顺序读）、**keyset 分页精确**、`id > 游标` 的“之后”判断可靠、不需要独立的 `created_at` 排序索引。
+
+> ⚠️ **两个实测教训**（pi-market 批次 2a 验收定位，已在 `~/projects/AGENTS.md` §3.4 同步）：
+> 1. **必须严格单调**（字典序 = 生成序）。否则快速连发时：线程顺序错乱（用户可见）、`pending/stale` 算错、`recent` 取错、keyset 分页跳漏。实测 touwaka 原版（时间前缀 + 随机后缀）同 ms 内 **28/30 乱序**。
+> 2. **时间戳禁用“字符替换式混淆”**（如 `0→2`、`l→m`）：映射**不保序**，跨 ms 会让相邻时间戳在字典序上“倒退”（实测改成同 ms 递增后，5000 个 ID 仍在第 4347 个出错）→ 必须用**定长 31 进制进制转换**。
+> 限制：各进程独立计数器 → **同 ms 跨进程/多实例顺序不保证**（服务端单进程写库时成立；多实例需另行加固）。
 
 ### 前缀登记表（新增实体在此登记）
 
