@@ -364,20 +364,39 @@ async function verifyContent(source, target, check) {
     `missing_historical_ids=${JSON.stringify(missingHistoricalIds)}, added_since_baseline=${JSON.stringify(changedSnapshots)}, current=${JSON.stringify(currentSnapshot)}`,
   );
 
-  const migratedEvents = await target.query(
+  const migratedEventRows = await target.query(
     `SELECT COUNT(*) AS count
        FROM event
       WHERE action <> 'migration.baseline'
         AND payload LIKE ?`,
     [`%${EVENT_MIGRATION_MARKER}%`],
   );
+  const migratedEventIds = Array.isArray(baseline?.payload?.migrated_ids?.event)
+    ? baseline.payload.migrated_ids.event.map((value) => String(value))
+    : [];
+  const migratedEventIdRows = migratedEventIds.length === 0
+    ? []
+    : await target.query(
+      `SELECT id
+         FROM event
+        WHERE id IN (${migratedEventIds.map(() => '?').join(',')})
+          AND action <> 'migration.baseline'
+          AND payload LIKE ?`,
+      [...migratedEventIds, `%${EVENT_MIGRATION_MARKER}%`],
+    );
+  const missingMigratedEventIds = setDifference(
+    migratedEventIds,
+    migratedEventIdRows.map((row) => String(row.id)),
+  );
   const baselineEventCount = Number(baseline?.payload?.counts?.events);
   check(
-    'H event 迁移行数 = 迁移基线 events 条数',
+    'H event 迁移行数与 migrated_ids 及基线 events 条数一致',
     baseline !== undefined
       && Number.isInteger(baselineEventCount)
-      && count(migratedEvents[0]) === baselineEventCount,
-    `marker=payload.migration:"task_dispatch.content", target=${count(migratedEvents[0])}, baseline=${baselineEventCount}, baseline_event_id=${baseline?.id ?? 'missing'}`,
+      && migratedEventIds.length === baselineEventCount
+      && missingMigratedEventIds.length === 0
+      && count(migratedEventRows[0]) === baselineEventCount,
+    `marker=payload.migration:"task_dispatch.content", target=${count(migratedEventRows[0])}, baseline=${baselineEventCount}, migrated_ids=${migratedEventIds.length}, missing=${missingMigratedEventIds.length}, baseline_event_id=${baseline?.id ?? 'missing'}`,
   );
 }
 

@@ -18,15 +18,6 @@ const CONTENT_TABLES = [
   'events',
 ];
 const MIGRATION_SOURCE = 'task_dispatch.content';
-const CLEAR_TABLES = [
-  'deliverable',
-  'post_verdict',
-  'post_target',
-  'post_task',
-  'post_channel',
-  'attachment',
-  'event',
-];
 const TARGET_CONTENT_TABLES = [
   'post',
   'post_task',
@@ -40,27 +31,13 @@ const TARGET_CONTENT_TABLES = [
   'tag',
   'post_tag',
 ];
-const TARGET_ID_SELECTORS = {
-  post: { expression: 'id', order: 'id' },
-  post_task: { expression: 'post_id', order: 'post_id' },
-  post_channel: { expression: 'post_id', order: 'post_id' },
-  post_verdict: { expression: 'post_id', order: 'post_id' },
-  post_target: { expression: "CONCAT(post_id, ':', principal_id, ':', role)", order: 'post_id, principal_id, role' },
-  attachment: { expression: 'id', order: 'id' },
-  deliverable: { expression: 'id', order: 'id' },
-  event: { expression: 'id', order: 'id' },
-  post_summary: { expression: "CONCAT(root_id, ':', revision)", order: 'root_id, revision' },
-  tag: { expression: 'id', order: 'id' },
-  post_tag: { expression: "CONCAT(post_id, ':', tag_id)", order: 'post_id, tag_id' },
-};
-const FORCE_DELETE_BATCH_SIZE = 500;
 
 let lastMs = 0;
 let lastRandom = [];
 
 function usageError(message) {
   throw new Error(
-    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--account <account_id|name>] [--force --confirm-wipe-content] [--allow-empty]`,
+    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--account <account_id|name>] [--allow-empty]\n需要从头重来时，先执行 node scripts/db-rebuild.mjs --database <新库>（整库重建）再重跑搬家`,
   );
 }
 
@@ -71,21 +48,11 @@ function validDatabaseName(name) {
 function parseArgs() {
   let from;
   let to;
-  let force = false;
-  let confirmWipeContent = false;
   let allowEmpty = false;
   let account;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg === '--force') {
-      force = true;
-      continue;
-    }
-    if (arg === '--confirm-wipe-content') {
-      confirmWipeContent = true;
-      continue;
-    }
     if (arg === '--allow-empty') {
       allowEmpty = true;
       continue;
@@ -113,10 +80,7 @@ function parseArgs() {
     usageError('数据库名只允许字母、数字、下划线和美元符号');
   }
   if (from === to) usageError('源库和目标库必须不同');
-  if (confirmWipeContent && !force) {
-    usageError('--confirm-wipe-content 必须与 --force 一起使用');
-  }
-  return { from, to, force, confirmWipeContent, allowEmpty, account };
+  return { from, to, allowEmpty, account };
 }
 
 function connectionOptions(database) {
@@ -225,6 +189,22 @@ function snapshotFromIds(values) {
     ids_checksum: checksumIds(ids),
     ids,
   };
+}
+
+function createMigratedIds() {
+  return Object.fromEntries(TARGET_CONTENT_TABLES.map((table) => [table, new Set()]));
+}
+
+function addMigratedId(migratedIds, table, value) {
+  if (migratedIds[table] && value !== null && value !== undefined) {
+    migratedIds[table].add(String(value));
+  }
+}
+
+function migratedIdsSnapshot(migratedIds) {
+  return Object.fromEntries(
+    Object.entries(migratedIds).map(([table, ids]) => [table, [...ids].sort(compareIds)]),
+  );
 }
 
 function safeExtension(filename, relativePath) {
@@ -348,116 +328,10 @@ async function sourceContentSnapshot(connection) {
   return result;
 }
 
-async function targetContentSnapshot(connection, lock = false) {
-  const result = {};
-  for (const table of TARGET_CONTENT_TABLES) {
-    const selector = TARGET_ID_SELECTORS[table];
-    const lockClause = lock ? ' FOR UPDATE' : '';
-    const idRows = await connection.query(
-      `SELECT ${selector.expression} AS row_id
-         FROM \`${table}\`
-        ORDER BY ${selector.order}${lockClause}`,
-    );
-    result[table] = snapshotFromIds(rows(idRows).map((row) => row.row_id));
-  }
-  return result;
-}
-
 function snapshotCounts(snapshot) {
   return Object.fromEntries(
     Object.entries(snapshot).map(([table, value]) => [table, value.count]),
   );
-}
-
-async function migrationBaseline(connection) {
-  const baselineRows = await connection.query(
-    `SELECT id, payload
-       FROM event
-      WHERE action = 'migration.baseline'`,
-  );
-  const matches = baselineRows
-    .map((row) => {
-      try {
-        const payload = JSON.parse(String(row.payload));
-        return payload.source === MIGRATION_SOURCE ? { id: String(row.id), payload } : null;
-      } catch {
-        return null;
-      }
-    })
-    .filter((row) => row !== null);
-  if (matches.length > 1) {
-    throw new Error(`目标库存在多个 source=${MIGRATION_SOURCE} 的 migration.baseline，拒绝猜测`);
-  }
-  return matches[0] ?? null;
-}
-
-async function validateForceTarget(connection, force, confirmWipeContent) {
-  const snapshot = await targetContentSnapshot(connection, force && confirmWipeContent);
-  const counts = snapshotCounts(snapshot);
-  if (counts.post_summary > 0 || counts.tag > 0 || counts.post_tag > 0) {
-    throw new Error(
-      `拒绝 --force：post_summary/tag/post_tag 非空，当前不属于可安全清理的迁移内容域 counts=${JSON.stringify({
-        post_summary: counts.post_summary,
-        tag: counts.tag,
-        post_tag: counts.post_tag,
-      })}`,
-    );
-  }
-  if (!force) return counts;
-  if (!confirmWipeContent) {
-    throw new Error(
-      `拒绝清空目标内容表 ${JSON.stringify(counts)}：将删除全部内容帖子、附件、交付物与事件；必须同时传入 --force --confirm-wipe-content`,
-    );
-  }
-  const targetHasRows = Object.entries(counts)
-    .filter(([table]) => !['post_summary', 'tag', 'post_tag'].includes(table))
-    .some(([, count]) => count > 0);
-  if (!targetHasRows) return { snapshot, counts, baseline: null };
-  const baseline = await migrationBaseline(connection);
-  const expectedIds = baseline?.payload?.target_ids;
-  const expectedChecksums = baseline?.payload?.target_ids_checksum;
-  if (!expectedIds || typeof expectedIds !== 'object'
-    || !expectedChecksums || typeof expectedChecksums !== 'object') {
-    throw new Error(
-      '拒绝清空目标内容表：migration.baseline 缺少 target_ids/target_ids_checksum，无法证明目标只含迁移数据',
-    );
-  }
-  const differences = {};
-  for (const table of TARGET_CONTENT_TABLES) {
-    const currentIds = snapshot[table].ids;
-    const baselineTableIds = Array.isArray(expectedIds[table])
-      ? expectedIds[table].map((value) => String(value))
-      : null;
-    if (!baselineTableIds) {
-      differences[table] = { reason: 'baseline ids missing' };
-      continue;
-    }
-    const baselineSet = new Set(baselineTableIds);
-    const outsideBaseline = currentIds.filter((id) => !baselineSet.has(id));
-    const expectedChecksum = String(expectedChecksums[table] ?? '');
-    const checksumMatches = snapshot[table].ids_checksum === expectedChecksum
-      || currentIds.length < baselineTableIds.length;
-    if (outsideBaseline.length > 0 || !checksumMatches) {
-      differences[table] = {
-        current_count: currentIds.length,
-        baseline_count: baselineTableIds.length,
-        current_ids_checksum: snapshot[table].ids_checksum,
-        baseline_ids_checksum: expectedChecksum,
-        outside_baseline: outsideBaseline.slice(0, 50),
-        outside_baseline_count: outsideBaseline.length,
-      };
-    }
-  }
-  if (Object.keys(differences).length > 0) {
-    throw new Error(
-      `拒绝清空目标内容表：当前 ID 集合包含基线之外的行或校验和不符 differences=${JSON.stringify(differences)}`,
-    );
-  }
-  console.log(
-    `[migrate] force 校验与清理在同一目标事务内执行，当前内容行会被 FOR UPDATE 锁定；`
-      + `并发写入将在事务窗口内等待，允许当前 ID 集合为基线子集。将删除 ${JSON.stringify(counts)}`,
-  );
-  return { snapshot, counts, baseline };
 }
 
 function sameCounts(before, after) {
@@ -680,45 +554,6 @@ async function ensurePlatformPrincipal(connection, accountId) {
   return id;
 }
 
-async function deleteIdsInBatches(connection, table, ids, expression = 'id', extraWhere = '') {
-  let deleted = 0;
-  for (let offset = 0; offset < ids.length; offset += FORCE_DELETE_BATCH_SIZE) {
-    const batch = ids.slice(offset, offset + FORCE_DELETE_BATCH_SIZE);
-    if (batch.length === 0) continue;
-    const placeholders = batch.map(() => '?').join(', ');
-    const result = await connection.query(
-      `DELETE FROM ${table} WHERE ${expression} IN (${placeholders})${extraWhere}`,
-      batch,
-    );
-    deleted += Number(result.affectedRows ?? 0);
-  }
-  return deleted;
-}
-
-async function clearContent(connection, baselineSnapshot) {
-  const deleted = {};
-  for (const table of ['deliverable', 'post_verdict', 'post_target', 'post_task', 'post_channel', 'attachment', 'event']) {
-    const declaredIds = baselineSnapshot[table]?.ids ?? baselineSnapshot[table] ?? [];
-    deleted[table] = await deleteIdsInBatches(
-      connection,
-      table,
-      declaredIds,
-      table === 'post_task' || table === 'post_channel' || table === 'post_verdict' || table === 'post_target'
-        ? table === 'post_target'
-          ? "CONCAT(post_id, ':', principal_id, ':', role)"
-          : 'post_id'
-        : 'id',
-    );
-  }
-  const postIds = baselineSnapshot.post?.ids ?? baselineSnapshot.post ?? [];
-  const children = await deleteIdsInBatches(connection, 'post', postIds, 'id', ' AND parent_id IS NOT NULL');
-  const roots = await deleteIdsInBatches(connection, 'post', postIds, 'id', ' AND parent_id IS NULL');
-  deleted.post_children = children;
-  deleted.post = children + roots;
-  console.log(`[migrate] 已按 migration.baseline 声明的 ID 删除目标内容行数 ${JSON.stringify(deleted)}（身份表未触碰）`);
-  return deleted;
-}
-
 async function findOneBySubtype(connection, kind, subtype, accountId) {
   const result = await connection.query(
     `SELECT id FROM post
@@ -730,7 +565,7 @@ async function findOneBySubtype(connection, kind, subtype, accountId) {
   return result.length === 0 ? null : String(result[0].id);
 }
 
-async function migrateConversations(connection, sourceRowsValue, identity, accountId) {
+async function migrateConversations(connection, sourceRowsValue, identity, accountId, migratedIds) {
   const channelByConversation = new Map();
   let created = 0;
   for (const row of sourceRowsValue) {
@@ -771,8 +606,12 @@ async function migrateConversations(connection, sourceRowsValue, identity, accou
           channelStatus,
         ],
       );
+      addMigratedId(migratedIds, 'post', postId);
+      addMigratedId(migratedIds, 'post_channel', postId);
       created += 1;
     } else {
+      addMigratedId(migratedIds, 'post', postId);
+      addMigratedId(migratedIds, 'post_channel', postId);
       const extension = await connection.query(
         `SELECT post_id FROM post_channel WHERE post_id = ? LIMIT 1`,
         [postId],
@@ -795,7 +634,15 @@ function messageAuthor(row, hostPrincipalId, identity, platformPrincipalId) {
   throw new Error(`未知 chat_messages.sender_role: ${role}`);
 }
 
-async function migrateChatMessages(connection, sourceRowsValue, channels, identity, platformPrincipalId, accountId) {
+async function migrateChatMessages(
+  connection,
+  sourceRowsValue,
+  channels,
+  identity,
+  platformPrincipalId,
+  accountId,
+  migratedIds,
+) {
   let created = 0;
   for (const row of sourceRowsValue) {
     const channel = channels.get(String(row.conversation_id));
@@ -812,7 +659,10 @@ async function migrateChatMessages(connection, sourceRowsValue, channels, identi
         WHERE kind = 'message' AND root_id = ? AND subtype = ? LIMIT 1`,
       [channel.postId, subtype],
     );
-    if (existing.length > 0) continue;
+    if (existing.length > 0) {
+      addMigratedId(migratedIds, 'post', existing[0].id);
+      continue;
+    }
     const postId = newId('pst');
     await connection.query(
       `INSERT INTO post
@@ -831,6 +681,7 @@ async function migrateChatMessages(connection, sourceRowsValue, channels, identi
         dateString(row.created_at),
       ],
     );
+    addMigratedId(migratedIds, 'post', postId);
     created += 1;
   }
   return created;
@@ -850,7 +701,7 @@ function taskAssignee(row, identity) {
   return principalId;
 }
 
-async function migrateTasks(connection, sourceRowsValue, identity, platformPrincipalId, accountId) {
+async function migrateTasks(connection, sourceRowsValue, identity, platformPrincipalId, accountId, migratedIds) {
   const taskByLegacyId = new Map();
   let created = 0;
   for (const row of sourceRowsValue) {
@@ -917,16 +768,25 @@ async function migrateTasks(connection, sourceRowsValue, identity, platformPrinc
           nullableString(row.result_at),
         ],
       );
+      addMigratedId(migratedIds, 'post', postId);
+      addMigratedId(migratedIds, 'post_task', postId);
       if (assigneePrincipalId) {
         await connection.query(
           `INSERT INTO post_target (post_id, principal_id, role, read_at, created_at)
            VALUES (?, ?, 'assignee', NULL, ?)`,
           [postId, assigneePrincipalId, dateString(row.created_at)],
         );
+        addMigratedId(
+          migratedIds,
+          'post_target',
+          `${postId}:${assigneePrincipalId}:assignee`,
+        );
       }
       created += 1;
     } else {
       postId = String(existing[0].id);
+      addMigratedId(migratedIds, 'post', postId);
+      addMigratedId(migratedIds, 'post_task', postId);
       const extension = await connection.query(
         `SELECT post_id FROM post_task WHERE post_id = ? LIMIT 1`,
         [postId],
@@ -945,6 +805,11 @@ async function migrateTasks(connection, sourceRowsValue, identity, platformPrinc
             [postId, assigneePrincipalId, dateString(row.created_at)],
           );
         }
+        addMigratedId(
+          migratedIds,
+          'post_target',
+          `${postId}:${assigneePrincipalId}:assignee`,
+        );
       }
     }
     taskByLegacyId.set(String(row.id), {
@@ -966,6 +831,7 @@ async function migrateTaskMessages(
   identity,
   platformPrincipalId,
   accountId,
+  migratedIds,
 ) {
   let created = 0;
   let skippedVerdicts = 0;
@@ -1001,14 +867,18 @@ async function migrateTaskMessages(
         WHERE kind = 'message' AND root_id = ? AND subtype = ? LIMIT 1`,
       [task.postId, subtype],
     );
-    if (existing.length > 0) continue;
+    if (existing.length > 0) {
+      addMigratedId(migratedIds, 'post', existing[0].id);
+      continue;
+    }
+    const postId = newId('pst');
     await connection.query(
       `INSERT INTO post
          (id, account_id, kind, subtype, author_principal_id, title, body,
           visibility, parent_id, root_id, created_at)
        VALUES (?, ?, 'message', ?, ?, '', ?, ?, ?, ?, ?)`,
       [
-        newId('pst'),
+        postId,
         accountId,
         subtype,
         authorPrincipalId,
@@ -1019,12 +889,13 @@ async function migrateTaskMessages(
         dateString(row.created_at),
       ],
     );
+    addMigratedId(migratedIds, 'post', postId);
     created += 1;
   }
   return { created, skippedVerdicts };
 }
 
-async function migrateTaskVerdicts(connection, sourceRowsValue, tasks, accountId) {
+async function migrateTaskVerdicts(connection, sourceRowsValue, tasks, accountId, migratedIds) {
   let created = 0;
   for (const row of sourceRowsValue) {
     if (String(row.result_status) !== 'success') continue;
@@ -1032,7 +903,12 @@ async function migrateTaskVerdicts(connection, sourceRowsValue, tasks, accountId
     const task = tasks.get(String(row.id));
     if (!task) throw new Error(`tasks.id=${String(row.id)} 找不到迁移后的根帖`);
     const subtype = `tv:${String(row.id)}`;
-    if (await findOneBySubtype(connection, 'verdict', subtype, accountId)) continue;
+    const existingId = await findOneBySubtype(connection, 'verdict', subtype, accountId);
+    if (existingId) {
+      addMigratedId(migratedIds, 'post', existingId);
+      addMigratedId(migratedIds, 'post_verdict', existingId);
+      continue;
+    }
     const verdictId = newId('pst');
     const opinion = stringValue(row.result);
     const occurredAt = nullableString(row.result_at) ?? dateString(row.created_at);
@@ -1059,6 +935,8 @@ async function migrateTaskVerdicts(connection, sourceRowsValue, tasks, accountId
        VALUES (?, 'accept', ?, ?, ?, 'human')`,
       [verdictId, opinion, task.postId, numberValue(row.deliver_attempts)],
     );
+    addMigratedId(migratedIds, 'post', verdictId);
+    addMigratedId(migratedIds, 'post_verdict', verdictId);
     created += 1;
   }
   return created;
@@ -1072,6 +950,7 @@ async function migrateAttachments(
   sourceRoot,
   targetRoot,
   copiedFiles,
+  migratedIds,
 ) {
   const attachmentByLegacyId = new Map();
   let created = 0;
@@ -1097,6 +976,7 @@ async function migrateAttachments(
     }
     if (existing.length > 0) {
       attachmentByLegacyId.set(legacyId, String(existing[0].id));
+      addMigratedId(migratedIds, 'attachment', existing[0].id);
       continue;
     }
     const id = newId('att');
@@ -1132,6 +1012,7 @@ async function migrateAttachments(
         dateString(row.created_at),
       ],
     );
+    addMigratedId(migratedIds, 'attachment', id);
     attachmentByLegacyId.set(legacyId, id);
     created += 1;
   }
@@ -1144,7 +1025,7 @@ function appendLegacyPath(note, legacyPath, hasAttachment) {
   return text ? `${text}\n[迁移 legacy path: ${legacyPath}]` : `[迁移 legacy path: ${legacyPath}]`;
 }
 
-async function migrateDeliverables(connection, sourceRowsValue, tasks, attachments) {
+async function migrateDeliverables(connection, sourceRowsValue, tasks, attachments, migratedIds) {
   const groups = new Map();
   for (const row of sourceRowsValue) {
     const task = tasks.get(String(row.task_id));
@@ -1178,7 +1059,10 @@ async function migrateDeliverables(connection, sourceRowsValue, tasks, attachmen
           WHERE post_id = ? AND name = ? AND version = ? LIMIT 1`,
         [task.postId, stringValue(row.name), version],
       );
-      if (existing.length > 0) continue;
+      if (existing.length > 0) {
+        addMigratedId(migratedIds, 'deliverable', existing[0].id);
+        continue;
+      }
       let attachmentId = null;
       if (row.attachment_id !== null && row.attachment_id !== undefined && row.attachment_id !== '') {
         attachmentId = attachments.get(String(row.attachment_id));
@@ -1186,12 +1070,13 @@ async function migrateDeliverables(connection, sourceRowsValue, tasks, attachmen
           throw new Error(`deliverables.id=${String(row.id)} 的 attachment_id 无法映射`);
         }
       }
+      const deliverableId = newId('dlv');
       await connection.query(
         `INSERT INTO deliverable
            (id, post_id, name, version, attachment_id, note, current, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          newId('dlv'),
+          deliverableId,
           task.postId,
           stringValue(row.name),
           version,
@@ -1201,6 +1086,7 @@ async function migrateDeliverables(connection, sourceRowsValue, tasks, attachmen
           dateString(row.created_at),
         ],
       );
+      addMigratedId(migratedIds, 'deliverable', deliverableId);
       created += 1;
     }
   }
@@ -1210,6 +1096,11 @@ async function migrateDeliverables(connection, sourceRowsValue, tasks, attachmen
 function eventActorPrincipal(row, tasks, identity, platformPrincipalId) {
   const actor = String(row.actor ?? '').trim();
   if (actor === 'admin') return identity.adminPrincipalId;
+  if (actor.startsWith('agent:')) {
+    const legacyAgentId = actor.slice('agent:'.length);
+    const mapped = identity.agentToPrincipal.get(legacyAgentId);
+    if (mapped) return mapped;
+  }
   if (actor === 'agent' || actor.startsWith('agent:')) {
     const task = row.ref_task === null || row.ref_task === undefined
       ? null
@@ -1217,28 +1108,32 @@ function eventActorPrincipal(row, tasks, identity, platformPrincipalId) {
     if (task?.assigneePrincipalId) return task.assigneePrincipalId;
     if (task?.authorPrincipalId) return task.authorPrincipalId;
   }
-  if (actor.startsWith('agent:')) {
-    const legacyAgentId = actor.slice('agent:'.length);
-    const mapped = identity.agentToPrincipal.get(legacyAgentId);
-    if (mapped) return mapped;
-  }
   return platformPrincipalId;
 }
 
-async function migrateEvents(connection, sourceRowsValue, accountId, identity, platformPrincipalId, tasks) {
+async function migrateEvents(
+  connection,
+  sourceRowsValue,
+  accountId,
+  identity,
+  platformPrincipalId,
+  tasks,
+  migratedIds,
+) {
   const existingRows = await connection.query(
     `SELECT id, payload FROM event
       WHERE account_id = ? AND resource_type = 'legacy'
         AND payload LIKE ?`,
     [accountId, `%"migration":"${MIGRATION_SOURCE}"%`],
   );
-  const migratedIds = new Set();
+  const migratedEventIds = new Set();
   const sourceById = new Map(sourceRowsValue.map((row) => [String(row.id), row]));
   for (const row of existingRows) {
     const payload = JSON.parse(String(row.payload));
     if (payload.migration === MIGRATION_SOURCE && payload.legacy_event_id !== undefined) {
       const legacyEventId = String(payload.legacy_event_id);
-      migratedIds.add(legacyEventId);
+      migratedEventIds.add(legacyEventId);
+      addMigratedId(migratedIds, 'event', row.id);
       const sourceRow = sourceById.get(legacyEventId);
       const actorPrincipalId = sourceRow
         ? eventActorPrincipal(sourceRow, tasks, identity, platformPrincipalId)
@@ -1257,7 +1152,8 @@ async function migrateEvents(connection, sourceRowsValue, accountId, identity, p
   let created = 0;
   for (const row of sourceRowsValue) {
     const legacyEventId = String(row.id);
-    if (migratedIds.has(legacyEventId)) continue;
+    if (migratedEventIds.has(legacyEventId)) continue;
+    const eventId = newId('evt');
     const payload = JSON.stringify({
       migration: MIGRATION_SOURCE,
       legacy_event_id: legacyEventId,
@@ -1272,7 +1168,7 @@ async function migrateEvents(connection, sourceRowsValue, accountId, identity, p
           before_state, after_state, payload, retention, occurred_at, published_at)
        VALUES (?, ?, ?, ?, 'legacy', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
       [
-        newId('evt'),
+        eventId,
         accountId,
         eventActorPrincipal(row, tasks, identity, platformPrincipalId),
         String(row.type),
@@ -1281,7 +1177,8 @@ async function migrateEvents(connection, sourceRowsValue, accountId, identity, p
         dateString(row.created_at),
       ],
     );
-    migratedIds.add(legacyEventId);
+    migratedEventIds.add(legacyEventId);
+    addMigratedId(migratedIds, 'event', eventId);
     created += 1;
   }
   return created;
@@ -1293,11 +1190,13 @@ async function writeMigrationBaseline(
   sourceRowsValue,
   accountId,
   platformPrincipalId,
+  migratedIds,
 ) {
   const payloadValue = {
     source: MIGRATION_SOURCE,
     counts: snapshotCounts(sourceSnapshotValue),
     source_snapshot: sourceSnapshotValue,
+    migrated_ids: migratedIdsSnapshot(migratedIds),
     max_legacy_event_id: sourceRowsValue.length > 0
       ? String(sourceRowsValue[sourceRowsValue.length - 1].id)
       : null,
@@ -1320,17 +1219,6 @@ async function writeMigrationBaseline(
   }
   const existing = baselineMatches[0] ?? null;
   const baselineId = existing ? String(existing.id) : newId('evt');
-  const targetSnapshot = await targetContentSnapshot(connection);
-  if (!existing) {
-    targetSnapshot.event = snapshotFromIds([...targetSnapshot.event.ids, baselineId]);
-  }
-  payloadValue.target_counts = snapshotCounts(targetSnapshot);
-  payloadValue.target_ids_checksum = Object.fromEntries(
-    Object.entries(targetSnapshot).map(([table, value]) => [table, value.ids_checksum]),
-  );
-  payloadValue.target_ids = Object.fromEntries(
-    Object.entries(targetSnapshot).map(([table, value]) => [table, value.ids]),
-  );
   const payload = JSON.stringify(payloadValue);
   if (existing) {
     await connection.query(
@@ -1420,7 +1308,7 @@ async function validateMigrationAccountConsistency(connection, accountId, rootId
 }
 
 async function main() {
-  const { from, to, force, confirmWipeContent, allowEmpty, account } = parseArgs();
+  const { from, to, allowEmpty, account } = parseArgs();
   const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(to));
   let inTransaction = false;
@@ -1448,13 +1336,10 @@ async function main() {
     console.log(`[migrate] 使用目标 account=${accountId}${account ? `（--account ${account}）` : ''}`);
     const sourceRoot = await legacyAttachmentRoot(source, from);
     const targetRoot = await targetAttachmentRoot(target, to);
+    const migratedIds = createMigratedIds();
 
     await target.beginTransaction();
     inTransaction = true;
-    const forceValidation = await validateForceTarget(target, force, confirmWipeContent);
-    if (force && confirmWipeContent) {
-      await clearContent(target, forceValidation.baseline?.payload?.target_ids ?? {});
-    }
     const platformPrincipalId = await ensurePlatformPrincipal(target, accountId);
 
     const channelsResult = await migrateConversations(
@@ -1462,6 +1347,7 @@ async function main() {
       sourceData.conversations,
       identity,
       accountId,
+      migratedIds,
     );
     const chatCreated = await migrateChatMessages(
       target,
@@ -1470,6 +1356,7 @@ async function main() {
       identity,
       platformPrincipalId,
       accountId,
+      migratedIds,
     );
     const tasksResult = await migrateTasks(
       target,
@@ -1477,6 +1364,7 @@ async function main() {
       identity,
       platformPrincipalId,
       accountId,
+      migratedIds,
     );
     const taskMessagesResult = await migrateTaskMessages(
       target,
@@ -1485,12 +1373,14 @@ async function main() {
       identity,
       platformPrincipalId,
       accountId,
+      migratedIds,
     );
     const verdictCreated = await migrateTaskVerdicts(
       target,
       sourceData.tasks,
       tasksResult.taskByLegacyId,
       accountId,
+      migratedIds,
     );
     const attachmentsResult = await migrateAttachments(
       target,
@@ -1500,12 +1390,14 @@ async function main() {
       sourceRoot,
       targetRoot,
       copiedFiles,
+      migratedIds,
     );
     const deliverablesCreated = await migrateDeliverables(
       target,
       sourceData.deliverables,
       tasksResult.taskByLegacyId,
       attachmentsResult.attachmentByLegacyId,
+      migratedIds,
     );
     const eventsCreated = await migrateEvents(
       target,
@@ -1514,6 +1406,7 @@ async function main() {
       identity,
       platformPrincipalId,
       tasksResult.taskByLegacyId,
+      migratedIds,
     );
     const sourceSnapshot = Object.fromEntries(
       Object.entries(sourceData).map(([table, values]) => [
@@ -1527,6 +1420,7 @@ async function main() {
       sourceData.events,
       accountId,
       platformPrincipalId,
+      migratedIds,
     );
     await refreshReplyCounts(
       target,

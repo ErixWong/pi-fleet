@@ -577,10 +577,13 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
       pool.query(`SELECT * FROM post_task WHERE post_id = ? LIMIT 1`, [id]),
       pool.query(`SELECT * FROM post_channel WHERE post_id = ? LIMIT 1`, [id]),
       pool.query(
-        `SELECT post_id, decision, opinion, target_task_id, attempt_no, source
-           FROM post_verdict
-          WHERE target_task_id = ?
-          ORDER BY post_id`,
+        `SELECT v.post_id, v.decision, v.opinion, v.target_task_id, v.attempt_no, v.source
+           FROM post_verdict v
+           JOIN post verdict_post
+             ON verdict_post.id = v.post_id
+            AND verdict_post.deleted_at IS NULL
+          WHERE v.target_task_id = ?
+          ORDER BY v.post_id`,
         [id],
       ),
       pool.query(
