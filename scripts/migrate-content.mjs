@@ -40,13 +40,27 @@ const TARGET_CONTENT_TABLES = [
   'tag',
   'post_tag',
 ];
+const TARGET_ID_SELECTORS = {
+  post: { expression: 'id', order: 'id' },
+  post_task: { expression: 'post_id', order: 'post_id' },
+  post_channel: { expression: 'post_id', order: 'post_id' },
+  post_verdict: { expression: 'post_id', order: 'post_id' },
+  post_target: { expression: "CONCAT(post_id, ':', principal_id, ':', role)", order: 'post_id, principal_id, role' },
+  attachment: { expression: 'id', order: 'id' },
+  deliverable: { expression: 'id', order: 'id' },
+  event: { expression: 'id', order: 'id' },
+  post_summary: { expression: "CONCAT(root_id, ':', revision)", order: 'root_id, revision' },
+  tag: { expression: 'id', order: 'id' },
+  post_tag: { expression: "CONCAT(post_id, ':', tag_id)", order: 'post_id, tag_id' },
+};
+const FORCE_DELETE_BATCH_SIZE = 500;
 
 let lastMs = 0;
 let lastRandom = [];
 
 function usageError(message) {
   throw new Error(
-    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--force --confirm-wipe-content] [--allow-empty]`,
+    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--account <account_id|name>] [--force --confirm-wipe-content] [--allow-empty]`,
   );
 }
 
@@ -60,6 +74,7 @@ function parseArgs() {
   let force = false;
   let confirmWipeContent = false;
   let allowEmpty = false;
+  let account;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -73,6 +88,13 @@ function parseArgs() {
     }
     if (arg === '--allow-empty') {
       allowEmpty = true;
+      continue;
+    }
+    if (arg === '--account') {
+      const value = args[i + 1];
+      if (!value || value.startsWith('--')) usageError('--account 缺少值');
+      account = value;
+      i += 1;
       continue;
     }
     if (arg === '--from' || arg === '--to') {
@@ -94,7 +116,7 @@ function parseArgs() {
   if (confirmWipeContent && !force) {
     usageError('--confirm-wipe-content 必须与 --force 一起使用');
   }
-  return { from, to, force, confirmWipeContent, allowEmpty };
+  return { from, to, force, confirmWipeContent, allowEmpty, account };
 }
 
 function connectionOptions(database) {
@@ -178,6 +200,31 @@ function nowString() {
 
 function idKey(value) {
   return value === null || value === undefined ? null : String(value);
+}
+
+function compareIds(left, right) {
+  if (/^\d+$/.test(String(left)) && /^\d+$/.test(String(right))) {
+    const leftNumber = BigInt(String(left));
+    const rightNumber = BigInt(String(right));
+    if (leftNumber < rightNumber) return -1;
+    if (leftNumber > rightNumber) return 1;
+    return 0;
+  }
+  return String(left).localeCompare(String(right), 'en');
+}
+
+function checksumIds(ids) {
+  return crypto.createHash('sha256').update(ids.join('\n')).digest('hex');
+}
+
+function snapshotFromIds(values) {
+  const ids = [...new Set(values.map((value) => String(value)))].sort(compareIds);
+  return {
+    count: ids.length,
+    max_id: ids.length > 0 ? ids[ids.length - 1] : null,
+    ids_checksum: checksumIds(ids),
+    ids,
+  };
 }
 
 function safeExtension(filename, relativePath) {
@@ -292,13 +339,34 @@ async function sourceCounts(connection) {
   return result;
 }
 
-async function targetContentCounts(connection) {
+async function sourceContentSnapshot(connection) {
   const result = {};
-  for (const table of TARGET_CONTENT_TABLES) {
-    const countRows = await connection.query(`SELECT COUNT(*) AS count FROM \`${table}\``);
-    result[table] = numberValue(countRows[0]?.count);
+  for (const table of CONTENT_TABLES) {
+    const idRows = await connection.query(`SELECT id FROM \`${table}\` ORDER BY id`);
+    result[table] = snapshotFromIds(rows(idRows).map((row) => row.id));
   }
   return result;
+}
+
+async function targetContentSnapshot(connection, lock = false) {
+  const result = {};
+  for (const table of TARGET_CONTENT_TABLES) {
+    const selector = TARGET_ID_SELECTORS[table];
+    const lockClause = lock ? ' FOR UPDATE' : '';
+    const idRows = await connection.query(
+      `SELECT ${selector.expression} AS row_id
+         FROM \`${table}\`
+        ORDER BY ${selector.order}${lockClause}`,
+    );
+    result[table] = snapshotFromIds(rows(idRows).map((row) => row.row_id));
+  }
+  return result;
+}
+
+function snapshotCounts(snapshot) {
+  return Object.fromEntries(
+    Object.entries(snapshot).map(([table, value]) => [table, value.count]),
+  );
 }
 
 async function migrationBaseline(connection) {
@@ -307,7 +375,7 @@ async function migrationBaseline(connection) {
        FROM event
       WHERE action = 'migration.baseline'`,
   );
-  return baselineRows
+  const matches = baselineRows
     .map((row) => {
       try {
         const payload = JSON.parse(String(row.payload));
@@ -316,11 +384,16 @@ async function migrationBaseline(connection) {
         return null;
       }
     })
-    .find((row) => row !== null) ?? null;
+    .filter((row) => row !== null);
+  if (matches.length > 1) {
+    throw new Error(`目标库存在多个 source=${MIGRATION_SOURCE} 的 migration.baseline，拒绝猜测`);
+  }
+  return matches[0] ?? null;
 }
 
 async function validateForceTarget(connection, force, confirmWipeContent) {
-  const counts = await targetContentCounts(connection);
+  const snapshot = await targetContentSnapshot(connection, force && confirmWipeContent);
+  const counts = snapshotCounts(snapshot);
   if (counts.post_summary > 0 || counts.tag > 0 || counts.post_tag > 0) {
     throw new Error(
       `拒绝 --force：post_summary/tag/post_tag 非空，当前不属于可安全清理的迁移内容域 counts=${JSON.stringify({
@@ -339,28 +412,52 @@ async function validateForceTarget(connection, force, confirmWipeContent) {
   const targetHasRows = Object.entries(counts)
     .filter(([table]) => !['post_summary', 'tag', 'post_tag'].includes(table))
     .some(([, count]) => count > 0);
-  if (!targetHasRows) return counts;
+  if (!targetHasRows) return { snapshot, counts, baseline: null };
   const baseline = await migrationBaseline(connection);
-  const expected = baseline?.payload?.target_counts;
-  if (!expected || typeof expected !== 'object') {
+  const expectedIds = baseline?.payload?.target_ids;
+  const expectedChecksums = baseline?.payload?.target_ids_checksum;
+  if (!expectedIds || typeof expectedIds !== 'object'
+    || !expectedChecksums || typeof expectedChecksums !== 'object') {
     throw new Error(
-      '拒绝清空目标内容表：migration.baseline 缺少 target_counts，无法证明目标只含迁移数据',
+      '拒绝清空目标内容表：migration.baseline 缺少 target_ids/target_ids_checksum，无法证明目标只含迁移数据',
     );
   }
   const differences = {};
   for (const table of TARGET_CONTENT_TABLES) {
-    const expectedCount = Number(expected[table] ?? 0);
-    if (counts[table] > expectedCount) {
-      differences[table] = { current: counts[table], baseline: expectedCount };
+    const currentIds = snapshot[table].ids;
+    const baselineTableIds = Array.isArray(expectedIds[table])
+      ? expectedIds[table].map((value) => String(value))
+      : null;
+    if (!baselineTableIds) {
+      differences[table] = { reason: 'baseline ids missing' };
+      continue;
+    }
+    const baselineSet = new Set(baselineTableIds);
+    const outsideBaseline = currentIds.filter((id) => !baselineSet.has(id));
+    const expectedChecksum = String(expectedChecksums[table] ?? '');
+    const checksumMatches = snapshot[table].ids_checksum === expectedChecksum
+      || currentIds.length < baselineTableIds.length;
+    if (outsideBaseline.length > 0 || !checksumMatches) {
+      differences[table] = {
+        current_count: currentIds.length,
+        baseline_count: baselineTableIds.length,
+        current_ids_checksum: snapshot[table].ids_checksum,
+        baseline_ids_checksum: expectedChecksum,
+        outside_baseline: outsideBaseline.slice(0, 50),
+        outside_baseline_count: outsideBaseline.length,
+      };
     }
   }
   if (Object.keys(differences).length > 0) {
     throw new Error(
-      `拒绝清空目标内容表：当前行数超出 migration.baseline，存在非迁移数据 differences=${JSON.stringify(differences)}`,
+      `拒绝清空目标内容表：当前 ID 集合包含基线之外的行或校验和不符 differences=${JSON.stringify(differences)}`,
     );
   }
-  console.log(`[migrate] 将删除目标内容行数 ${JSON.stringify(counts)}`);
-  return counts;
+  console.log(
+    `[migrate] force 校验与清理在同一目标事务内执行，当前内容行会被 FOR UPDATE 锁定；`
+      + `并发写入将在事务窗口内等待，允许当前 ID 集合为基线子集。将删除 ${JSON.stringify(counts)}`,
+  );
+  return { snapshot, counts, baseline };
 }
 
 function sameCounts(before, after) {
@@ -471,24 +568,51 @@ async function targetAttachmentRoot(connection, database) {
   return path.resolve(expandHome(result[0]?.value || fallback));
 }
 
-async function findAccount(connection) {
-  const result = await connection.query(
-    `SELECT id FROM account WHERE deleted_at IS NULL ORDER BY id LIMIT 1`,
-  );
-  if (result.length === 0) throw new Error('目标库缺少可用 account（请先运行身份迁移）');
+async function findAccount(connection, selector) {
+  const result = selector === undefined
+    ? await connection.query(
+      `SELECT id, name FROM account
+        WHERE status = 'active' AND deleted_at IS NULL
+        ORDER BY id`,
+    )
+    : await connection.query(
+      `SELECT id, name FROM account
+        WHERE status = 'active' AND deleted_at IS NULL
+          AND (id = ? OR name = ?)
+        ORDER BY id`,
+      [selector, selector],
+    );
+  if (result.length === 0) {
+    throw new Error(
+      selector === undefined
+        ? '目标库缺少 active account（请先运行身份迁移）'
+        : `目标库找不到唯一 active account: ${selector}`,
+    );
+  }
+  if (result.length > 1) {
+    throw new Error(
+      selector === undefined
+        ? `目标库存在多个 active account，必须显式指定 --account；候选=${result.map((row) => `${row.id}:${row.name}`).join(',')}`
+        : `--account=${selector} 匹配多个 active account，拒绝猜测`,
+    );
+  }
   return String(result[0].id);
 }
 
-async function loadTargetIdentity(connection, sourceAgents) {
+async function loadTargetIdentity(connection, sourceAgents, accountId) {
   const keyRows = await connection.query(
     `SELECT a.key_hash, p.id
        FROM api_key a
        JOIN principal p ON p.id = a.principal_id
-      WHERE p.kind = 'host'`,
+      WHERE p.kind = 'host' AND p.account_id = ?`,
+    [accountId],
   );
   const hostByKey = new Map(keyRows.map((row) => [String(row.key_hash), String(row.id)]));
   const hostRows = await connection.query(
-    `SELECT id, name FROM principal WHERE kind = 'host' ORDER BY id`,
+    `SELECT id, name FROM principal
+      WHERE kind = 'host' AND account_id = ?
+      ORDER BY id`,
+    [accountId],
   );
   const hostByName = new Map();
   for (const row of hostRows) {
@@ -509,13 +633,26 @@ async function loadTargetIdentity(connection, sourceAgents) {
 
   const configuredAdmin = process.env.PM_ADMIN_NAME ?? 'admin';
   const adminRows = await connection.query(
-    `SELECT id FROM principal WHERE kind = 'user' AND name = ? ORDER BY id LIMIT 1`,
-    [configuredAdmin],
+    `SELECT id FROM principal
+      WHERE kind = 'user' AND account_id = ? AND name = ?
+      ORDER BY id`,
+    [accountId, configuredAdmin],
   );
+  if (adminRows.length > 1) {
+    throw new Error(`目标库 account=${accountId} 存在多个管理员 principal.name=${configuredAdmin}`);
+  }
   const fallbackAdminRows = adminRows.length > 0
     ? adminRows
-    : await connection.query(`SELECT id FROM principal WHERE kind = 'user' ORDER BY id LIMIT 1`);
-  if (fallbackAdminRows.length === 0) throw new Error('目标库缺少 user principal（请先运行身份迁移）');
+    : await connection.query(
+      `SELECT id FROM principal
+        WHERE kind = 'user' AND account_id = ?
+        ORDER BY id`,
+      [accountId],
+    );
+  if (fallbackAdminRows.length === 0) throw new Error(`目标库 account=${accountId} 缺少 user principal（请先运行身份迁移）`);
+  if (fallbackAdminRows.length > 1) {
+    throw new Error(`目标库 account=${accountId} 缺少唯一管理员 principal，候选数=${fallbackAdminRows.length}`);
+  }
 
   return {
     agentToPrincipal,
@@ -525,8 +662,12 @@ async function loadTargetIdentity(connection, sourceAgents) {
 
 async function ensurePlatformPrincipal(connection, accountId) {
   const existing = await connection.query(
-    `SELECT id FROM principal WHERE kind = 'service' AND name = 'platform' ORDER BY id LIMIT 1`,
+    `SELECT id FROM principal
+      WHERE account_id = ? AND kind = 'service' AND name = 'platform'
+      ORDER BY id`,
+    [accountId],
   );
+  if (existing.length > 1) throw new Error(`目标库 account=${accountId} 存在多个 platform service principal`);
   if (existing.length > 0) return String(existing[0].id);
   const id = newId('prn');
   await connection.query(
@@ -539,24 +680,51 @@ async function ensurePlatformPrincipal(connection, accountId) {
   return id;
 }
 
-async function clearContent(connection) {
-  const deleted = {};
-  for (const table of CLEAR_TABLES) {
-    const result = await connection.query(`DELETE FROM ${table}`);
-    deleted[table] = Number(result.affectedRows ?? 0);
+async function deleteIdsInBatches(connection, table, ids, expression = 'id', extraWhere = '') {
+  let deleted = 0;
+  for (let offset = 0; offset < ids.length; offset += FORCE_DELETE_BATCH_SIZE) {
+    const batch = ids.slice(offset, offset + FORCE_DELETE_BATCH_SIZE);
+    if (batch.length === 0) continue;
+    const placeholders = batch.map(() => '?').join(', ');
+    const result = await connection.query(
+      `DELETE FROM ${table} WHERE ${expression} IN (${placeholders})${extraWhere}`,
+      batch,
+    );
+    deleted += Number(result.affectedRows ?? 0);
   }
-  // post.parent_id has a self-reference; remove children before roots.
-  const children = await connection.query(`DELETE FROM post WHERE parent_id IS NOT NULL`);
-  const roots = await connection.query(`DELETE FROM post`);
-  deleted.post = Number(children.affectedRows ?? 0) + Number(roots.affectedRows ?? 0);
-  console.log(`[migrate] 已删除目标内容行数 ${JSON.stringify(deleted)}（身份表未触碰）`);
   return deleted;
 }
 
-async function findOneBySubtype(connection, kind, subtype) {
+async function clearContent(connection, baselineSnapshot) {
+  const deleted = {};
+  for (const table of ['deliverable', 'post_verdict', 'post_target', 'post_task', 'post_channel', 'attachment', 'event']) {
+    const declaredIds = baselineSnapshot[table]?.ids ?? baselineSnapshot[table] ?? [];
+    deleted[table] = await deleteIdsInBatches(
+      connection,
+      table,
+      declaredIds,
+      table === 'post_task' || table === 'post_channel' || table === 'post_verdict' || table === 'post_target'
+        ? table === 'post_target'
+          ? "CONCAT(post_id, ':', principal_id, ':', role)"
+          : 'post_id'
+        : 'id',
+    );
+  }
+  const postIds = baselineSnapshot.post?.ids ?? baselineSnapshot.post ?? [];
+  const children = await deleteIdsInBatches(connection, 'post', postIds, 'id', ' AND parent_id IS NOT NULL');
+  const roots = await deleteIdsInBatches(connection, 'post', postIds, 'id', ' AND parent_id IS NULL');
+  deleted.post_children = children;
+  deleted.post = children + roots;
+  console.log(`[migrate] 已按 migration.baseline 声明的 ID 删除目标内容行数 ${JSON.stringify(deleted)}（身份表未触碰）`);
+  return deleted;
+}
+
+async function findOneBySubtype(connection, kind, subtype, accountId) {
   const result = await connection.query(
-    `SELECT id FROM post WHERE kind = ? AND subtype = ? ORDER BY id`,
-    [kind, subtype],
+    `SELECT id FROM post
+      WHERE account_id = ? AND kind = ? AND subtype = ?
+      ORDER BY id`,
+    [accountId, kind, subtype],
   );
   if (result.length > 1) throw new Error(`目标库存在重复迁移标记 kind=${kind} subtype=${subtype}`);
   return result.length === 0 ? null : String(result[0].id);
@@ -572,7 +740,7 @@ async function migrateConversations(connection, sourceRowsValue, identity, accou
     }
     const channelStatus = mapChannelStatus(row.status);
     const subtype = `cv:${String(row.id)}`;
-    let postId = await findOneBySubtype(connection, 'channel', subtype);
+    let postId = await findOneBySubtype(connection, 'channel', subtype, accountId);
     if (!postId) {
       postId = newId('pst');
       await connection.query(
@@ -702,9 +870,9 @@ async function migrateTasks(connection, sourceRowsValue, identity, platformPrinc
     const title = migrationTaskTitle(row.title, taskId);
     const existing = await connection.query(
       `SELECT id, kind FROM post
-        WHERE kind = 'task' AND subtype = 'legacy-task' AND title = ?
+        WHERE account_id = ? AND kind = 'task' AND subtype = 'legacy-task' AND title = ?
         ORDER BY id`,
-      [title],
+      [accountId, title],
     );
     if (existing.length > 1) throw new Error(`目标库存在重复迁移任务: ${taskId}`);
 
@@ -783,8 +951,10 @@ async function migrateTasks(connection, sourceRowsValue, identity, platformPrinc
       postId,
       visibility,
       authorPrincipalId: taskAuthor(row, identity, platformPrincipalId),
+      assigneePrincipalId,
       sourceRow: row,
     });
+    taskByLegacyId.set(String(row.task_id), taskByLegacyId.get(String(row.id)));
   }
   return { taskByLegacyId, created };
 }
@@ -862,7 +1032,7 @@ async function migrateTaskVerdicts(connection, sourceRowsValue, tasks, accountId
     const task = tasks.get(String(row.id));
     if (!task) throw new Error(`tasks.id=${String(row.id)} 找不到迁移后的根帖`);
     const subtype = `tv:${String(row.id)}`;
-    if (await findOneBySubtype(connection, 'verdict', subtype)) continue;
+    if (await findOneBySubtype(connection, 'verdict', subtype, accountId)) continue;
     const verdictId = newId('pst');
     const opinion = stringValue(row.result);
     const occurredAt = nullableString(row.result_at) ?? dateString(row.created_at);
@@ -914,10 +1084,17 @@ async function migrateAttachments(
       throw new Error(`未知 attachments.scan_status: ${scanStatus}`);
     }
     const existing = await connection.query(
-      `SELECT id FROM attachment
-        WHERE owner_principal_id = ? AND sha256 = ? LIMIT 1`,
-      [ownerPrincipalId, String(row.sha256)],
+      `SELECT a.id
+         FROM attachment a
+         JOIN principal p ON p.id = a.owner_principal_id
+        WHERE a.account_id = ? AND p.account_id = ?
+          AND a.owner_principal_id = ? AND a.sha256 = ?
+        LIMIT 2`,
+      [accountId, accountId, ownerPrincipalId, String(row.sha256)],
     );
+    if (existing.length > 1) {
+      throw new Error(`目标库 account=${accountId} 存在重复 attachment owner+sha256，无法映射 legacy=${legacyId}`);
+    }
     if (existing.length > 0) {
       attachmentByLegacyId.set(legacyId, String(existing[0].id));
       continue;
@@ -1030,23 +1207,49 @@ async function migrateDeliverables(connection, sourceRowsValue, tasks, attachmen
   return created;
 }
 
-async function migrateEvents(connection, sourceRowsValue, accountId) {
+function eventActorPrincipal(row, tasks, identity, platformPrincipalId) {
+  const actor = String(row.actor ?? '').trim();
+  if (actor === 'admin') return identity.adminPrincipalId;
+  if (actor === 'agent' || actor.startsWith('agent:')) {
+    const task = row.ref_task === null || row.ref_task === undefined
+      ? null
+      : tasks.get(String(row.ref_task));
+    if (task?.assigneePrincipalId) return task.assigneePrincipalId;
+    if (task?.authorPrincipalId) return task.authorPrincipalId;
+  }
+  if (actor.startsWith('agent:')) {
+    const legacyAgentId = actor.slice('agent:'.length);
+    const mapped = identity.agentToPrincipal.get(legacyAgentId);
+    if (mapped) return mapped;
+  }
+  return platformPrincipalId;
+}
+
+async function migrateEvents(connection, sourceRowsValue, accountId, identity, platformPrincipalId, tasks) {
   const existingRows = await connection.query(
     `SELECT id, payload FROM event
-      WHERE resource_type = 'legacy'
+      WHERE account_id = ? AND resource_type = 'legacy'
         AND payload LIKE ?`,
-    [`%"migration":"${MIGRATION_SOURCE}"%`],
+    [accountId, `%"migration":"${MIGRATION_SOURCE}"%`],
   );
   const migratedIds = new Set();
+  const sourceById = new Map(sourceRowsValue.map((row) => [String(row.id), row]));
   for (const row of existingRows) {
     const payload = JSON.parse(String(row.payload));
     if (payload.migration === MIGRATION_SOURCE && payload.legacy_event_id !== undefined) {
-      migratedIds.add(String(payload.legacy_event_id));
+      const legacyEventId = String(payload.legacy_event_id);
+      migratedIds.add(legacyEventId);
+      const sourceRow = sourceById.get(legacyEventId);
+      const actorPrincipalId = sourceRow
+        ? eventActorPrincipal(sourceRow, tasks, identity, platformPrincipalId)
+        : platformPrincipalId;
       await connection.query(
         `UPDATE event
-            SET published_at = COALESCE(published_at, occurred_at)
+            SET actor_principal_id = ?,
+                account_id = ?,
+                published_at = COALESCE(published_at, occurred_at)
           WHERE id = ?`,
-        [row.id],
+        [actorPrincipalId, accountId, row.id],
       );
     }
   }
@@ -1067,10 +1270,11 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
       `INSERT INTO event
          (id, account_id, actor_principal_id, action, resource_type, resource_id,
           before_state, after_state, payload, retention, occurred_at, published_at)
-       VALUES (?, ?, NULL, ?, 'legacy', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
+       VALUES (?, ?, ?, ?, 'legacy', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
       [
         newId('evt'),
         accountId,
+        eventActorPrincipal(row, tasks, identity, platformPrincipalId),
         String(row.type),
         payload,
         dateString(row.created_at),
@@ -1085,14 +1289,15 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
 
 async function writeMigrationBaseline(
   connection,
-  sourceCountsValue,
+  sourceSnapshotValue,
   sourceRowsValue,
   accountId,
-  targetCountsValue,
+  platformPrincipalId,
 ) {
   const payloadValue = {
     source: MIGRATION_SOURCE,
-    counts: sourceCountsValue,
+    counts: snapshotCounts(sourceSnapshotValue),
+    source_snapshot: sourceSnapshotValue,
     max_legacy_event_id: sourceRowsValue.length > 0
       ? String(sourceRowsValue[sourceRowsValue.length - 1].id)
       : null,
@@ -1103,26 +1308,37 @@ async function writeMigrationBaseline(
        FROM event
       WHERE action = 'migration.baseline'`,
   );
-  const existing = existingRows.find((row) => {
+  const baselineMatches = existingRows.filter((row) => {
     try {
       return JSON.parse(String(row.payload)).source === MIGRATION_SOURCE;
     } catch {
       return false;
     }
   });
-  const targetCounts = {
-    ...targetCountsValue,
-    event: targetCountsValue.event + (existing ? 0 : 1),
-  };
-  payloadValue.target_counts = targetCounts;
+  if (baselineMatches.length > 1) {
+    throw new Error(`目标库存在多个 source=${MIGRATION_SOURCE} 的 migration.baseline，拒绝覆盖`);
+  }
+  const existing = baselineMatches[0] ?? null;
+  const baselineId = existing ? String(existing.id) : newId('evt');
+  const targetSnapshot = await targetContentSnapshot(connection);
+  if (!existing) {
+    targetSnapshot.event = snapshotFromIds([...targetSnapshot.event.ids, baselineId]);
+  }
+  payloadValue.target_counts = snapshotCounts(targetSnapshot);
+  payloadValue.target_ids_checksum = Object.fromEntries(
+    Object.entries(targetSnapshot).map(([table, value]) => [table, value.ids_checksum]),
+  );
+  payloadValue.target_ids = Object.fromEntries(
+    Object.entries(targetSnapshot).map(([table, value]) => [table, value.ids]),
+  );
   const payload = JSON.stringify(payloadValue);
   if (existing) {
     await connection.query(
       `UPDATE event
-          SET account_id = ?, payload = ?, retention = 'audit',
+          SET account_id = ?, actor_principal_id = ?, payload = ?, retention = 'audit',
               occurred_at = ?, published_at = COALESCE(published_at, ?)
         WHERE id = ?`,
-      [accountId, payload, nowString(), nowString(), existing.id],
+      [accountId, platformPrincipalId, payload, nowString(), nowString(), existing.id],
     );
     return;
   }
@@ -1131,8 +1347,8 @@ async function writeMigrationBaseline(
     `INSERT INTO event
        (id, account_id, actor_principal_id, action, resource_type, resource_id,
         before_state, after_state, payload, retention, occurred_at, published_at)
-     VALUES (?, ?, NULL, 'migration.baseline', 'migration', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
-    [newId('evt'), accountId, payload, occurredAt, occurredAt],
+     VALUES (?, ?, ?, 'migration.baseline', 'migration', NULL, NULL, NULL, ?, 'audit', ?, ?)`,
+    [baselineId, accountId, platformPrincipalId, payload, occurredAt, occurredAt],
   );
 }
 
@@ -1149,8 +1365,62 @@ async function refreshReplyCounts(connection, roots) {
   }
 }
 
+async function validateMigrationAccountConsistency(connection, accountId, rootIds, attachmentIds) {
+  const roots = [...new Set(rootIds.map((id) => String(id)))];
+  if (roots.length > 0) {
+    const rowsValue = await connection.query(
+      `SELECT p.id, p.account_id, p.author_principal_id,
+              author.account_id AS author_account_id,
+              pt.assignee_principal_id,
+              assignee.account_id AS assignee_account_id
+         FROM post p
+         JOIN principal author ON author.id = p.author_principal_id
+         LEFT JOIN post_task pt ON pt.post_id = p.id
+         LEFT JOIN principal assignee ON assignee.id = pt.assignee_principal_id
+        WHERE p.root_id IN (${roots.map(() => '?').join(',')})`,
+      roots,
+    );
+    const mismatches = rows(rowsValue).filter((row) =>
+      String(row.account_id) !== accountId
+      || String(row.author_account_id) !== accountId
+      || (row.assignee_principal_id !== null
+        && String(row.assignee_account_id) !== accountId),
+    );
+    if (mismatches.length > 0) {
+      throw new Error(
+        `迁移 account 一致性校验失败 post=${JSON.stringify(mismatches.slice(0, 20))}`,
+      );
+    }
+  }
+  const attachments = [...new Set(attachmentIds.map((id) => String(id)))];
+  if (attachments.length > 0) {
+    const rowsValue = await connection.query(
+      `SELECT a.id, a.account_id, a.owner_principal_id,
+              owner.account_id AS owner_account_id
+         FROM attachment a
+         JOIN principal owner ON owner.id = a.owner_principal_id
+        WHERE a.id IN (${attachments.map(() => '?').join(',')})`,
+      attachments,
+    );
+    const mismatches = rows(rowsValue).filter((row) =>
+      String(row.account_id) !== accountId
+      || String(row.owner_account_id) !== accountId,
+    );
+    if (mismatches.length > 0 || rowsValue.length !== attachments.length) {
+      throw new Error(
+        `迁移 account 一致性校验失败 attachment=${JSON.stringify({
+          expected: attachments.length,
+          found: rowsValue.length,
+          mismatches: mismatches.slice(0, 20),
+        })}`,
+      );
+    }
+  }
+  console.log(`[migrate] account 一致性校验通过 account=${accountId} posts=${roots.length} attachments=${attachments.length}`);
+}
+
 async function main() {
-  const { from, to, force, confirmWipeContent, allowEmpty } = parseArgs();
+  const { from, to, force, confirmWipeContent, allowEmpty, account } = parseArgs();
   const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(to));
   let inTransaction = false;
@@ -1173,15 +1443,18 @@ async function main() {
     const sourceAgents = await source.query(
       `SELECT id, agent_id, name, key_hash FROM agents ORDER BY id`,
     );
-    const accountId = await findAccount(target);
-    const identity = await loadTargetIdentity(target, sourceAgents);
+    const accountId = await findAccount(target, account);
+    const identity = await loadTargetIdentity(target, sourceAgents, accountId);
+    console.log(`[migrate] 使用目标 account=${accountId}${account ? `（--account ${account}）` : ''}`);
     const sourceRoot = await legacyAttachmentRoot(source, from);
     const targetRoot = await targetAttachmentRoot(target, to);
-    await validateForceTarget(target, force, confirmWipeContent);
 
     await target.beginTransaction();
     inTransaction = true;
-    if (force && confirmWipeContent) await clearContent(target);
+    const forceValidation = await validateForceTarget(target, force, confirmWipeContent);
+    if (force && confirmWipeContent) {
+      await clearContent(target, forceValidation.baseline?.payload?.target_ids ?? {});
+    }
     const platformPrincipalId = await ensurePlatformPrincipal(target, accountId);
 
     const channelsResult = await migrateConversations(
@@ -1234,14 +1507,26 @@ async function main() {
       tasksResult.taskByLegacyId,
       attachmentsResult.attachmentByLegacyId,
     );
-    const eventsCreated = await migrateEvents(target, sourceData.events, accountId);
-    const targetCountsBeforeBaseline = await targetContentCounts(target);
-    await writeMigrationBaseline(
+    const eventsCreated = await migrateEvents(
       target,
-      sourceBefore,
       sourceData.events,
       accountId,
-      targetCountsBeforeBaseline,
+      identity,
+      platformPrincipalId,
+      tasksResult.taskByLegacyId,
+    );
+    const sourceSnapshot = Object.fromEntries(
+      Object.entries(sourceData).map(([table, values]) => [
+        table,
+        snapshotFromIds(values.map((row) => row.id)),
+      ]),
+    );
+    await writeMigrationBaseline(
+      target,
+      sourceSnapshot,
+      sourceData.events,
+      accountId,
+      platformPrincipalId,
     );
     await refreshReplyCounts(
       target,
@@ -1249,6 +1534,15 @@ async function main() {
         ...[...channelsResult.channelByConversation.values()].map((value) => value.postId),
         ...[...tasksResult.taskByLegacyId.values()].map((value) => value.postId),
       ]),
+    );
+    await validateMigrationAccountConsistency(
+      target,
+      accountId,
+      [...new Set([
+        ...[...channelsResult.channelByConversation.values()].map((value) => value.postId),
+        ...[...tasksResult.taskByLegacyId.values()].map((value) => value.postId),
+      ])],
+      [...attachmentsResult.attachmentByLegacyId.values()],
     );
 
     const sourceAfter = await sourceCounts(source);

@@ -18,5 +18,8 @@ export const config = {
         ? process.env.DB_NAME
         : 'erix'),
   },
+  newDbRequired: ['1', 'true', 'yes', 'on'].includes(
+    String(process.env.NEW_DB_REQUIRED ?? '').trim().toLowerCase(),
+  ),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-session-secret-change-me',
 } as const;

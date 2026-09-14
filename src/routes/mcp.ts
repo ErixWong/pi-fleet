@@ -6,6 +6,7 @@ import { createMcpServer } from '../mcp/tools.js';
 import { createMcpServerV2 } from '../mcp/index.js';
 import { mcpAuthMiddleware } from '../auth.js';
 import { principalAuthMiddleware } from '../auth-principal.js';
+import { requireNewDb } from '../db/pool.js';
 
 export const mcpRouter = Router();
 
@@ -51,7 +52,7 @@ mcpRouter.delete('/mcp', (_req, res) =>
 
 const sessionsV2 = new Map<string, { server: McpServer; transport: StreamableHTTPServerTransport }>();
 
-mcpRouter.post('/mcp2', principalAuthMiddleware(), async (req, res) => {
+mcpRouter.post('/mcp2', requireNewDb, principalAuthMiddleware(), async (req, res) => {
   const header = req.headers['mcp-session-id'];
   const sessionId = Array.isArray(header) ? header[0] : (header as string | undefined);
 
@@ -77,9 +78,9 @@ mcpRouter.post('/mcp2', principalAuthMiddleware(), async (req, res) => {
   }
 });
 
-mcpRouter.get('/mcp2', (_req, res) =>
+mcpRouter.get('/mcp2', requireNewDb, (_req, res) =>
   res.status(405).json({ error: 'use POST /mcp2 (Streamable HTTP)' }),
 );
-mcpRouter.delete('/mcp2', (_req, res) =>
+mcpRouter.delete('/mcp2', requireNewDb, (_req, res) =>
   res.status(405).json({ error: 'use POST /mcp2 (Streamable HTTP)' }),
 );

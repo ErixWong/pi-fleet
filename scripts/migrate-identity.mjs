@@ -23,7 +23,7 @@ let lastRandom = [];
 
 function usageError(message) {
   throw new Error(
-    `${message}\n用法: node scripts/migrate-identity.mjs --from task_dispatch --to erix [--force --confirm-wipe-identity] [--allow-empty]`,
+    `${message}\n用法: node scripts/migrate-identity.mjs --from task_dispatch --to erix [--account <account_id|name>] [--force --confirm-wipe-identity] [--allow-empty]`,
   );
 }
 
@@ -37,6 +37,7 @@ function parseArgs() {
   let force = false;
   let confirmWipeIdentity = false;
   let allowEmpty = false;
+  let account;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -50,6 +51,13 @@ function parseArgs() {
     }
     if (arg === '--allow-empty') {
       allowEmpty = true;
+      continue;
+    }
+    if (arg === '--account') {
+      const value = args[i + 1];
+      if (!value || value.startsWith('--')) usageError('--account 缺少值');
+      account = value;
+      i += 1;
       continue;
     }
     if (arg === '--from' || arg === '--to') {
@@ -71,7 +79,7 @@ function parseArgs() {
   if (confirmWipeIdentity && !force) {
     usageError('--confirm-wipe-identity 必须与 --force 一起使用');
   }
-  return { from, to, force, confirmWipeIdentity, allowEmpty };
+  return { from, to, force, confirmWipeIdentity, allowEmpty, account };
 }
 
 function connectionOptions(database) {
@@ -207,6 +215,8 @@ async function targetIdentityCounts(connection) {
 async function clearTarget(connection) {
   // 目标库只清身份五张表，按外键依赖顺序删除。
   const deleted = {};
+  // principal.host_principal_id 是自引用 FK，必须先断开再删除 principal。
+  await connection.query('UPDATE principal SET host_principal_id = NULL');
   for (const table of ['api_key', 'device_executor', 'device', 'principal', 'account']) {
     const result = await connection.query(`DELETE FROM ${table}`);
     deleted[table] = Number(result.affectedRows ?? 0);
@@ -214,15 +224,35 @@ async function clearTarget(connection) {
   return deleted;
 }
 
-async function findOrCreateAccount(connection, name) {
-  const existing = await connection.query(
-    `SELECT id FROM account WHERE name = ? AND deleted_at IS NULL ORDER BY id LIMIT 1`,
-    [name],
-  );
+async function findOrCreateAccount(connection, selector) {
+  const existing = selector === undefined
+    ? await connection.query(
+      `SELECT id, name FROM account
+        WHERE status = 'active' AND deleted_at IS NULL
+        ORDER BY id`,
+    )
+    : await connection.query(
+      `SELECT id, name FROM account
+        WHERE status = 'active' AND deleted_at IS NULL
+          AND (id = ? OR name = ?)
+        ORDER BY id`,
+      [selector, selector],
+    );
+  if (existing.length > 1) {
+    throw new Error(
+      selector === undefined
+        ? `目标库存在多个 active account，必须显式指定 --account；候选=${existing.map((row) => `${row.id}:${row.name}`).join(',')}`
+        : `--account=${selector} 匹配多个 active account，拒绝猜测`,
+    );
+  }
   if (existing.length > 0) {
-    console.log(`[migrate] account 已存在，复用 name=${name} id=${existing[0].id}`);
+    console.log(`[migrate] account 已存在，复用 name=${existing[0].name} id=${existing[0].id}`);
     return String(existing[0].id);
   }
+  if (selector !== undefined) {
+    throw new Error(`目标库找不到唯一 active account: ${selector}`);
+  }
+  const name = process.env.PM_ACCOUNT_NAME ?? 'default';
   const id = newId('acc');
   await connection.query(
     `INSERT INTO account (id, name, created_at) VALUES (?, ?, ?)`,
@@ -235,9 +265,14 @@ async function findOrCreateAccount(connection, name) {
 async function migrateHost(connection, accountId, row) {
   const name = String(row.name ?? '');
   const existing = await connection.query(
-    `SELECT id FROM principal WHERE name = ? ORDER BY id LIMIT 1`,
-    [name],
+    `SELECT id FROM principal
+      WHERE account_id = ? AND name = ?
+      ORDER BY id`,
+    [accountId, name],
   );
+  if (existing.length > 1) {
+    throw new Error(`目标库 account=${accountId} 存在多个 host principal.name=${name}`);
+  }
   if (existing.length > 0) {
     console.log(`[migrate] SKIP principal.name=${name}（已存在 id=${existing[0].id}）`);
     return false;
@@ -296,9 +331,14 @@ async function migrateAdmin(connection, accountId, rows) {
     const configuredName = process.env.PM_ADMIN_NAME ?? 'admin';
     const name = rows.length === 1 ? configuredName : `${configuredName}-${row.id}`;
     const existing = await connection.query(
-      `SELECT id FROM principal WHERE name = ? ORDER BY id LIMIT 1`,
-      [name],
+      `SELECT id FROM principal
+        WHERE account_id = ? AND name = ?
+        ORDER BY id`,
+      [accountId, name],
     );
+    if (existing.length > 1) {
+      throw new Error(`目标库 account=${accountId} 存在多个 user principal.name=${name}`);
+    }
     if (existing.length > 0) {
       console.log(`[migrate] SKIP principal.name=${name}（已存在 id=${existing[0].id}）`);
       continue;
@@ -316,7 +356,7 @@ async function migrateAdmin(connection, accountId, rows) {
 }
 
 async function main() {
-  const { from, to, force, confirmWipeIdentity, allowEmpty } = parseArgs();
+  const { from, to, force, confirmWipeIdentity, allowEmpty, account } = parseArgs();
   const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(to));
   let inTransaction = false;
@@ -349,8 +389,9 @@ async function main() {
 
     const accountId = await findOrCreateAccount(
       target,
-      process.env.PM_ACCOUNT_NAME ?? 'default',
+      account,
     );
+    console.log(`[migrate] 使用目标 account=${accountId}${account ? `（--account ${account}）` : ''}`);
     let hostCount = 0;
     for (const agent of agents) {
       if (await migrateHost(target, accountId, agent)) hostCount += 1;

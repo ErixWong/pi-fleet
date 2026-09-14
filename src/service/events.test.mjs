@@ -30,7 +30,7 @@ async function createEvent(input = {}) {
   const id = await withTransaction((conn) =>
     recordEvent(conn, {
       action: input.action ?? `${actionPrefix}.created`,
-      resource_type: 'test',
+      resource_type: input.resourceType ?? 'test',
       resource_id: `${uniqueResource}-${eventIds.length}`,
       payload: input.payload ?? { test: true },
       retention: input.retention,
@@ -71,6 +71,21 @@ test('outbox 返回未投递事件并标记，第二次不重复返回', { concu
   assert.equal(foreignRows[0].published_at, null);
   const second = await publishPending({ limit: 100, actionPrefix });
   assert.equal(second.some((event) => event.id === id), false);
+});
+
+test('publishPending 对 actionPrefix 的 %, _, \\ 和 resourceType 使用显式 ESCAPE', { concurrency: false }, async () => {
+  for (const prefix of ['%', '_', '\\']) {
+    const id = await createEvent({
+      action: `${prefix}literal-${actionPrefix}`,
+      resourceType: `resource-${prefix}`,
+    });
+    const published = await publishPending({
+      limit: 10,
+      actionPrefix: prefix,
+      resourceType: `resource-${prefix}`,
+    });
+    assert.equal(published.some((event) => event.id === id), true);
+  }
 });
 
 test('recordEvent 未传 account_id 时从 actor principal 推导账号', { concurrency: false }, async () => {

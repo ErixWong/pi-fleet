@@ -142,7 +142,7 @@ function visibilityFilter(options: PublishPendingOptions, now: string): {
   ];
   const params: unknown[] = [now];
   if (options.actionPrefix !== undefined) {
-    clauses.push('action LIKE ?');
+    clauses.push(`action LIKE ? ESCAPE '\\\\'`);
     params.push(`${escapeLikePrefix(options.actionPrefix)}%`);
   }
   if (options.resourceType !== undefined) {

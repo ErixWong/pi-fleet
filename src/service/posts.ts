@@ -559,7 +559,7 @@ export async function createPost(
 }
 
 export async function getPostDetail(id: string): Promise<PostDetail | null> {
-  const post = await getPostById(id);
+  const post = await getVisiblePostById(id);
   if (!post) return null;
   const pool = getPool();
   const [targetResult, taskResult, channelResult, verdictResult, deliverableResult, recentResult, countResult] =
@@ -593,7 +593,7 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
                 a.relative_path AS att_relative_path, a.scan_status AS att_scan_status,
                 a.created_at AS att_created_at, a.deleted_at AS att_deleted_at
            FROM deliverable d
-           LEFT JOIN attachment a ON a.id = d.attachment_id
+           LEFT JOIN attachment a ON a.id = d.attachment_id AND a.deleted_at IS NULL
           WHERE d.post_id = ?
           ORDER BY d.name, d.version`,
         [id],
@@ -653,6 +653,15 @@ function deliverableFromRow(row: DbRow): Record<string, unknown> {
 
 async function getPostById(id: string): Promise<Post | null> {
   const result = await getPool().query(`${postSelect()} WHERE p.id = ? LIMIT 1`, [id]);
+  const row = rows(result)[0];
+  return row ? postFromRow(row) : null;
+}
+
+async function getVisiblePostById(id: string): Promise<Post | null> {
+  const result = await getPool().query(
+    `${postSelect()} WHERE p.id = ? AND p.deleted_at IS NULL LIMIT 1`,
+    [id],
+  );
   const row = rows(result)[0];
   return row ? postFromRow(row) : null;
 }
@@ -725,11 +734,11 @@ export async function listPosts(filter: ListPostsFilter): Promise<ListPostsResul
 }
 
 export async function getThread(rootId: string): Promise<Post[]> {
-  return queryPosts(`${postSelect()} WHERE p.root_id = ? ORDER BY p.id`, [rootId]);
+  return queryPosts(`${postSelect()} WHERE p.root_id = ? AND p.deleted_at IS NULL ORDER BY p.id`, [rootId]);
 }
 
 export async function getDirectReplies(postId: string): Promise<Post[]> {
-  return queryPosts(`${postSelect()} WHERE p.parent_id = ? ORDER BY p.id`, [postId]);
+  return queryPosts(`${postSelect()} WHERE p.parent_id = ? AND p.deleted_at IS NULL ORDER BY p.id`, [postId]);
 }
 
 export async function replyPost(input: ReplyPostInput): Promise<Post> {
@@ -812,6 +821,14 @@ export async function deletePost(id: string): Promise<void> {
     if (!before.deleted_at) {
       const deletedAt = nowString();
       await conn.query(`UPDATE post SET deleted_at = ? WHERE id = ?`, [deletedAt, id]);
+      if (before.parent_id) {
+        await conn.query(
+          `UPDATE post
+              SET reply_count = GREATEST(reply_count - 1, 0)
+            WHERE id = ?`,
+          [before.parent_id],
+        );
+      }
       await recordEvent(conn, {
         account_id: before.account_id,
         actor_principal_id: before.author_principal_id,
@@ -927,7 +944,7 @@ export async function getSummary(rootId: string): Promise<SummaryView | null> {
   const pendingResult = await getPool().query(
     `SELECT COUNT(*) AS pending
        FROM post
-      WHERE root_id = ? AND id > ?`,
+      WHERE root_id = ? AND id > ? AND deleted_at IS NULL`,
     [rootId, latest.up_to_post_id],
   );
   const pending = numberValue(rows(pendingResult)[0]?.pending);

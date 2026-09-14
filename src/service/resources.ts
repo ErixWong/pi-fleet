@@ -299,7 +299,7 @@ async function deliverableRows(
                       a.scan_status AS att_scan_status, a.created_at AS att_created_at,
                       a.deleted_at AS att_deleted_at
                  FROM deliverable d
-                 LEFT JOIN attachment a ON a.id = d.attachment_id
+                 LEFT JOIN attachment a ON a.id = d.attachment_id AND a.deleted_at IS NULL
                 WHERE d.post_id = ?${name === undefined ? '' : ' AND d.name = ?'}
                 ORDER BY d.name, d.version`;
   const params = name === undefined ? [postId] : [postId, name];

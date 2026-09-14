@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import mariadb from 'mariadb';
 
 const LEGACY_DB = 'task_dispatch';
@@ -87,11 +88,41 @@ function setDifference(left, right) {
   return [...new Set(left)].filter((value) => !rightSet.has(value));
 }
 
+function compareIds(left, right) {
+  if (/^\d+$/.test(String(left)) && /^\d+$/.test(String(right))) {
+    const leftNumber = BigInt(String(left));
+    const rightNumber = BigInt(String(right));
+    if (leftNumber < rightNumber) return -1;
+    if (leftNumber > rightNumber) return 1;
+    return 0;
+  }
+  return String(left).localeCompare(String(right), 'en');
+}
+
+function snapshotFromIds(values) {
+  const ids = [...new Set(values.map((value) => String(value)))].sort(compareIds);
+  return {
+    count: ids.length,
+    max_id: ids.length > 0 ? ids[ids.length - 1] : null,
+    ids_checksum: crypto.createHash('sha256').update(ids.join('\n')).digest('hex'),
+    ids,
+  };
+}
+
 async function contentCounts(connection) {
   const result = {};
   for (const table of CONTENT_TABLES) {
     const countRows = await connection.query(`SELECT COUNT(*) AS count FROM \`${table}\``);
     result[table] = count(countRows[0]);
+  }
+  return result;
+}
+
+async function contentSnapshot(connection) {
+  const result = {};
+  for (const table of CONTENT_TABLES) {
+    const idRows = await connection.query(`SELECT id FROM \`${table}\` ORDER BY id`);
+    result[table] = snapshotFromIds(idRows.map((row) => row.id));
   }
   return result;
 }
@@ -287,7 +318,7 @@ async function verifyContent(source, target, check) {
        FROM event
       WHERE action = 'migration.baseline'`,
   );
-  const baseline = baselineRows
+  const baselineMatches = baselineRows
     .map((row) => {
       try {
         return { id: row.id, payload: JSON.parse(String(row.payload)) };
@@ -295,13 +326,42 @@ async function verifyContent(source, target, check) {
         return null;
       }
     })
-    .find((row) => row?.payload?.source === MIGRATION_SOURCE);
-  const before = await contentCounts(source);
-  const after = await contentCounts(source);
+    .filter((row) => row?.payload?.source === MIGRATION_SOURCE);
   check(
-    'G 老库实时快照在验证前后不变（仅执行 SELECT 证明源库未写入）',
-    countsEqual(before, after),
-    `realtime_snapshot_before=${JSON.stringify(before)}, realtime_snapshot_after=${JSON.stringify(after)}, baseline=${JSON.stringify(baseline?.payload?.counts ?? null)}`,
+    'baseline source 唯一',
+    baselineMatches.length === 1,
+    `matches=${baselineMatches.length}`,
+  );
+  const baseline = baselineMatches[0];
+  const currentSnapshot = await contentSnapshot(source);
+  const sourceSnapshot = baseline?.payload?.source_snapshot;
+  const missingHistoricalIds = {};
+  const changedSnapshots = {};
+  if (sourceSnapshot && typeof sourceSnapshot === 'object') {
+    for (const table of CONTENT_TABLES) {
+      const baselineIds = Array.isArray(sourceSnapshot[table]?.ids)
+        ? sourceSnapshot[table].ids.map((value) => String(value))
+        : [];
+      const currentIds = currentSnapshot[table].ids;
+      const missing = setDifference(baselineIds, currentIds);
+      const extra = setDifference(currentIds, baselineIds);
+      if (missing.length > 0) {
+        missingHistoricalIds[table] = missing.slice(0, 50);
+      }
+      if (extra.length > 0) {
+        changedSnapshots[table] = {
+          baseline_count: baselineIds.length,
+          current_count: currentIds.length,
+          added_since_baseline: extra.slice(0, 50),
+        };
+      }
+    }
+  }
+  check(
+    'G 老库基线声明的历史 ID 未被删除或修改（允许新增）',
+    sourceSnapshot !== undefined
+      && Object.keys(missingHistoricalIds).length === 0,
+    `missing_historical_ids=${JSON.stringify(missingHistoricalIds)}, added_since_baseline=${JSON.stringify(changedSnapshots)}, current=${JSON.stringify(currentSnapshot)}`,
   );
 
   const migratedEvents = await target.query(

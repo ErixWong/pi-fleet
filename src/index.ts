@@ -6,7 +6,7 @@ import express from 'express';
 import session from 'express-session';
 import { config } from './config.js';
 import { initDb } from './db.js';
-import { initSchema } from './db/pool.js';
+import { initSchema, markNewDbUnavailable, requireNewDb } from './db/pool.js';
 import { apiRouter } from './routes/api.js';
 import { mcpRouter } from './routes/mcp.js';
 import { agentRouter } from './routes/agent.js';
@@ -22,9 +22,29 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 async function main(): Promise<void> {
   await initDb();
   console.log('✓ 老库 schema 就绪');
-  const { created } = await initSchema();
-  console.log(`✓ 新库 schema 就绪（25 表，新增 ${created.length} 表${created.length > 0 ? `：${created.join(', ')}` : ''}）`);
-  await initSettings();
+  console.log(
+    `新库: ${config.dbNew.database}（${config.newDbRequired ? '必需' : '可选，不可用将跳过'}）`,
+  );
+  let newDbReady = false;
+  try {
+    const { created } = await initSchema();
+    console.log(
+      `✓ 新库 schema 就绪（${created.length > 0 ? `新增 ${created.length} 表：${created.join(', ')}` : '无新建表'}）`,
+    );
+    await initSettings();
+    newDbReady = true;
+  } catch (error) {
+    markNewDbUnavailable();
+    if (config.newDbRequired) {
+      throw new Error(
+        `新库 "${config.dbNew.database}" 不可用且 NEW_DB_REQUIRED=1：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    console.error(
+      `⚠ 新库 "${config.dbNew.database}" 不可用（NEW_DB_REQUIRED=0），跳过新模型初始化；老 /api、/mcp 继续提供服务。`
+        + ` 原因: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   const app = express();
   // 注意：不全局挂 body parser——MCP transport 需要读取原始 body 流，
@@ -62,7 +82,7 @@ async function main(): Promise<void> {
   }
 
   app.use('/api', apiRouter);
-  app.use('/api/v2', v2Router);
+  app.use('/api/v2', requireNewDb, v2Router);
   app.use('/api/agent', agentRouter);
   app.use(mcpRouter);
 
@@ -87,11 +107,14 @@ async function main(): Promise<void> {
   // 生命周期回收（§10.2）：每小时清理——running 超时→failed；公共池 claimed 超时→回池；pending_confirm 超 7 天→自动确认
   const RECOVER_INTERVAL_MS = 60 * 60 * 1000;
   setInterval(() => {
+    const attachmentScan = newDbReady
+      ? scanPendingAttachments()
+      : Promise.resolve({ scanned: 0, skipped: 0, infected: 0 });
     Promise.all([
       recoverStaleRunningTasks(2),
       recoverStaleClaimedTasks(2),
       autoConfirmPendingConfirm(7),
-      scanPendingAttachments(),
+      attachmentScan,
     ])
       .then(([n1, n2, n3, scan]) => {
         if (n1 + n2 + n3 > 0) console.log(`[recover] 超时回收 running=${n1} 认领回流=${n2} 自动确认=${n3}`);
@@ -102,33 +125,39 @@ async function main(): Promise<void> {
       .catch((err) => console.error('[recover] 失败:', err));
   }, RECOVER_INTERVAL_MS);
   // 启动时先跑一次
-  void Promise.all([
-    recoverStaleRunningTasks(2),
-    recoverStaleClaimedTasks(2),
-    autoConfirmPendingConfirm(7),
-    scanPendingAttachments(),
-  ]).catch(() => {});
+  if (newDbReady) {
+    void Promise.all([
+      recoverStaleRunningTasks(2),
+      recoverStaleClaimedTasks(2),
+      autoConfirmPendingConfirm(7),
+      scanPendingAttachments(),
+    ]).catch((err) => console.error('[recover] 启动扫描失败:', err));
+  }
 
   // LLM 审核/验收（§3.4 异步）：每分钟扫 pending_audit / submitted 两个队列；未配置时降级直通
   const LLM_SCAN_MS = 60 * 1000;
-  setInterval(() => {
-    Promise.all([scanPendingAudits(), scanPendingVerifications()])
-      .then(([a, v]) => {
-        if (a.audited + v.verified > 0) {
-          console.log(`[llm] 审核=${a.audited}(拒${a.rejected}/降级${a.degraded}) 验收=${v.verified}(过${v.passed}/拒${v.failed}/降级${v.degraded})`);
-        }
-      })
-      .catch((err) => console.error('[llm] 扫描失败:', err));
-  }, LLM_SCAN_MS);
+  if (newDbReady) {
+    setInterval(() => {
+      Promise.all([scanPendingAudits(), scanPendingVerifications()])
+        .then(([a, v]) => {
+          if (a.audited + v.verified > 0) {
+            console.log(`[llm] 审核=${a.audited}(拒${a.rejected}/降级${a.degraded}) 验收=${v.verified}(过${v.passed}/拒${v.failed}/降级${v.degraded})`);
+          }
+        })
+        .catch((err) => console.error('[llm] 扫描失败:', err));
+    }, LLM_SCAN_MS);
+  }
 
   // 编排（orchestration.md）：闸门放行 + 周期序列克隆（与 LLM 扫描同节奏）
-  setInterval(() => {
-    Promise.all([runStageGates(), runPeriodicClones()])
-      .then(([g, c]) => {
-        if (g + c > 0) console.log(`[plan] 闸门放行=${g} 周期克隆=${c}`);
-      })
-      .catch((err) => console.error('[plan] 编排扫描失败:', err));
-  }, LLM_SCAN_MS);
+  if (newDbReady) {
+    setInterval(() => {
+      Promise.all([runStageGates(), runPeriodicClones()])
+        .then(([g, c]) => {
+          if (g + c > 0) console.log(`[plan] 闸门放行=${g} 周期克隆=${c}`);
+        })
+        .catch((err) => console.error('[plan] 编排扫描失败:', err));
+    }, LLM_SCAN_MS);
+  }
 }
 
 main().catch((err) => {
