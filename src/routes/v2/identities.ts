@@ -8,7 +8,6 @@ import {
 import {
   createApiKey,
   getApiKey,
-  getPrincipal,
   listApiKeys,
   revokeApiKey,
 } from '../../service/identity.js';
@@ -29,8 +28,7 @@ identitiesV2Router.get(
       const principalId = typeof req.query.principal_id === 'string'
         ? req.query.principal_id
         : context.principal.id;
-      const principal = await getPrincipal(principalId);
-      if (!principal || principal.account_id !== context.account_id) {
+      if (principalId !== context.principal.id) {
         res.status(404).json({ error: 'not found' });
         return;
       }
@@ -55,13 +53,17 @@ identitiesV2Router.post(
       const principalId = typeof body.principal_id === 'string'
         ? body.principal_id
         : context.principal.id;
-      const principal = await getPrincipal(principalId);
-      if (!principal || principal.account_id !== context.account_id) {
+      // Issuing a key for another principal is an admin operation handled by the management DB/script path.
+      if (principalId !== context.principal.id) {
         res.status(404).json({ error: 'not found' });
         return;
       }
       if (!Array.isArray(body.scopes) || body.scopes.some((scope) => typeof scope !== 'string')) {
         res.status(400).json({ error: 'scopes must be an array of strings' });
+        return;
+      }
+      if (body.scopes.some((scope) => !context.scopes.includes(scope as typeof context.scopes[number]))) {
+        res.status(404).json({ error: 'not found' });
         return;
       }
       const created = await createApiKey({
@@ -87,8 +89,7 @@ async function revokeKey(req: Request, res: Response, next: NextFunction): Promi
       res.status(404).json({ error: 'not found' });
       return;
     }
-    const principal = await getPrincipal(apiKey.principal_id);
-    if (!principal || principal.account_id !== context.account_id) {
+    if (apiKey.principal_id !== context.principal.id) {
       res.status(404).json({ error: 'not found' });
       return;
     }

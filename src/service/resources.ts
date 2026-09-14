@@ -213,6 +213,41 @@ export async function getAttachment(id: string): Promise<Attachment | null> {
   return row ? attachmentFromRow(row) : null;
 }
 
+export async function canReadAttachment(
+  attachment: Attachment,
+  principalId: string,
+): Promise<boolean> {
+  if (attachment.owner_principal_id === principalId) return true;
+  const result = await getPool().query(
+    `SELECT 1
+       FROM deliverable d
+       JOIN post p ON p.id = d.post_id
+       LEFT JOIN post_task t ON t.post_id = p.id
+      WHERE d.attachment_id = ?
+        AND p.account_id = ?
+        AND p.deleted_at IS NULL
+        AND (
+          p.author_principal_id = ?
+          OR t.assignee_principal_id = ?
+          OR EXISTS (
+            SELECT 1
+              FROM post_target pt
+             WHERE pt.post_id = p.id
+               AND pt.principal_id = ?
+          )
+        )
+      LIMIT 1`,
+    [
+      attachment.id,
+      attachment.account_id,
+      principalId,
+      principalId,
+      principalId,
+    ],
+  );
+  return rows(result).length > 0;
+}
+
 export async function listAttachments(input: {
   owner_principal_id?: string;
   page?: number;

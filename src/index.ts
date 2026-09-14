@@ -17,6 +17,7 @@ import { scanPendingAttachments } from './service/attachments.js';
 import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
 import { runPeriodicClones, runStageGates } from './service/plans.js';
 import { startOutboxWorker } from './service/outbox-worker.js';
+import { startAttachmentScanWorker } from './service/attachment-worker.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +55,7 @@ async function main(): Promise<void> {
         },
       })
     : () => {};
+  const stopAttachmentWorker = newDbReady ? startAttachmentScanWorker() : () => {};
 
   const app = express();
   // 注意：不全局挂 body parser——MCP transport 需要读取原始 body 流，
@@ -108,7 +110,10 @@ async function main(): Promise<void> {
     console.log(`  API 端点:   http://127.0.0.1:${config.port}/api`);
     console.log(`  MCP 端点:   http://127.0.0.1:${config.port}/mcp`);
   });
-  server.on('close', stopWorker);
+  server.on('close', () => {
+    stopWorker();
+    stopAttachmentWorker();
+  });
 
   // 对话实时通道（agent 桥接器 WS：/api/agent/chat-stream）
   const { mountChatWs } = await import('./ws-server.js');

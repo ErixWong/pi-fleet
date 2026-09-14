@@ -19,12 +19,20 @@ const hash = (value) => crypto.createHash('sha256').update(value, 'utf8').digest
 const now = () => new Date().toISOString().slice(0, 19).replace('T', ' ');
 let principalId;
 let deviceId;
+let otherPrincipalId;
 let keyId;
 let lowKeyId;
+let manageOnlyKeyId;
+let otherReadKeyId;
+let otherTaskKeyId;
 let createdKeyId;
 let bearer;
 let lowBearer;
+let manageOnlyBearer;
+let otherReadBearer;
+let otherTaskBearer;
 const postIds = [];
+const attachmentIds = [];
 let passed = 0;
 let failed = 0;
 
@@ -51,6 +59,35 @@ async function request(method, path, token, body) {
   return { response, data };
 }
 
+async function upload(filename, mime, content, token) {
+  const form = new FormData();
+  form.append('file', new Blob([content], { type: mime }), filename);
+  const response = await fetch(`${base}/api/v2/attachments`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const data = await response.json().catch(() => ({}));
+  return { response, data };
+}
+
+async function pollScanStatus(attachmentId) {
+  const statuses = [];
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const rows = await db.query(
+      `SELECT scan_status FROM attachment WHERE id = ? LIMIT 1`,
+      [attachmentId],
+    );
+    const status = rows[0] ? String(rows[0].scan_status) : 'missing';
+    if (statuses[statuses.length - 1] !== status) statuses.push(status);
+    if (['clean', 'infected', 'skipped', 'error', 'missing'].includes(status)) {
+      return { status, statuses };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return { status: statuses.at(-1) ?? 'missing', statuses };
+}
+
 async function fixture() {
   const accounts = await db.query(
     `SELECT id FROM account WHERE deleted_at IS NULL ORDER BY id LIMIT 1`,
@@ -59,14 +96,26 @@ async function fixture() {
   const accountId = String(accounts[0].id);
   principalId = id('prn');
   deviceId = principalId;
+  otherPrincipalId = id('prn');
   keyId = id('key');
   lowKeyId = id('key');
+  manageOnlyKeyId = id('key');
+  otherReadKeyId = id('key');
+  otherTaskKeyId = id('key');
   bearer = key();
   lowBearer = key();
+  manageOnlyBearer = key();
+  otherReadBearer = key();
+  otherTaskBearer = key();
   await db.query(
     `INSERT INTO principal (id, account_id, kind, name, created_at)
      VALUES (?, ?, 'host', ?, ?)`,
     [principalId, accountId, `rest-v2-${principalId}`, now()],
+  );
+  await db.query(
+    `INSERT INTO principal (id, account_id, kind, name, created_at)
+     VALUES (?, ?, 'user', ?, ?)`,
+    [otherPrincipalId, accountId, `rest-v2-other-${otherPrincipalId}`, now()],
   );
   await db.query(
     `INSERT INTO device (principal_id, hostname, os, created_at)
@@ -87,6 +136,27 @@ async function fixture() {
      VALUES (?, ?, ?, 'rest-v2-low', ?, ?)`,
     [lowKeyId, principalId, hash(lowBearer), JSON.stringify(['task:read']), now()],
   );
+  await db.query(
+    `INSERT INTO api_key (id, principal_id, key_hash, label, scopes, created_at)
+     VALUES (?, ?, ?, 'rest-v2-manage-only', ?, ?)`,
+    [manageOnlyKeyId, principalId, hash(manageOnlyBearer), JSON.stringify(['key:manage']), now()],
+  );
+  await db.query(
+    `INSERT INTO api_key (id, principal_id, key_hash, label, scopes, created_at)
+     VALUES (?, ?, ?, 'rest-v2-other-read', ?, ?)`,
+    [otherReadKeyId, otherPrincipalId, hash(otherReadBearer), JSON.stringify(['attachment:read']), now()],
+  );
+  await db.query(
+    `INSERT INTO api_key (id, principal_id, key_hash, label, scopes, created_at)
+     VALUES (?, ?, ?, 'rest-v2-other-task', ?, ?)`,
+    [
+      otherTaskKeyId,
+      otherPrincipalId,
+      hash(otherTaskBearer),
+      JSON.stringify(['attachment:read', 'task:read', 'task:claim', 'task:submit']),
+      now(),
+    ],
+  );
   return accountId;
 }
 
@@ -101,13 +171,21 @@ async function cleanup() {
     await db.query(`UPDATE post SET parent_id = NULL WHERE id IN (${placeholders})`, postIds);
     await db.query(`DELETE FROM post WHERE id IN (${placeholders})`, postIds);
   }
-  if (keyId || lowKeyId || createdKeyId) {
+  if (attachmentIds.length > 0) {
+    const placeholders = attachmentIds.map(() => '?').join(', ');
+    await db.query(`DELETE FROM attachment WHERE id IN (${placeholders})`, attachmentIds);
+  }
+  const keyIds = [keyId, lowKeyId, manageOnlyKeyId, otherReadKeyId, otherTaskKeyId, createdKeyId]
+    .filter(Boolean);
+  if (keyIds.length > 0) {
+    const placeholders = keyIds.map(() => '?').join(', ');
     await db.query(
-      `DELETE FROM api_key WHERE id IN (?, ?, ?)`,
-      [keyId, lowKeyId, createdKeyId],
+      `DELETE FROM api_key WHERE id IN (${placeholders})`,
+      keyIds,
     );
   }
   if (deviceId) await db.query(`DELETE FROM device WHERE principal_id = ?`, [deviceId]);
+  if (otherPrincipalId) await db.query(`DELETE FROM principal WHERE id = ?`, [otherPrincipalId]);
   if (principalId) await db.query(`DELETE FROM principal WHERE id = ?`, [principalId]);
   await db.end();
 }
@@ -180,24 +258,87 @@ try {
     deliverable_spec: {},
   });
   check('11. empty deliverable_spec is rejected', empty.response.status >= 400);
-  const createdKey = await request('POST', '/api/v2/keys', bearer, {
-    label: 'rest-v2-created',
-    scopes: ['task:read'],
+  const elevation = await request('POST', '/api/v2/keys', manageOnlyBearer, {
+    label: 'rest-v2-elevation',
+    scopes: ['moderate'],
   });
-  check('12. POST /keys creates a scoped key',
+  console.log(`  attack privilege escalation: HTTP ${elevation.response.status}`);
+  check('12. key:manage-only cannot mint moderate', elevation.response.status === 404);
+  const createdKey = await request('POST', '/api/v2/keys', manageOnlyBearer, {
+    label: 'rest-v2-created',
+    scopes: ['key:manage'],
+  });
+  check('13. key:manage-only can mint a subset key',
     createdKey.response.status === 201 && typeof createdKey.data.key === 'string',
     JSON.stringify(createdKey.data));
+  const otherPrincipalKey = await request('POST', '/api/v2/keys', manageOnlyBearer, {
+    principal_id: otherPrincipalId,
+    scopes: ['key:manage'],
+  });
+  console.log(`  attack issue-for-other-principal: HTTP ${otherPrincipalKey.response.status}`);
+  check('14. issuing a key for another principal is hidden',
+    otherPrincipalKey.response.status === 404,
+    JSON.stringify(otherPrincipalKey.data));
+  const otherList = await request(
+    'GET',
+    `/api/v2/keys?principal_id=${encodeURIComponent(otherPrincipalId)}`,
+    manageOnlyBearer,
+  );
+  check('15. listing another principal keys is hidden', otherList.response.status === 404);
+  const otherDelete = await request('DELETE', `/api/v2/keys/${otherReadKeyId}`, manageOnlyBearer);
+  console.log(`  attack revoke-other-key: HTTP ${otherDelete.response.status}`);
+  check('16. revoking another principal key is hidden', otherDelete.response.status === 404);
   const keyList = await request('GET', '/api/v2/keys', bearer);
   const createdKeyView = keyList.data.items?.find((item) => item.label === 'rest-v2-created');
   createdKeyId = createdKeyView?.id;
-  check('13. GET /keys lists the created key without secret material',
-    keyList.response.status === 200 && createdKeyView?.scopes?.includes('task:read')
+  check('17. GET /keys lists the created key without secret material',
+    keyList.response.status === 200 && createdKeyView?.scopes?.includes('key:manage')
       && !('key' in (createdKeyView ?? {})) && !('key_hash' in (createdKeyView ?? {})),
     JSON.stringify(keyList.data));
-  const revoked = await request('DELETE', `/api/v2/keys/${createdKeyId}`, bearer);
-  check('14. DELETE /keys/:id revokes the created key',
+  const revoked = await request('DELETE', `/api/v2/keys/${createdKeyId}`, manageOnlyBearer);
+  check('18. DELETE /keys/:id revokes the created key',
     revoked.response.status === 200 && revoked.data.ok === true,
     JSON.stringify(revoked.data));
+  const uploaded = await upload('rest-v2.txt', 'text/plain', 'rest v2 attachment', bearer);
+  const attachmentId = uploaded.data.attachment_id;
+  if (attachmentId) attachmentIds.push(attachmentId);
+  check('19. POST /attachments uploads an attachment',
+    uploaded.response.status === 201 && typeof attachmentId === 'string',
+    JSON.stringify(uploaded.data));
+  if (attachmentId) {
+    const scan = await pollScanStatus(attachmentId);
+    console.log(`  attachment scan transition: ${scan.statuses.join(' -> ')}`);
+    check('20. uploaded attachment leaves pending scan state',
+      scan.status === 'skipped',
+      JSON.stringify(scan));
+    const ownerDownload = await fetch(`${base}/api/v2/attachments/${attachmentId}`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+    check('21. attachment owner can download', ownerDownload.status === 200);
+    const unrelatedDownload = await fetch(`${base}/api/v2/attachments/${attachmentId}`, {
+      headers: { authorization: `Bearer ${otherReadBearer}` },
+    });
+    console.log(`  attack non-owner unread attachment: HTTP ${unrelatedDownload.status}`);
+    check('22. non-owner without a reference is hidden', unrelatedDownload.status === 404);
+
+    const assigned = await request('POST', '/api/v2/tasks', bearer, {
+      title: 'REST v2 attachment access task',
+      body: 'assignee attachment access',
+      visibility: 'private',
+      deliverable_spec: { items: ['result'] },
+      targets: [{ principal_id: otherPrincipalId, role: 'assignee' }],
+    });
+    const assignedTaskId = assigned.data.post_id;
+    if (assignedTaskId) postIds.push(assignedTaskId);
+    await request('POST', `/api/v2/tasks/${assignedTaskId}/claim`, otherTaskBearer);
+    await request('POST', `/api/v2/tasks/${assignedTaskId}/submit`, otherTaskBearer, {
+      deliverables: [{ name: 'result', attachment_id: attachmentId }],
+    });
+    const referencedDownload = await fetch(`${base}/api/v2/attachments/${attachmentId}`, {
+      headers: { authorization: `Bearer ${otherReadBearer}` },
+    });
+    check('23. assignee can download a referenced deliverable', referencedDownload.status === 200);
+  }
 } catch (error) {
   failed += 1;
   console.error(`  FAIL acceptance aborted — ${error instanceof Error ? error.message : String(error)}`);

@@ -4,7 +4,12 @@ import path from 'node:path';
 import { Router } from 'express';
 import multer from 'multer';
 import { principalAuthMiddleware, requirePrincipal, requireScope } from '../../auth-principal.js';
-import { createAttachment, getAttachment, softDeleteAttachment } from '../../service/resources.js';
+import {
+  canReadAttachment,
+  createAttachment,
+  getAttachment,
+  softDeleteAttachment,
+} from '../../service/resources.js';
 import { sendAttachmentFile } from '../attach-shared.js';
 
 export const attachmentsV2Router = Router();
@@ -90,6 +95,10 @@ attachmentsV2Router.get(
       const context = requirePrincipal();
       const attachment = await getAttachment(req.params.id);
       if (!attachment || attachment.deleted_at || attachment.account_id !== context.account_id) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      if (!await canReadAttachment(attachment, context.principal.id)) {
         res.status(404).json({ error: 'not found' });
         return;
       }

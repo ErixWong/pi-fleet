@@ -3,7 +3,12 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { createAttachment, getAttachment, softDeleteAttachment } from '../service/resources.js';
+import {
+  canReadAttachment,
+  createAttachment,
+  getAttachment,
+  softDeleteAttachment,
+} from '../service/resources.js';
 import {
   mcpPrincipal,
   guardScope,
@@ -83,6 +88,9 @@ export function registerResourceTools(server: McpServer): void {
         if (!args.attachment_id) return toolErr('attachment_id is required');
         const attachment = await getAttachment(args.attachment_id);
         if (!attachment || attachment.deleted_at || attachment.account_id !== context.account_id) {
+          return toolErr('not found');
+        }
+        if (!await canReadAttachment(attachment, context.principal.id)) {
           return toolErr('not found');
         }
         return toolOk({
