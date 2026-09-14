@@ -126,6 +126,7 @@ export interface PublishPendingOptions {
   limit?: number;
   actionPrefix?: string;
   resourceType?: string;
+  leaseMs?: number;
 }
 
 function escapeLikePrefix(value: string): string {
@@ -152,15 +153,24 @@ function visibilityFilter(options: PublishPendingOptions, now: string): {
   return { clauses, params };
 }
 
+function addMilliseconds(now: Date, milliseconds: number): string {
+  const lease = new Date(now.getTime() + milliseconds);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${lease.getFullYear()}-${pad(lease.getMonth() + 1)}-${pad(lease.getDate())} ${pad(lease.getHours())}:${pad(lease.getMinutes())}:${pad(lease.getSeconds())}`;
+}
+
 export async function publishPending({
   limit = 100,
   actionPrefix,
   resourceType,
+  leaseMs = 60_000,
 }: PublishPendingOptions = {}): Promise<EventRecord[]> {
   const batchSize = Math.min(1000, Math.max(1, Math.floor(limit) || 100));
   const candidateSize = batchSize * 2;
+  const leaseDuration = Math.min(24 * 60 * 60 * 1000, Math.max(1, Math.floor(leaseMs) || 60_000));
   return withTransaction(async (conn) => {
     const now = nowString();
+    const leaseUntil = addMilliseconds(new Date(), leaseDuration);
     const options = { actionPrefix, resourceType };
     const candidateFilter = visibilityFilter(options, now);
     const candidateResult = await conn.query(
@@ -198,28 +208,48 @@ export async function publishPending({
     if (pending.length === 0) return [];
 
     const lockedPlaceholders = pending.map(() => '?').join(', ');
-    await conn.query(
+    const claimed = await conn.query(
       `UPDATE event
-          SET published_at = ?
+          SET next_attempt_at = ?, attempts = attempts + 1
         WHERE id IN (${lockedPlaceholders})
           AND ${visibilityFilter(options, now).clauses.join('\n          AND ')}`,
-      [now, ...pending.map((row) => row.id), ...visibilityFilter(options, now).params],
+      [leaseUntil, ...pending.map((row) => row.id), ...visibilityFilter(options, now).params],
     );
+    const claimedCount = Number((claimed as { affectedRows?: number }).affectedRows ?? 0);
+    if (claimedCount === 0) return [];
     for (const row of pending) {
-      row.published_at = now;
+      row.next_attempt_at = leaseUntil;
+      row.attempts = numberValue(row.attempts) + 1;
     }
-    return pending.map(eventFromRow);
+    return pending.map((row) => {
+      const event = eventFromRow(row);
+      // Keep the historical return shape non-null while the database row remains
+      // unpublished until the worker confirms delivery.
+      event.published_at = leaseUntil;
+      return event;
+    });
   });
 }
 
-export async function markPublished(id: string): Promise<void> {
+export interface EventLease {
+  attempts: number;
+  next_attempt_at: string;
+}
+
+export async function markPublished(id: string, lease?: EventLease): Promise<void> {
+  const predicates = lease
+    ? 'published_at IS NULL AND attempts = ? AND next_attempt_at = ?'
+    : 'published_at IS NULL';
+  const params = lease
+    ? [nowString(), id, lease.attempts, lease.next_attempt_at]
+    : [nowString(), id];
   const result = await getPool().query(
     `UPDATE event
-        SET published_at = COALESCE(published_at, ?),
+        SET published_at = ?,
             next_attempt_at = NULL,
             last_error = ''
-      WHERE id = ?`,
-    [nowString(), id],
+      WHERE id = ? AND ${predicates}`,
+    params,
   );
   if (Number((result as { affectedRows?: number }).affectedRows ?? 0) === 0) {
     const existing = await getPool().query('SELECT id FROM event WHERE id = ?', [id]);
@@ -231,18 +261,26 @@ export async function markFailed(
   id: string,
   error: string,
   nextAttemptAt: string | null,
+  lease?: EventLease,
 ): Promise<void> {
+  const predicates = lease
+    ? 'id = ? AND published_at IS NULL AND attempts = ? AND next_attempt_at = ?'
+    : 'id = ?';
+  const params = lease
+    ? [error.slice(0, 500), nextAttemptAt, id, lease.attempts, lease.next_attempt_at]
+    : [error.slice(0, 500), nextAttemptAt, id];
   const result = await getPool().query(
     `UPDATE event
         SET published_at = NULL,
-            attempts = attempts + 1,
+            attempts = attempts${lease ? '' : ' + 1'},
             last_error = ?,
             next_attempt_at = ?
-      WHERE id = ?`,
-    [error.slice(0, 500), nextAttemptAt, id],
+      WHERE ${predicates}`,
+    params,
   );
   if (Number((result as { affectedRows?: number }).affectedRows ?? 0) === 0) {
-    throw new Error(`Event not found: ${id}`);
+    const existing = await getPool().query('SELECT id FROM event WHERE id = ?', [id]);
+    if (rows(existing).length === 0) throw new Error(`Event not found: ${id}`);
   }
 }
 

@@ -16,6 +16,7 @@ import { initSettings } from './service/settings.js';
 import { scanPendingAttachments } from './service/attachments.js';
 import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
 import { runPeriodicClones, runStageGates } from './service/plans.js';
+import { startOutboxWorker } from './service/outbox-worker.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +46,14 @@ async function main(): Promise<void> {
         + ` 原因: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const stopWorker = newDbReady
+    ? startOutboxWorker({
+        deliver: async (event) => {
+          if (event.retention === 'notify') console.log('[outbox]', event.id, event.action);
+          return { ok: true };
+        },
+      })
+    : () => {};
 
   const app = express();
   // 注意：不全局挂 body parser——MCP transport 需要读取原始 body 流，
@@ -99,6 +108,7 @@ async function main(): Promise<void> {
     console.log(`  API 端点:   http://127.0.0.1:${config.port}/api`);
     console.log(`  MCP 端点:   http://127.0.0.1:${config.port}/mcp`);
   });
+  server.on('close', stopWorker);
 
   // 对话实时通道（agent 桥接器 WS：/api/agent/chat-stream）
   const { mountChatWs } = await import('./ws-server.js');

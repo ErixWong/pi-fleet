@@ -12,8 +12,8 @@ const phase = phaseIndex >= 0 ? args[phaseIndex + 1] : 'read';
 const base = baseIndex >= 0 ? args[baseIndex + 1] : process.env.TEST_BASE ?? 'http://127.0.0.1:3000';
 const mcpPath = pathIndex >= 0 ? args[pathIndex + 1] : '/mcp2';
 
-if (phase !== 'read') {
-  throw new Error(`only --phase read is implemented in 3b: ${phase}`);
+if (!['read', 'write'].includes(phase)) {
+  throw new Error(`--phase must be read or write: ${phase}`);
 }
 
 const dbOptions = (database) => ({
@@ -58,6 +58,8 @@ let oldAgentId;
 let mainKey;
 let lowKey;
 let oldKey;
+const postIds = [];
+const attachmentIds = [];
 let passed = 0;
 let failed = 0;
 
@@ -154,6 +156,41 @@ async function createFixtures() {
 }
 
 async function cleanup() {
+  if (newPrincipalId) {
+    const ownedPosts = await newDb.query(
+      `SELECT id FROM post WHERE author_principal_id = ?`,
+      [newPrincipalId],
+    );
+    for (const row of ownedPosts) {
+      if (!postIds.includes(String(row.id))) postIds.push(String(row.id));
+    }
+    const ownedAttachments = await newDb.query(
+      `SELECT id FROM attachment WHERE owner_principal_id = ?`,
+      [newPrincipalId],
+    );
+    for (const row of ownedAttachments) {
+      if (!attachmentIds.includes(String(row.id))) attachmentIds.push(String(row.id));
+    }
+  }
+  if (postIds.length > 0) {
+    const placeholders = postIds.map(() => '?').join(', ');
+    await newDb.query(`DELETE FROM deliverable WHERE post_id IN (${placeholders})`, postIds);
+    await newDb.query(
+      `DELETE FROM post_verdict
+        WHERE post_id IN (${placeholders}) OR target_task_id IN (${placeholders})`,
+      [...postIds, ...postIds],
+    );
+    await newDb.query(`DELETE FROM post_task WHERE post_id IN (${placeholders})`, postIds);
+    await newDb.query(`DELETE FROM post_target WHERE post_id IN (${placeholders})`, postIds);
+    await newDb.query(`DELETE FROM post_summary WHERE root_id IN (${placeholders})`, postIds);
+    await newDb.query(`UPDATE post SET parent_id = NULL WHERE id IN (${placeholders})`, postIds);
+    await newDb.query(`DELETE FROM post WHERE id IN (${placeholders})`, postIds);
+  }
+  if (attachmentIds.length > 0) {
+    const placeholders = attachmentIds.map(() => '?').join(', ');
+    await newDb.query(`DELETE FROM deliverable WHERE attachment_id IN (${placeholders})`, attachmentIds);
+    await newDb.query(`DELETE FROM attachment WHERE id IN (${placeholders})`, attachmentIds);
+  }
   if (newKeyId || lowKeyId) {
     await newDb.query(
       `DELETE FROM api_key WHERE id IN (?, ?)`,
@@ -173,6 +210,174 @@ try {
   const lowClient = await mcpClient(mcpPath, lowKey);
   const legacyClient = await mcpClient('/mcp', oldKey);
 
+  if (phase === 'write') {
+    console.log('== MCP v2 write acceptance ==');
+    const taskCreate = await call(client, 'post', {
+      action: 'create',
+      kind: 'task',
+      title: 'MCP v2 write task',
+      body: 'complete the write path',
+      visibility: 'private',
+      deliverable_spec: { items: ['result'] },
+      targets: [{ principal_id: newPrincipalId, role: 'assignee' }],
+    });
+    const taskId = taskCreate.payload.post_id;
+    if (taskId) postIds.push(taskId);
+    check('1. post(create task) publishes an open task',
+      taskCreate.payload.ok === true && typeof taskId === 'string' && taskCreate.payload.status === 'open',
+      JSON.stringify(taskCreate.payload));
+    const claimed = await call(client, 'task', { action: 'claim', task_id: taskId });
+    check('2. task(claim) assigns the authenticated principal',
+      claimed.payload.ok === true && claimed.payload.assignee_principal_id === newPrincipalId,
+      JSON.stringify(claimed.payload));
+    const uploaded = await call(client, 'attachment', {
+      action: 'upload',
+      filename: 'result.txt',
+      mime: 'text/plain',
+      data_base64: Buffer.from('result').toString('base64'),
+    });
+    if (uploaded.payload.attachment_id) attachmentIds.push(uploaded.payload.attachment_id);
+    check('3. attachment(upload) returns an attachment id',
+      uploaded.payload.ok === true && typeof uploaded.payload.attachment_id === 'string',
+      JSON.stringify(uploaded.payload));
+    const submitted = await call(client, 'task', {
+      action: 'submit',
+      task_id: taskId,
+      deliverables: [{ name: 'result', attachment_id: uploaded.payload.attachment_id }],
+    });
+    check('4. task(submit) returns a passing precheck',
+      submitted.payload.ok === true && submitted.payload.precheck?.ok === true
+        && submitted.payload.task?.status === 'submitted',
+      JSON.stringify(submitted.payload));
+    const accepted = await call(client, 'task', {
+      action: 'verdict',
+      task_id: taskId,
+      decision: 'accept',
+      opinion: 'accepted',
+    });
+    check('5. task(verdict accept) closes the task',
+      accepted.payload.ok === true && accepted.payload.task?.status === 'done',
+      JSON.stringify(accepted.payload));
+
+    const publicCreated = await call(client, 'post', {
+      action: 'create',
+      kind: 'task',
+      title: 'MCP v2 public task',
+      body: 'public offer',
+      visibility: 'public',
+      deliverable_spec: { items: ['result'] },
+      targets: [],
+    });
+    const publicTaskId = publicCreated.payload.post_id;
+    if (publicTaskId) postIds.push(publicTaskId);
+    await call(client, 'task', { action: 'claim', task_id: publicTaskId });
+    await call(client, 'task', {
+      action: 'submit',
+      task_id: publicTaskId,
+      deliverables: [{ name: 'result' }],
+    });
+    const rejected = await call(client, 'task', {
+      action: 'verdict',
+      task_id: publicTaskId,
+      decision: 'reject',
+      opinion: 'please improve',
+    });
+    check('6. public reject returns to claimed with one attempt',
+      rejected.payload.task?.status === 'claimed' && rejected.payload.task?.attempts === 1,
+      JSON.stringify(rejected.payload));
+    const reopened = await call(client, 'task', { action: 'reopen', task_id: publicTaskId });
+    const resubmitted = await call(client, 'task', {
+      action: 'submit',
+      task_id: publicTaskId,
+      deliverables: [{ name: 'result' }],
+    });
+    const acceptedAgain = await call(client, 'task', {
+      action: 'verdict',
+      task_id: publicTaskId,
+      decision: 'accept',
+    });
+    if (accepted.payload.verdict?.post_id) postIds.push(accepted.payload.verdict.post_id);
+    if (acceptedAgain.payload.verdict?.post_id) postIds.push(acceptedAgain.payload.verdict.post_id);
+    check('7. public reject → reopen → submit → accept closes the task',
+      reopened.payload.ok === true
+        && resubmitted.payload.ok === true
+        && acceptedAgain.payload.task?.status === 'done',
+      JSON.stringify({ reopened: reopened.payload, resubmitted: resubmitted.payload, accepted: acceptedAgain.payload }));
+
+    const emptyBefore = await newDb.query(`SELECT COUNT(*) AS count FROM post`);
+    const emptySpec = await call(client, 'post', {
+      action: 'create',
+      kind: 'task',
+      body: 'must reject empty spec',
+      visibility: 'public',
+      deliverable_spec: {},
+    });
+    const emptyAfter = await newDb.query(`SELECT COUNT(*) AS count FROM post`);
+    check('8. empty deliverable_spec is rejected without a post',
+      emptySpec.result.isError === true && Number(emptyBefore[0].count) === Number(emptyAfter[0].count),
+      JSON.stringify(emptySpec.payload));
+
+    const approve = await call(client, 'task', { action: 'approve', task_id: taskId });
+    const resolve = await call(client, 'task', { action: 'resolve', task_id: taskId });
+    check('9. approve and resolve are unknown task actions',
+      approve.result.isError === true && resolve.result.isError === true,
+      JSON.stringify({ approve: approve.payload, resolve: resolve.payload }));
+
+    const targetsByCount = [];
+    for (const targetCount of [0, 1, 3]) {
+      const targetList = targetCount === 0
+        ? []
+        : targetCount === 1
+          ? [{ principal_id: newPrincipalId, role: 'assignee' }]
+          : [
+              { principal_id: newPrincipalId, role: 'assignee' },
+              { principal_id: newPrincipalId, role: 'mention' },
+              { principal_id: newPrincipalId, role: 'watcher' },
+            ];
+      const created = await call(client, 'post', {
+        action: 'create',
+        kind: 'note',
+        body: `target count ${targetCount}`,
+        visibility: 'account',
+        targets: targetList,
+      });
+      if (created.payload.post_id) postIds.push(created.payload.post_id);
+      targetsByCount.push(created);
+    }
+    check('10. target 0/1/3 shapes are accepted',
+      targetsByCount.every((item) => item.payload.ok === true),
+      JSON.stringify(targetsByCount.map((item) => item.payload)));
+
+    const deniedClaim = await call(lowClient, 'task', { action: 'claim', task_id: publicTaskId });
+    const deniedSubmit = await call(lowClient, 'task', {
+      action: 'submit',
+      task_id: publicTaskId,
+      deliverables: [{ name: 'result' }],
+    });
+    const deniedVerdict = await call(lowClient, 'task', {
+      action: 'verdict',
+      task_id: publicTaskId,
+      decision: 'accept',
+    });
+    const deniedUpload = await call(lowClient, 'attachment', {
+      action: 'upload',
+      filename: 'denied.txt',
+      data_base64: Buffer.from('denied').toString('base64'),
+    });
+    const deniedDetail = await call(lowClient, 'post', { action: 'detail', id: taskId });
+    check('11. scope denial matrix returns MCP errors',
+      [deniedClaim, deniedSubmit, deniedVerdict, deniedUpload, deniedDetail]
+        .every((item) => item.result.isError === true),
+      JSON.stringify([deniedClaim.payload, deniedSubmit.payload, deniedVerdict.payload, deniedUpload.payload, deniedDetail.payload]));
+
+    for (const item of [taskCreate, claimed, uploaded, submitted, accepted, publicCreated, rejected, reopened, resubmitted, acceptedAgain]) {
+      const text = JSON.stringify(item.payload);
+      check('12. no legacy status string in write response', !/(assigned|running|resolved|blocked)/.test(text), text);
+    }
+    await client.close();
+    await lowClient.close();
+    await legacyClient.close();
+  } else {
   console.log('== MCP v2 read acceptance ==');
   const who = await call(client, 'whoami', {});
   check('1. whoami principal.kind + scopes.length >= 11',
@@ -278,6 +483,7 @@ try {
   await client.close();
   await lowClient.close();
   await legacyClient.close();
+  }
 } catch (error) {
   failed += 1;
   console.error(`  FAIL acceptance aborted — ${error instanceof Error ? error.message : String(error)}`);
@@ -285,5 +491,5 @@ try {
   await cleanup();
 }
 
-console.log(`MCP v2 read acceptance: ${passed} passed, ${failed} failed`);
+console.log(`MCP v2 ${phase} acceptance: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exitCode = 1;

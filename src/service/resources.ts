@@ -134,6 +134,18 @@ export async function createAttachment(
   }
   if (!input.sha256) throw new Error('attachment sha256 is required');
   return withTransaction(async (conn) => {
+    const ownerRows = rows(await conn.query(
+      `SELECT account_id
+         FROM principal
+        WHERE id = ? AND deleted_at IS NULL
+        LIMIT 1`,
+      [input.owner_principal_id],
+    ));
+    if (!ownerRows[0]) throw new Error(`attachment owner not found: ${input.owner_principal_id}`);
+    if (stringValue(ownerRows[0].account_id) !== input.account_id) {
+      throw new Error('attachment owner belongs to another account');
+    }
+
     const existingResult = await conn.query(
       `${attachmentSelect()}
         WHERE owner_principal_id = ? AND sha256 = ?
@@ -307,67 +319,109 @@ async function deliverableRows(
   return rows(result).map(deliverableFromRow);
 }
 
-export async function createDeliverable(input: {
+interface CreateDeliverableInput {
   post_id: string;
   name: string;
   attachment_id?: string | null;
   note?: string;
-}): Promise<Deliverable> {
-  if (!input.post_id || !input.name) throw new Error('deliverable post_id and name are required');
-  return withTransaction(async (conn) => {
-    const postResult = await conn.query(
-      `SELECT account_id, author_principal_id
-         FROM post
-        WHERE id = ?
-        LIMIT 1
-        FOR UPDATE`,
-      [input.post_id],
-    );
-    const post = rows(postResult)[0];
-    if (!post) throw new Error(`Post not found: ${input.post_id}`);
+}
 
-    const versionResult = await conn.query(
-      `SELECT COALESCE(MAX(version), 0) AS version
-         FROM deliverable
-        WHERE post_id = ? AND name = ?
-        FOR UPDATE`,
-      [input.post_id, input.name],
+async function createDeliverableWithConnection(
+  conn: PoolConnection,
+  input: CreateDeliverableInput,
+): Promise<Deliverable> {
+  if (!input.post_id || !input.name) throw new Error('deliverable post_id and name are required');
+  const postResult = await conn.query(
+    `SELECT account_id, author_principal_id
+       FROM post
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE`,
+    [input.post_id],
+  );
+  const post = rows(postResult)[0];
+  if (!post) throw new Error(`Post not found: ${input.post_id}`);
+
+  if (input.attachment_id) {
+    const attachmentResult = await conn.query(
+      `SELECT account_id, owner_principal_id, deleted_at
+         FROM attachment
+        WHERE id = ?
+        LIMIT 1`,
+      [input.attachment_id],
     );
-    const version = numberValue(rows(versionResult)[0]?.version) + 1;
-    await conn.query(
-      `UPDATE deliverable
-          SET current = 0
-        WHERE post_id = ? AND name = ? AND current = 1`,
-      [input.post_id, input.name],
+    const attachment = rows(attachmentResult)[0];
+    if (!attachment) throw new Error(`Attachment not found: ${input.attachment_id}`);
+    if (attachment.deleted_at) throw new Error(`Attachment is deleted: ${input.attachment_id}`);
+    if (stringValue(attachment.account_id) !== stringValue(post.account_id)) {
+      throw new Error('deliverable attachment belongs to another account');
+    }
+    const ownerResult = await conn.query(
+      `SELECT account_id
+         FROM principal
+        WHERE id = ? AND deleted_at IS NULL
+        LIMIT 1`,
+      [attachment.owner_principal_id],
     );
-    const id = newId('dlv');
-    await conn.query(
-      `INSERT INTO deliverable
-         (id, post_id, name, version, attachment_id, note, current, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-      [
-        id,
-        input.post_id,
-        input.name,
-        version,
-        input.attachment_id ?? null,
-        input.note ?? '',
-        nowString(),
-      ],
-    );
-    await recordEvent(conn, {
-      account_id: stringValue(post.account_id),
-      actor_principal_id: stringValue(post.author_principal_id),
-      action: 'deliverable.created',
-      resource_type: 'deliverable',
-      resource_id: id,
-      after_state: { post_id: input.post_id, name: input.name, version },
-    });
-    const deliverables = await deliverableRows(conn, input.post_id, input.name);
-    const deliverable = deliverables.find((item) => item.id === id);
-    if (!deliverable) throw new Error(`Deliverable was not created: ${id}`);
-    return deliverable;
+    if (stringValue(rows(ownerResult)[0]?.account_id) !== stringValue(post.account_id)) {
+      throw new Error('deliverable attachment owner belongs to another account');
+    }
+  }
+
+  const versionResult = await conn.query(
+    `SELECT COALESCE(MAX(version), 0) AS version
+       FROM deliverable
+      WHERE post_id = ? AND name = ?
+      FOR UPDATE`,
+    [input.post_id, input.name],
+  );
+  const version = numberValue(rows(versionResult)[0]?.version) + 1;
+  await conn.query(
+    `UPDATE deliverable
+        SET current = 0
+      WHERE post_id = ? AND name = ? AND current = 1`,
+    [input.post_id, input.name],
+  );
+  const id = newId('dlv');
+  await conn.query(
+    `INSERT INTO deliverable
+       (id, post_id, name, version, attachment_id, note, current, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+    [
+      id,
+      input.post_id,
+      input.name,
+      version,
+      input.attachment_id ?? null,
+      input.note ?? '',
+      nowString(),
+    ],
+  );
+  await recordEvent(conn, {
+    account_id: stringValue(post.account_id),
+    actor_principal_id: stringValue(post.author_principal_id),
+    action: 'deliverable.created',
+    resource_type: 'deliverable',
+    resource_id: id,
+    after_state: { post_id: input.post_id, name: input.name, version },
   });
+  const deliverables = await deliverableRows(conn, input.post_id, input.name);
+  const deliverable = deliverables.find((item) => item.id === id);
+  if (!deliverable) throw new Error(`Deliverable was not created: ${id}`);
+  return deliverable;
+}
+
+export function createDeliverable(input: CreateDeliverableInput): Promise<Deliverable>;
+export function createDeliverable(conn: PoolConnection, input: CreateDeliverableInput): Promise<Deliverable>;
+export async function createDeliverable(
+  connOrInput: PoolConnection | CreateDeliverableInput,
+  maybeInput?: CreateDeliverableInput,
+): Promise<Deliverable> {
+  if (maybeInput) {
+    return createDeliverableWithConnection(connOrInput as PoolConnection, maybeInput);
+  }
+  return withTransaction((conn) =>
+    createDeliverableWithConnection(conn, connOrInput as CreateDeliverableInput));
 }
 
 export async function listDeliverables(postId: string): Promise<Deliverable[]> {

@@ -1,16 +1,26 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { hasScopes } from '../auth-principal.js';
 import {
+  addTarget,
+  createPost,
+  deletePost,
+  editPost,
+  getSummary,
   getPostDetail,
   listPosts,
+  removeTarget,
+  replyPost,
   type ListPostsFilter,
   type Post,
   type PostDetail,
   type PostTask,
 } from '../service/posts.js';
+import { publishTask } from '../service/task-flow.js';
 import {
   mcpPrincipal,
   guardScope,
+  ScopeDenied,
   toolFailure,
   toolOk,
   toolErr,
@@ -255,17 +265,45 @@ export function presentTaskListItem(item: {
 export function registerPostTools(server: McpServer): void {
   server.tool(
     'post',
-    'Read structured posts. This read-only batch supports detail and list.',
+    'Read and write structured posts.',
     {
-      action: z.enum(['detail', 'list']),
+      action: z.string(),
       id: z.string().optional(),
-      recent_limit: z.number().int().min(0).max(200).optional(),
-      include_recent: z.boolean().optional(),
-      kind: z.enum(POST_KINDS).optional(),
       root_id: z.string().optional(),
       parent_id: z.string().nullable().optional(),
-      author_principal_id: z.string().optional(),
+      body: z.string().optional(),
+      title: z.string().optional(),
+      subtype: z.string().optional(),
+      kind: z.enum(POST_KINDS).optional(),
       visibility: z.enum(VISIBILITIES).optional(),
+      deliverable_spec: z.unknown().optional(),
+      workdir: z.string().nullable().optional(),
+      executor: z.string().nullable().optional(),
+      max_attempts: z.number().int().min(1).optional(),
+      is_ready: z.boolean().optional(),
+      channel: z.object({
+        host_principal_id: z.string().min(1),
+        workdir: z.string().nullable().optional(),
+        run_user: z.string().nullable().optional(),
+        name: z.string().optional(),
+        status: z.enum(['open', 'archived']).optional(),
+      }).optional(),
+      targets: z.array(z.object({
+        principal_id: z.string().min(1),
+        role: z.enum(TARGET_ROLES).optional(),
+      })).optional(),
+      add: z.array(z.object({
+        principal_id: z.string().min(1),
+        role: z.enum(TARGET_ROLES),
+      })).optional(),
+      remove: z.array(z.object({
+        principal_id: z.string().min(1),
+        role: z.enum(TARGET_ROLES),
+      })).optional(),
+      recent_limit: z.number().int().min(0).max(200).optional(),
+      include_recent: z.boolean().optional(),
+      refresh: z.boolean().optional(),
+      author_principal_id: z.string().optional(),
       target_principal_id: z.string().optional(),
       page: z.number().int().min(1).optional(),
       page_size: z.number().int().min(1).max(200).optional(),
@@ -274,8 +312,118 @@ export function registerPostTools(server: McpServer): void {
     },
     async (args): Promise<ToolResult> => {
       try {
-        guardScope('post:read');
         const context = mcpPrincipal();
+        if (args.action === 'create') {
+          if (!args.kind || args.body === undefined || !args.visibility) {
+            return toolErr('kind, body, and visibility are required');
+          }
+          if (args.kind === 'task') {
+            guardScope('task:write');
+            const published = await publishTask({
+              account_id: context.account_id,
+              author_principal_id: context.principal.id,
+              title: args.title,
+              body: args.body,
+              visibility: args.visibility,
+              subtype: args.subtype,
+              deliverable_spec: args.deliverable_spec,
+              targets: args.targets,
+              task: {
+                is_ready: args.is_ready,
+                workdir: args.workdir,
+                executor: args.executor,
+                max_attempts: args.max_attempts,
+              },
+            });
+            return toolOk({ ok: true, post_id: published.post.id, status: published.task.status });
+          }
+          guardScope('post:write');
+          const post = await createPost({
+            account_id: context.account_id,
+            kind: args.kind,
+            subtype: args.subtype,
+            author_principal_id: context.principal.id,
+            title: args.title,
+            body: args.body,
+            visibility: args.visibility,
+            parent_id: args.parent_id,
+            targets: args.targets?.map((target) => ({
+              principal_id: target.principal_id,
+              role: target.role ?? 'assignee',
+            })),
+            channel: args.channel,
+          });
+          return toolOk({ ok: true, post_id: post.id, root_id: post.root_id });
+        }
+        if (args.action === 'reply') {
+          guardScope('post:write');
+          if (!args.parent_id || args.body === undefined) return toolErr('parent_id and body are required');
+          const post = await replyPost({
+            parent_id: args.parent_id,
+            author_principal_id: context.principal.id,
+            body: args.body,
+            subtype: args.subtype,
+            targets: args.targets?.map((target) => ({
+              principal_id: target.principal_id,
+              role: target.role ?? 'assignee',
+            })),
+          });
+          if (post.account_id !== context.account_id) return toolErr('not found');
+          return toolOk({ ok: true, post_id: post.id, root_id: post.root_id });
+        }
+        if (args.action === 'edit' || args.action === 'delete' || args.action === 'target') {
+          guardScope('post:write');
+          if (!args.id) return toolErr('id is required');
+          const detail = await getPostDetail(args.id);
+          if (!detail || detail.post.deleted_at || detail.post.account_id !== context.account_id) {
+            return toolErr('not found');
+          }
+          if (
+            detail.post.author_principal_id !== context.principal.id
+            && !hasScopes('moderate')
+          ) {
+            throw new ScopeDenied('moderate');
+          }
+          if (args.action === 'edit') {
+            const post = await editPost(args.id, { title: args.title, body: args.body });
+            return toolOk({ ok: true, revision: post.revision });
+          }
+          if (args.action === 'delete') {
+            await deletePost(args.id);
+            return toolOk({ ok: true });
+          }
+          for (const target of args.add ?? []) {
+            await addTarget(args.id, target.principal_id, target.role);
+          }
+          for (const target of args.remove ?? []) {
+            await removeTarget(args.id, target.principal_id, target.role);
+          }
+          const updated = await getPostDetail(args.id);
+          return toolOk({
+            ok: true,
+            targets: updated?.targets.map((target) => ({
+              principal_id: target.principal_id,
+              role: target.role,
+              read_at: target.read_at,
+            })) ?? [],
+          });
+        }
+        if (args.action === 'summary') {
+          guardScope('post:read');
+          const rootId = args.root_id ?? args.id;
+          if (!rootId) return toolErr('root_id is required');
+          const root = await getPostDetail(rootId);
+          if (!root || root.post.account_id !== context.account_id) return toolErr('not found');
+          const summary = await getSummary(root.post.root_id);
+          return toolOk({
+            ...(summary ?? { summary: null }),
+            pending_worker: args.refresh === true,
+          });
+        }
+        if (args.action !== 'detail' && args.action !== 'list') {
+          return toolErr(`unknown action: ${args.action}`);
+        }
+        guardScope('post:read');
         if (args.action === 'detail') {
           if (!args.id) return toolErr('id is required');
           const detail = await readPostDetail(args.id, context.account_id);

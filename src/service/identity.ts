@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
+import { recordEvent } from './event-outbox.js';
 
 export { getPool, initSchema } from '../db/pool.js';
 
@@ -554,6 +555,14 @@ async function insertApiKey(
   );
   const row = rows(result)[0];
   if (!row) throw new Error(`API key was not created: ${id}`);
+  await recordEvent(conn, {
+    account_id: principal.account_id,
+    actor_principal_id: principal.id,
+    action: 'key.created',
+    resource_type: 'key',
+    resource_id: id,
+    after_state: { principal_id: principal.id, scopes },
+  });
   return { key, apiKey: apiKeyFromRow(row) };
 }
 
@@ -658,12 +667,34 @@ export async function rotateApiKey(
 }
 
 export async function revokeApiKey(keyId: string): Promise<void> {
-  const result = await getPool().query(
-    `UPDATE api_key SET revoked_at = ?
-      WHERE id = ? AND revoked_at IS NULL`,
-    [nowString(), keyId],
-  );
-  if (affectedRows(result) === 0) throw new Error(`API key not found or already revoked: ${keyId}`);
+  await withTransaction(async (conn) => {
+    const keyRows = rows(await conn.query(
+      `SELECT k.id, k.principal_id, k.revoked_at, p.account_id
+         FROM api_key k
+         JOIN principal p ON p.id = k.principal_id
+        WHERE k.id = ?
+        LIMIT 1
+        FOR UPDATE`,
+      [keyId],
+    ));
+    const key = keyRows[0];
+    if (!key || key.revoked_at) throw new Error(`API key not found or already revoked: ${keyId}`);
+    const revokedAt = nowString();
+    const result = await conn.query(
+      `UPDATE api_key SET revoked_at = ?
+        WHERE id = ? AND revoked_at IS NULL`,
+      [revokedAt, keyId],
+    );
+    if (affectedRows(result) === 0) throw new Error(`API key not found or already revoked: ${keyId}`);
+    await recordEvent(conn, {
+      account_id: stringValue(key.account_id),
+      actor_principal_id: stringValue(key.principal_id),
+      action: 'key.revoked',
+      resource_type: 'key',
+      resource_id: keyId,
+      after_state: { revoked_at: revokedAt },
+    });
+  });
 }
 
 export async function listApiKeys(principalId: string): Promise<ApiKey[]> {
@@ -676,6 +707,19 @@ export async function listApiKeys(principalId: string): Promise<ApiKey[]> {
     [principalId],
   );
   return rows(result).map(apiKeyFromRow);
+}
+
+export async function getApiKey(keyId: string): Promise<ApiKey | null> {
+  const result = await getPool().query(
+    `SELECT id, principal_id, label, scopes, created_at, last_used_at,
+            expires_at, revoked_at
+       FROM api_key
+      WHERE id = ?
+      LIMIT 1`,
+    [keyId],
+  );
+  const row = rows(result)[0];
+  return row ? apiKeyFromRow(row) : null;
 }
 
 export function hasScope(

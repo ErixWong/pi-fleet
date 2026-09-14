@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { getAttachment } from '../service/resources.js';
+import { createAttachment, getAttachment, softDeleteAttachment } from '../service/resources.js';
 import {
   mcpPrincipal,
   guardScope,
@@ -13,16 +16,72 @@ import {
 export function registerResourceTools(server: McpServer): void {
   server.tool(
     'attachment',
-    'Read attachment metadata. This read-only batch supports read only.',
+    'Read attachment metadata or upload a small attachment.',
     {
-      action: z.literal('read'),
-      attachment_id: z.string().min(1),
+      action: z.string(),
+      attachment_id: z.string().min(1).optional(),
+      filename: z.string().optional(),
+      mime: z.string().optional(),
+      data_base64: z.string().optional(),
     },
-    async ({ attachment_id }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
       try {
-        guardScope('attachment:read');
         const context = mcpPrincipal();
-        const attachment = await getAttachment(attachment_id);
+        if (args.action === 'upload') {
+          guardScope('attachment:write');
+          if (!args.filename || !args.data_base64) {
+            return toolErr('filename and data_base64 are required');
+          }
+          if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(args.data_base64)) {
+            return toolErr('data_base64 is invalid');
+          }
+          const buffer = Buffer.from(args.data_base64, 'base64');
+          if (buffer.length === 0) return toolErr('attachment is empty');
+          if (buffer.length > 5 * 1024 * 1024) {
+            return toolErr('attachment exceeds 5MB');
+          }
+          const sha256 = createHash('sha256').update(buffer).digest('hex');
+          const date = new Date();
+          const pad = (value: number) => String(value).padStart(2, '0');
+          const datePath = `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+          const extension = /\.([A-Za-z0-9]{1,10})$/.exec(args.filename.trim())?.[1].toLowerCase() ?? '';
+          const relativePath = path.posix.join(
+            context.principal.id,
+            datePath,
+            `${sha256}${extension ? `.${extension}` : ''}`,
+          );
+          const attachmentRoot = path.resolve(
+            process.env.ATTACHMENTS_ROOT ?? path.resolve(process.cwd(), 'attachments'),
+          );
+          const attachmentPath = path.resolve(attachmentRoot, relativePath);
+          const created = await createAttachment({
+            account_id: context.account_id,
+            owner_principal_id: context.principal.id,
+            filename: args.filename.trim(),
+            mime: args.mime?.trim() ?? '',
+            size_bytes: buffer.length,
+            sha256,
+            relative_path: relativePath,
+          });
+          if (!created.deduped) {
+            try {
+              await mkdir(path.dirname(attachmentPath), { recursive: true });
+              await writeFile(attachmentPath, buffer);
+            } catch (error) {
+              await softDeleteAttachment(created.attachment.id);
+              throw error;
+            }
+          }
+          return toolOk({
+            ok: true,
+            attachment_id: created.attachment.id,
+            reused: created.deduped,
+          });
+        }
+        if (args.action !== 'read') return toolErr(`unknown action: ${args.action}`);
+        guardScope('attachment:read');
+        if (!args.attachment_id) return toolErr('attachment_id is required');
+        const attachment = await getAttachment(args.attachment_id);
         if (!attachment || attachment.deleted_at || attachment.account_id !== context.account_id) {
           return toolErr('not found');
         }

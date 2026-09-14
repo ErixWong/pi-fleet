@@ -1,10 +1,14 @@
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
+import multer from 'multer';
 import { principalAuthMiddleware, requirePrincipal, requireScope } from '../../auth-principal.js';
-import { getAttachment } from '../../service/resources.js';
+import { createAttachment, getAttachment, softDeleteAttachment } from '../../service/resources.js';
 import { sendAttachmentFile } from '../attach-shared.js';
 
 export const attachmentsV2Router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 function attachmentRoot(): string {
   return path.resolve(process.env.ATTACHMENTS_ROOT ?? path.resolve(process.cwd(), 'attachments'));
@@ -18,6 +22,64 @@ function safeAttachmentPath(root: string, relativePath: string): string | null {
   }
   return resolvedPath;
 }
+
+attachmentsV2Router.post(
+  '/',
+  principalAuthMiddleware(),
+  requireScope('attachment:write'),
+  upload.single('file'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      const file = req.file;
+      if (!file || file.size === 0) {
+        res.status(400).json({ error: 'file is required and cannot be empty' });
+        return;
+      }
+      const sha256 = createHash('sha256').update(file.buffer).digest('hex');
+      const date = new Date();
+      const pad = (value: number) => String(value).padStart(2, '0');
+      const datePath = `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+      const extension = /\.([A-Za-z0-9]{1,10})$/.exec(file.originalname.trim())?.[1].toLowerCase() ?? '';
+      const relativePath = path.posix.join(
+        context.principal.id,
+        datePath,
+        `${sha256}${extension ? `.${extension}` : ''}`,
+      );
+      const root = attachmentRoot();
+      const filePath = safeAttachmentPath(root, relativePath);
+      if (!filePath) {
+        res.status(400).json({ error: 'invalid attachment path' });
+        return;
+      }
+      const created = await createAttachment({
+        account_id: context.account_id,
+        owner_principal_id: context.principal.id,
+        filename: file.originalname,
+        mime: file.mimetype,
+        size_bytes: file.size,
+        sha256,
+        relative_path: relativePath,
+      });
+      if (!created.deduped) {
+        try {
+          await mkdir(path.dirname(filePath), { recursive: true });
+          await writeFile(filePath, file.buffer);
+        } catch (error) {
+          await softDeleteAttachment(created.attachment.id);
+          throw error;
+        }
+      }
+      res.status(201).json({
+        ok: true,
+        attachment_id: created.attachment.id,
+        reused: created.deduped,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 attachmentsV2Router.get(
   '/:id',
