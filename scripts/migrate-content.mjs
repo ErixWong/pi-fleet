@@ -27,13 +27,26 @@ const CLEAR_TABLES = [
   'attachment',
   'event',
 ];
+const TARGET_CONTENT_TABLES = [
+  'post',
+  'post_task',
+  'post_channel',
+  'post_verdict',
+  'post_target',
+  'attachment',
+  'deliverable',
+  'event',
+  'post_summary',
+  'tag',
+  'post_tag',
+];
 
 let lastMs = 0;
 let lastRandom = [];
 
 function usageError(message) {
   throw new Error(
-    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--force]`,
+    `${message}\n用法: node scripts/migrate-content.mjs --from task_dispatch --to erix [--force --confirm-wipe-content] [--allow-empty]`,
   );
 }
 
@@ -45,11 +58,21 @@ function parseArgs() {
   let from;
   let to;
   let force = false;
+  let confirmWipeContent = false;
+  let allowEmpty = false;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--force') {
       force = true;
+      continue;
+    }
+    if (arg === '--confirm-wipe-content') {
+      confirmWipeContent = true;
+      continue;
+    }
+    if (arg === '--allow-empty') {
+      allowEmpty = true;
       continue;
     }
     if (arg === '--from' || arg === '--to') {
@@ -68,7 +91,10 @@ function parseArgs() {
     usageError('数据库名只允许字母、数字、下划线和美元符号');
   }
   if (from === to) usageError('源库和目标库必须不同');
-  return { from, to, force };
+  if (confirmWipeContent && !force) {
+    usageError('--confirm-wipe-content 必须与 --force 一起使用');
+  }
+  return { from, to, force, confirmWipeContent, allowEmpty };
 }
 
 function connectionOptions(database) {
@@ -242,8 +268,16 @@ async function tableColumns(connection, database, table) {
   return new Set(rows(result).map((row) => String(row.column_name)));
 }
 
+async function assertConnectedDatabase(connection, expected, label) {
+  const result = await connection.query('SELECT DATABASE() AS database_name');
+  const actual = String(result[0]?.database_name ?? '');
+  if (actual !== expected) {
+    throw new Error(`${label}连接到 ${actual || '(空)'}，但要求 ${expected}`);
+  }
+}
+
 async function assertSourceTables(connection, database) {
-  for (const table of CONTENT_TABLES) {
+  for (const table of ['agents', ...CONTENT_TABLES]) {
     const columns = await tableColumns(connection, database, table);
     if (columns.size === 0) throw new Error(`老库缺少表 ${table}`);
   }
@@ -256,6 +290,77 @@ async function sourceCounts(connection) {
     result[table] = numberValue(countRows[0]?.count);
   }
   return result;
+}
+
+async function targetContentCounts(connection) {
+  const result = {};
+  for (const table of TARGET_CONTENT_TABLES) {
+    const countRows = await connection.query(`SELECT COUNT(*) AS count FROM \`${table}\``);
+    result[table] = numberValue(countRows[0]?.count);
+  }
+  return result;
+}
+
+async function migrationBaseline(connection) {
+  const baselineRows = await connection.query(
+    `SELECT id, payload
+       FROM event
+      WHERE action = 'migration.baseline'`,
+  );
+  return baselineRows
+    .map((row) => {
+      try {
+        const payload = JSON.parse(String(row.payload));
+        return payload.source === MIGRATION_SOURCE ? { id: String(row.id), payload } : null;
+      } catch {
+        return null;
+      }
+    })
+    .find((row) => row !== null) ?? null;
+}
+
+async function validateForceTarget(connection, force, confirmWipeContent) {
+  const counts = await targetContentCounts(connection);
+  if (counts.post_summary > 0 || counts.tag > 0 || counts.post_tag > 0) {
+    throw new Error(
+      `拒绝 --force：post_summary/tag/post_tag 非空，当前不属于可安全清理的迁移内容域 counts=${JSON.stringify({
+        post_summary: counts.post_summary,
+        tag: counts.tag,
+        post_tag: counts.post_tag,
+      })}`,
+    );
+  }
+  if (!force) return counts;
+  if (!confirmWipeContent) {
+    throw new Error(
+      `拒绝清空目标内容表 ${JSON.stringify(counts)}：将删除全部内容帖子、附件、交付物与事件；必须同时传入 --force --confirm-wipe-content`,
+    );
+  }
+  const targetHasRows = Object.entries(counts)
+    .filter(([table]) => !['post_summary', 'tag', 'post_tag'].includes(table))
+    .some(([, count]) => count > 0);
+  if (!targetHasRows) return counts;
+  const baseline = await migrationBaseline(connection);
+  const expected = baseline?.payload?.target_counts;
+  if (!expected || typeof expected !== 'object') {
+    throw new Error(
+      '拒绝清空目标内容表：migration.baseline 缺少 target_counts，无法证明目标只含迁移数据',
+    );
+  }
+  const differences = {};
+  for (const table of TARGET_CONTENT_TABLES) {
+    const expectedCount = Number(expected[table] ?? 0);
+    if (counts[table] > expectedCount) {
+      differences[table] = { current: counts[table], baseline: expectedCount };
+    }
+  }
+  if (Object.keys(differences).length > 0) {
+    throw new Error(
+      `拒绝清空目标内容表：当前行数超出 migration.baseline，存在非迁移数据 differences=${JSON.stringify(differences)}`,
+    );
+  }
+  console.log(`[migrate] 将删除目标内容行数 ${JSON.stringify(counts)}`);
+  return counts;
 }
 
 function sameCounts(before, after) {
@@ -435,13 +540,17 @@ async function ensurePlatformPrincipal(connection, accountId) {
 }
 
 async function clearContent(connection) {
+  const deleted = {};
   for (const table of CLEAR_TABLES) {
-    await connection.query(`DELETE FROM ${table}`);
+    const result = await connection.query(`DELETE FROM ${table}`);
+    deleted[table] = Number(result.affectedRows ?? 0);
   }
   // post.parent_id has a self-reference; remove children before roots.
-  await connection.query(`DELETE FROM post WHERE parent_id IS NOT NULL`);
-  await connection.query(`DELETE FROM post`);
-  console.log('[migrate] --force 已清空内容域目标表（身份表未触碰）');
+  const children = await connection.query(`DELETE FROM post WHERE parent_id IS NOT NULL`);
+  const roots = await connection.query(`DELETE FROM post`);
+  deleted.post = Number(children.affectedRows ?? 0) + Number(roots.affectedRows ?? 0);
+  console.log(`[migrate] 已删除目标内容行数 ${JSON.stringify(deleted)}（身份表未触碰）`);
+  return deleted;
 }
 
 async function findOneBySubtype(connection, kind, subtype) {
@@ -974,15 +1083,21 @@ async function migrateEvents(connection, sourceRowsValue, accountId) {
   return created;
 }
 
-async function writeMigrationBaseline(connection, sourceCountsValue, sourceRowsValue, accountId) {
-  const payload = JSON.stringify({
+async function writeMigrationBaseline(
+  connection,
+  sourceCountsValue,
+  sourceRowsValue,
+  accountId,
+  targetCountsValue,
+) {
+  const payloadValue = {
     source: MIGRATION_SOURCE,
     counts: sourceCountsValue,
     max_legacy_event_id: sourceRowsValue.length > 0
       ? String(sourceRowsValue[sourceRowsValue.length - 1].id)
       : null,
     migrated_at: nowString(),
-  });
+  };
   const existingRows = await connection.query(
     `SELECT id, payload
        FROM event
@@ -995,6 +1110,12 @@ async function writeMigrationBaseline(connection, sourceCountsValue, sourceRowsV
       return false;
     }
   });
+  const targetCounts = {
+    ...targetCountsValue,
+    event: targetCountsValue.event + (existing ? 0 : 1),
+  };
+  payloadValue.target_counts = targetCounts;
+  const payload = JSON.stringify(payloadValue);
   if (existing) {
     await connection.query(
       `UPDATE event
@@ -1029,16 +1150,25 @@ async function refreshReplyCounts(connection, roots) {
 }
 
 async function main() {
-  const { from, to, force } = parseArgs();
+  const { from, to, force, confirmWipeContent, allowEmpty } = parseArgs();
   const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(to));
   let inTransaction = false;
   const copiedFiles = [];
   try {
+    await assertConnectedDatabase(source, from, '源库');
     await assertSourceTables(source, from);
     const sourceData = await loadSource(source, from);
     const sourceBefore = await sourceCounts(source);
-    console.log(`[migrate] source=${from} counts=${JSON.stringify(sourceBefore)}`);
+    console.log(`[migrate] 源库校验通过 source=${from} counts=${JSON.stringify(sourceBefore)}`);
+    const coreSourceCount = sourceBefore.conversations
+      + sourceBefore.chat_messages
+      + sourceBefore.events;
+    if (coreSourceCount === 0 && !allowEmpty) {
+      throw new Error(
+        `源库 ${from} 的 conversations/chat_messages/events 均为空，拒绝迁移；如确认这是有意的空迁移，请使用 --allow-empty`,
+      );
+    }
 
     const sourceAgents = await source.query(
       `SELECT id, agent_id, name, key_hash FROM agents ORDER BY id`,
@@ -1047,10 +1177,11 @@ async function main() {
     const identity = await loadTargetIdentity(target, sourceAgents);
     const sourceRoot = await legacyAttachmentRoot(source, from);
     const targetRoot = await targetAttachmentRoot(target, to);
+    await validateForceTarget(target, force, confirmWipeContent);
 
     await target.beginTransaction();
     inTransaction = true;
-    if (force) await clearContent(target);
+    if (force && confirmWipeContent) await clearContent(target);
     const platformPrincipalId = await ensurePlatformPrincipal(target, accountId);
 
     const channelsResult = await migrateConversations(
@@ -1104,7 +1235,14 @@ async function main() {
       attachmentsResult.attachmentByLegacyId,
     );
     const eventsCreated = await migrateEvents(target, sourceData.events, accountId);
-    await writeMigrationBaseline(target, sourceBefore, sourceData.events, accountId);
+    const targetCountsBeforeBaseline = await targetContentCounts(target);
+    await writeMigrationBaseline(
+      target,
+      sourceBefore,
+      sourceData.events,
+      accountId,
+      targetCountsBeforeBaseline,
+    );
     await refreshReplyCounts(
       target,
       new Set([

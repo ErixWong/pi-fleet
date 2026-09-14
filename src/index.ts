@@ -6,6 +6,7 @@ import express from 'express';
 import session from 'express-session';
 import { config } from './config.js';
 import { initDb } from './db.js';
+import { initSchema } from './db/pool.js';
 import { apiRouter } from './routes/api.js';
 import { mcpRouter } from './routes/mcp.js';
 import { agentRouter } from './routes/agent.js';
@@ -20,8 +21,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 async function main(): Promise<void> {
   await initDb();
+  console.log('✓ 老库 schema 就绪');
+  const { created } = await initSchema();
+  console.log(`✓ 新库 schema 就绪（25 表，新增 ${created.length} 表${created.length > 0 ? `：${created.join(', ')}` : ''}）`);
   await initSettings();
-  console.log('✓ 数据库 schema 就绪');
 
   const app = express();
   // 注意：不全局挂 body parser——MCP transport 需要读取原始 body 流，

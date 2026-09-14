@@ -201,10 +201,10 @@ try {
   check('2. post(detail) has exactly the nine contract keys',
     JSON.stringify(Object.keys(detailed.payload).sort()) === JSON.stringify([...expectedKeys].sort()),
     JSON.stringify(Object.keys(detailed.payload)));
-  check('3. recent is bounded and bodies are <= 501',
+  check('3. recent is bounded and bodies are <= 500',
     Array.isArray(detailed.payload.recent)
       && detailed.payload.recent.length <= 5
-      && detailed.payload.recent.every((item) => String(item.body ?? '').length <= 501),
+      && detailed.payload.recent.every((item) => String(item.body ?? '').length <= 500),
     JSON.stringify(detailed.payload.recent));
   const forbidden = ['deleted_at', 'account_id', 'streaming'];
   const detailKeys = deepKeys(detailed.payload);

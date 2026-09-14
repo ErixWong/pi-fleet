@@ -136,7 +136,7 @@ function publicDeliverable(deliverable: Record<string, unknown>): Record<string,
 }
 
 function truncateBody(body: string): string {
-  return body.length > 500 ? `${body.slice(0, 500)}…` : body;
+  return body.length > 500 ? `${body.slice(0, 499)}…` : body;
 }
 
 function publicRecent(post: Post): Record<string, unknown> {
@@ -194,6 +194,31 @@ export function presentPostDetail(detail: PostDetail): Record<string, unknown> {
       hint: detail.more.hint,
     },
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+}
+
+export function applyRecentOptions(
+  detail: Record<string, unknown>,
+  options: { include_recent?: boolean; recent_limit?: number },
+): void {
+  if (!Array.isArray(detail.recent)) return;
+  const originalLength = detail.recent.length;
+  if (options.include_recent === false) {
+    detail.recent = [];
+  } else if (options.recent_limit !== undefined) {
+    detail.recent = detail.recent.slice(0, options.recent_limit);
+  }
+  const visibleLength = Array.isArray(detail.recent) ? detail.recent.length : 0;
+  const more = asRecord(detail.more);
+  if (more && Number.isFinite(Number(more.count))) {
+    detail.more = {
+      ...more,
+      count: Math.max(0, Number(more.count) + originalLength - visibleLength),
+    };
+  }
 }
 
 export async function readPostDetail(
@@ -255,11 +280,7 @@ export function registerPostTools(server: McpServer): void {
           if (!args.id) return toolErr('id is required');
           const detail = await readPostDetail(args.id, context.account_id);
           if (!detail) return toolErr('not found');
-          if (args.include_recent === false && Array.isArray(detail.recent)) {
-            detail.recent = [];
-          } else if (args.recent_limit !== undefined && Array.isArray(detail.recent)) {
-            detail.recent = detail.recent.slice(0, args.recent_limit);
-          }
+          applyRecentOptions(detail, args);
           return toolOk(detail);
         }
 

@@ -598,8 +598,8 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
           ORDER BY d.name, d.version`,
         [id],
       ),
-      pool.query(`${postSelect()} WHERE p.root_id = ? ORDER BY p.id DESC LIMIT 5`, [post.root_id]),
-      pool.query(`SELECT COUNT(*) AS total FROM post WHERE root_id = ?`, [post.root_id]),
+      pool.query(`${postSelect()} WHERE p.root_id = ? AND p.deleted_at IS NULL ORDER BY p.id DESC LIMIT 5`, [post.root_id]),
+      pool.query(`SELECT COUNT(*) AS total FROM post WHERE root_id = ? AND deleted_at IS NULL`, [post.root_id]),
     ]);
   const recent = rows(recentResult).map(postFromRow).reverse();
   const total = numberValue(rows(countResult)[0]?.total);

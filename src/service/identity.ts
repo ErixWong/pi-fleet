@@ -571,10 +571,13 @@ export async function verifyApiKey(key: string): Promise<VerifiedApiKey | null> 
               p.host_principal_id, p.reputation_score, p.created_at, p.deleted_at
          FROM api_key k
          JOIN principal p ON p.id = k.principal_id
+         JOIN account a ON a.id = p.account_id
         WHERE k.key_hash = ?
           AND k.revoked_at IS NULL
           AND (k.expires_at IS NULL OR k.expires_at > ?)
           AND p.deleted_at IS NULL
+          AND a.status = 'active'
+          AND a.deleted_at IS NULL
         FOR UPDATE`,
       [keyHash, now],
     );

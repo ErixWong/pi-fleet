@@ -305,6 +305,17 @@ test('getPostDetail 返回结构化上下文，recent 限制为 5 条并计算 m
   assert.equal(detail.recent.length, 5);
   assert.equal(detail.more.count, 2);
   assert.match(detail.more.hint, /post\(list, root_id=/);
+
+  const deletedReply = await replyPost({
+    parent_id: task.id,
+    author_principal_id: recipientOne.id,
+    body: 'soft-deleted detail reply',
+  });
+  postIds.push(deletedReply.id);
+  await deletePost(deletedReply.id);
+  const afterDelete = await getPostDetail(task.id);
+  assert.equal(afterDelete.recent.some((item) => item.id === deletedReply.id), false);
+  assert.equal(afterDelete.more.count, 2);
 });
 
 test('创建写入和事件同事务，回滚后两者都不存在', { concurrency: false }, async () => {

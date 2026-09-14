@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { createPool, type Pool, type PoolConnection } from 'mariadb';
 import { config } from '../config.js';
-import { SCHEMA_STATEMENTS } from './schema.js';
+import { SCHEMA_STATEMENTS, SCHEMA_TABLE_NAMES } from './schema.js';
 
 let pool: Pool | null = null;
 
@@ -40,12 +40,23 @@ export async function withTransaction<T>(
   }
 }
 
-export async function initSchema(): Promise<void> {
+export async function initSchema(): Promise<{ created: string[] }> {
   if (config.dbNew.database === LEGACY_DB) {
     throw new Error(
       `拒绝把新模型 schema 建进老库 "${LEGACY_DB}"：请用 DB_NAME_NEW 指定新库（如 erix）`,
     );
   }
+  const existingResult = await getPool().query(
+    `SELECT TABLE_NAME AS table_name
+       FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name IN (${SCHEMA_TABLE_NAMES.map(() => '?').join(', ')})`,
+    SCHEMA_TABLE_NAMES,
+  );
+  const existing = new Set(
+    (existingResult as Array<{ table_name?: unknown }>).map((row) => String(row.table_name)),
+  );
+  const created: string[] = [];
   for (const statement of SCHEMA_STATEMENTS) {
     const createIfMissing = statement.replace(
       /^CREATE TABLE\s+/i,
@@ -53,4 +64,8 @@ export async function initSchema(): Promise<void> {
     );
     await getPool().query(createIfMissing);
   }
+  for (const tableName of SCHEMA_TABLE_NAMES) {
+    if (!existing.has(tableName)) created.push(tableName);
+  }
+  return { created };
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { tsImport } from 'tsx/esm/api';
 
-const { presentPostDetail } = await tsImport('./post-tools.ts', import.meta.url);
+const { applyRecentOptions, presentPostDetail } = await tsImport('./post-tools.ts', import.meta.url);
 
 const author = {
   id: 'prn_author',
@@ -102,9 +102,27 @@ test('detail projection has exactly nine keys and strips internal fields', () =>
     assert.equal(serialized.includes(`"${key}"`), false, `unexpected key: ${key}`);
   }
   assert.equal(detail.recent.length, 1);
-  assert.equal(detail.recent[0].body.length, 501);
+  assert.equal(detail.recent[0].body.length, 500);
   assert.equal(detail.recent[0].body.endsWith('…'), true);
   assert.equal(detail.task !== null && detail.channel === null, true);
+});
+
+test('recent 过滤后重新计算 more.count', () => {
+  const detail = {
+    recent: [{ id: 'one' }, { id: 'two' }, { id: 'three' }],
+    more: { count: 4, hint: 'post(list)' },
+  };
+  applyRecentOptions(detail, { include_recent: false });
+  assert.equal(detail.recent.length, 0);
+  assert.equal(detail.more.count, 7);
+
+  const limited = {
+    recent: [{ id: 'one' }, { id: 'two' }, { id: 'three' }],
+    more: { count: 4, hint: 'post(list)' },
+  };
+  applyRecentOptions(limited, { recent_limit: 1 });
+  assert.equal(limited.recent.length, 1);
+  assert.equal(limited.more.count, 6);
 });
 
 test('recent limit is bounded by the requested limit and kind controls extensions', () => {

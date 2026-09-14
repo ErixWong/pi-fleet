@@ -122,23 +122,54 @@ export async function recordEvent(
   return id;
 }
 
+export interface PublishPendingOptions {
+  limit?: number;
+  actionPrefix?: string;
+  resourceType?: string;
+}
+
+function escapeLikePrefix(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+}
+
+function visibilityFilter(options: PublishPendingOptions, now: string): {
+  clauses: string[];
+  params: unknown[];
+} {
+  const clauses = [
+    'published_at IS NULL',
+    '(next_attempt_at IS NULL OR next_attempt_at <= ?)',
+  ];
+  const params: unknown[] = [now];
+  if (options.actionPrefix !== undefined) {
+    clauses.push('action LIKE ?');
+    params.push(`${escapeLikePrefix(options.actionPrefix)}%`);
+  }
+  if (options.resourceType !== undefined) {
+    clauses.push('resource_type = ?');
+    params.push(options.resourceType);
+  }
+  return { clauses, params };
+}
+
 export async function publishPending({
   limit = 100,
-}: {
-  limit?: number;
-} = {}): Promise<EventRecord[]> {
+  actionPrefix,
+  resourceType,
+}: PublishPendingOptions = {}): Promise<EventRecord[]> {
   const batchSize = Math.min(1000, Math.max(1, Math.floor(limit) || 100));
   const candidateSize = batchSize * 2;
   return withTransaction(async (conn) => {
     const now = nowString();
+    const options = { actionPrefix, resourceType };
+    const candidateFilter = visibilityFilter(options, now);
     const candidateResult = await conn.query(
       `SELECT id
          FROM event
-        WHERE published_at IS NULL
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        WHERE ${candidateFilter.clauses.join('\n          AND ')}
         ORDER BY id
         LIMIT ?`,
-      [now, candidateSize],
+      [...candidateFilter.params, candidateSize],
     );
 
     const candidateIds = rows(candidateResult)
@@ -147,15 +178,16 @@ export async function publishPending({
     if (candidateIds.length === 0) return [];
 
     const placeholders = candidateIds.map(() => '?').join(', ');
+    const lockedFilter = visibilityFilter(options, now);
     const lockedResult = await conn.query(
       `SELECT id, account_id, actor_principal_id, action, resource_type,
               resource_id, before_state, after_state, payload, retention,
               occurred_at, published_at, attempts, next_attempt_at, last_error
          FROM event IGNORE INDEX (idx_evt_outbox)
         WHERE id IN (${placeholders})
-          AND published_at IS NULL
+          AND ${lockedFilter.clauses.join('\n          AND ')}
         LIMIT ? FOR UPDATE SKIP LOCKED`,
-      [...candidateIds, batchSize],
+      [...candidateIds, ...lockedFilter.params, batchSize],
     );
     const lockedById = new Map(
       rows(lockedResult).map((row) => [stringValue(row.id), row]),
@@ -170,8 +202,8 @@ export async function publishPending({
       `UPDATE event
           SET published_at = ?
         WHERE id IN (${lockedPlaceholders})
-          AND published_at IS NULL`,
-      [now, ...pending.map((row) => row.id)],
+          AND ${visibilityFilter(options, now).clauses.join('\n          AND ')}`,
+      [now, ...pending.map((row) => row.id), ...visibilityFilter(options, now).params],
     );
     for (const row of pending) {
       row.published_at = now;

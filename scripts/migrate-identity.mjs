@@ -22,7 +22,9 @@ let lastMs = 0;
 let lastRandom = [];
 
 function usageError(message) {
-  throw new Error(`${message}\n用法: node scripts/migrate-identity.mjs --from task_dispatch --to erix [--force]`);
+  throw new Error(
+    `${message}\n用法: node scripts/migrate-identity.mjs --from task_dispatch --to erix [--force --confirm-wipe-identity] [--allow-empty]`,
+  );
 }
 
 function validDatabaseName(name) {
@@ -33,11 +35,21 @@ function parseArgs() {
   let from;
   let to;
   let force = false;
+  let confirmWipeIdentity = false;
+  let allowEmpty = false;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--force') {
       force = true;
+      continue;
+    }
+    if (arg === '--confirm-wipe-identity') {
+      confirmWipeIdentity = true;
+      continue;
+    }
+    if (arg === '--allow-empty') {
+      allowEmpty = true;
       continue;
     }
     if (arg === '--from' || arg === '--to') {
@@ -56,7 +68,10 @@ function parseArgs() {
     usageError('数据库名只允许字母、数字、下划线和美元符号');
   }
   if (from === to) usageError('源库和目标库必须不同');
-  return { from, to, force };
+  if (confirmWipeIdentity && !force) {
+    usageError('--confirm-wipe-identity 必须与 --force 一起使用');
+  }
+  return { from, to, force, confirmWipeIdentity, allowEmpty };
 }
 
 function connectionOptions(database) {
@@ -132,6 +147,21 @@ async function tableColumns(connection, database, table) {
   return new Set(rows.map((row) => String(row.column_name)));
 }
 
+async function assertConnectedDatabase(connection, expected, label) {
+  const result = await connection.query('SELECT DATABASE() AS database_name');
+  const actual = String(result[0]?.database_name ?? '');
+  if (actual !== expected) {
+    throw new Error(`${label}连接到 ${actual || '(空)'}，但要求 ${expected}`);
+  }
+}
+
+async function assertSourceTables(connection, database) {
+  for (const table of ['agents', 'admin']) {
+    const columns = await tableColumns(connection, database, table);
+    if (columns.size === 0) throw new Error(`源库 ${database} 缺少表 ${table}`);
+  }
+}
+
 async function sourceRows(connection, database) {
   const columns = await tableColumns(connection, database, 'agents');
   const required = ['id', 'agent_id', 'name', 'key_hash'];
@@ -165,11 +195,23 @@ async function sourceCounts(connection, database) {
   };
 }
 
+async function targetIdentityCounts(connection) {
+  const result = {};
+  for (const table of ['account', 'principal', 'device', 'device_executor', 'api_key']) {
+    const rows = await connection.query(`SELECT COUNT(*) AS count FROM ${table}`);
+    result[table] = Number(rows[0]?.count ?? 0);
+  }
+  return result;
+}
+
 async function clearTarget(connection) {
   // 目标库只清身份五张表，按外键依赖顺序删除。
+  const deleted = {};
   for (const table of ['api_key', 'device_executor', 'device', 'principal', 'account']) {
-    await connection.query(`DELETE FROM ${table}`);
+    const result = await connection.query(`DELETE FROM ${table}`);
+    deleted[table] = Number(result.affectedRows ?? 0);
   }
+  return deleted;
 }
 
 async function findOrCreateAccount(connection, name) {
@@ -274,21 +316,35 @@ async function migrateAdmin(connection, accountId, rows) {
 }
 
 async function main() {
-  const { from, to, force } = parseArgs();
+  const { from, to, force, confirmWipeIdentity, allowEmpty } = parseArgs();
   const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(to));
   let inTransaction = false;
   try {
+    await assertConnectedDatabase(source, from, '源库');
+    await assertSourceTables(source, from);
+    const sourceBefore = await sourceCounts(source, from);
+    console.log(`[migrate] 源库校验通过 source=${from} agents=${sourceBefore.agents} admin=${sourceBefore.admin}`);
+    if (sourceBefore.agents === 0 && !allowEmpty) {
+      throw new Error(`源库 ${from} agents 为空，拒绝迁移；如确认这是有意的空迁移，请使用 --allow-empty`);
+    }
     const agents = await sourceRows(source, from);
     const admins = await sourceAdminRows(source, from);
-    const sourceBefore = await sourceCounts(source, from);
-    console.log(`[migrate] source=${from} agents=${sourceBefore.agents} admin=${sourceBefore.admin}`);
+    const targetBefore = await targetIdentityCounts(target);
+    if (force && !confirmWipeIdentity) {
+      throw new Error(
+        `拒绝清空目标身份表 ${JSON.stringify(targetBefore)}：将删除全部账号/主体/设备/密钥，管理员与已接入主机的凭据会失效；必须同时传入 --force --confirm-wipe-identity`,
+      );
+    }
+    if (force && confirmWipeIdentity) {
+      console.log(`[migrate] 将删除目标身份行数 ${JSON.stringify(targetBefore)}`);
+    }
 
     await target.beginTransaction();
     inTransaction = true;
-    if (force) {
-      await clearTarget(target);
-      console.log('[migrate] --force 已清空目标身份五表');
+    if (force && confirmWipeIdentity) {
+      const deleted = await clearTarget(target);
+      console.log(`[migrate] 已删除目标身份行数 ${JSON.stringify(deleted)}`);
     }
 
     const accountId = await findOrCreateAccount(

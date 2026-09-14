@@ -22,20 +22,27 @@ const EVENT_MIGRATION_MARKER = `"migration":"${MIGRATION_SOURCE}"`;
 
 function usageError(message) {
   throw new Error(
-    `${message}\n用法: node scripts/migrate-verify.mjs --database erix --phase identity|content`,
+    `${message}\n用法: node scripts/migrate-verify.mjs --database erix --phase identity|content [--from task_dispatch] [--allow-empty]`,
   );
 }
 
 function parseArgs() {
   let database;
   let phase;
+  let from = LEGACY_DB;
+  let allowEmpty = false;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === '--database' || args[i] === '--phase') {
+    if (args[i] === '--allow-empty') {
+      allowEmpty = true;
+      continue;
+    }
+    if (args[i] === '--database' || args[i] === '--phase' || args[i] === '--from') {
       const value = args[i + 1];
       if (!value || value.startsWith('--')) usageError(`${args[i]} 缺少值`);
       if (args[i] === '--database') database = value;
-      else phase = value;
+      else if (args[i] === '--phase') phase = value;
+      else from = value;
       i += 1;
     } else {
       usageError(`未知参数: ${args[i]}`);
@@ -48,8 +55,12 @@ function parseArgs() {
   if (!/^[A-Za-z0-9_$]+$/.test(database)) {
     usageError('数据库名只允许字母、数字、下划线和美元符号');
   }
+  if (!/^[A-Za-z0-9_$]+$/.test(from)) {
+    usageError('源库名只允许字母、数字、下划线和美元符号');
+  }
+  if (database === from) usageError('源库和验证目标必须不同');
   if (database === LEGACY_DB) usageError('验证目标不能是老库 task_dispatch');
-  return { database, phase };
+  return { database, phase, from, allowEmpty };
 }
 
 function connectionOptions(database) {
@@ -87,6 +98,55 @@ async function contentCounts(connection) {
 
 function countsEqual(left, right) {
   return CONTENT_TABLES.every((table) => left[table] === right[table]);
+}
+
+async function assertConnectedDatabase(connection, expected, label) {
+  const result = await connection.query('SELECT DATABASE() AS database_name');
+  const actual = String(result[0]?.database_name ?? '');
+  if (actual !== expected) {
+    throw new Error(`${label}连接到 ${actual || '(空)'}，但要求 ${expected}`);
+  }
+}
+
+async function assertSourceTables(connection, database, phase) {
+  const tables = phase === 'identity'
+    ? ['agents', 'admin']
+    : ['agents', ...CONTENT_TABLES];
+  for (const table of tables) {
+    const rows = await connection.query(
+      `SELECT COUNT(*) AS count
+         FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = ?`,
+      [database, table],
+    );
+    if (count(rows[0]) === 0) throw new Error(`源库 ${database} 缺少表 ${table}`);
+  }
+}
+
+async function sourcePreflight(connection, database, phase, allowEmpty) {
+  await assertConnectedDatabase(connection, database, '源库');
+  await assertSourceTables(connection, database, phase);
+  if (phase === 'identity') {
+    const agents = await connection.query('SELECT COUNT(*) AS count FROM agents');
+    const admin = await connection.query('SELECT COUNT(*) AS count FROM admin');
+    console.log(`[verify] 源库校验通过 source=${database} agents=${count(agents[0])} admin=${count(admin[0])}`);
+    if (count(agents[0]) === 0 && !allowEmpty) {
+      throw new Error(`源库 ${database} agents 为空，拒绝验证；如确认这是有意的空源，请使用 --allow-empty`);
+    }
+    return;
+  }
+  const counts = await contentCounts(connection);
+  console.log(`[verify] 源库校验通过 source=${database} counts=${JSON.stringify(counts)}`);
+  if (
+    counts.conversations === 0
+    && counts.chat_messages === 0
+    && counts.events === 0
+    && !allowEmpty
+  ) {
+    throw new Error(
+      `源库 ${database} 的 conversations/chat_messages/events 均为空，拒绝验证；如确认这是有意的空源，请使用 --allow-empty`,
+    );
+  }
 }
 
 async function verifyIdentity(source, target, check) {
@@ -262,8 +322,8 @@ async function verifyContent(source, target, check) {
 }
 
 async function main() {
-  const { database, phase } = parseArgs();
-  const source = await mariadb.createConnection(connectionOptions(LEGACY_DB));
+  const { database, phase, from, allowEmpty } = parseArgs();
+  const source = await mariadb.createConnection(connectionOptions(from));
   const target = await mariadb.createConnection(connectionOptions(database));
   const failures = [];
   const pass = (label, detail) => console.log(`PASS ${label}${detail ? ` — ${detail}` : ''}`);
@@ -276,6 +336,7 @@ async function main() {
   };
 
   try {
+    await sourcePreflight(source, from, phase, allowEmpty);
     if (phase === 'identity') await verifyIdentity(source, target, check);
     else await verifyContent(source, target, check);
   } finally {
