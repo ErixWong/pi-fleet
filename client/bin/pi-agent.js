@@ -7,22 +7,20 @@ import { installService, uninstallService } from '../src/service.mjs';
 const HELP = `用法：pi-agent <子命令> [选项]
 
 子命令：
-  setup             配置平台地址、Agent key、主机名和执行器
+  setup             写入平台签发的 Agent key 和 pi MCP 配置
   run               前台运行 agent daemon
   install-service   生成并启用 systemd 服务
   uninstall-service 停止并删除 systemd 服务
 
 setup 选项：
-  --url <平台地址>  默认 http://127.0.0.1:3200
+  --url <平台地址>  默认 http://127.0.0.1:3000
   --key <agent key>
-  --name <主机名>   默认当前主机名
-  --cli <pi|copilot|claude|codex|auto>  默认 auto
 
 install-service 选项：
   --user <运行用户> 默认当前用户；root 默认创建/使用 pi-agent
 `;
 
-const VALUE_OPTIONS = new Set(['url', 'key', 'name', 'cli', 'user']);
+const VALUE_OPTIONS = new Set(['url', 'key', 'user']);
 
 function parseArgs(argv) {
   const [command = '--help', ...rest] = argv;
@@ -65,7 +63,6 @@ async function run() {
     }
     process.env.PLATFORM_URL ||= url;
     process.env.PI_AGENT_KEY ||= key;
-    process.env.AGENT_CMD ||= config?.cli || 'auto';
     await import('../src/agent-daemon.mjs');
     return;
   }
