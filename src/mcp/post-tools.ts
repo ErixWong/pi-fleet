@@ -115,7 +115,7 @@ export function publicTask(task: PostTask): PublicTask {
   };
 }
 
-function publicTarget(target: PostDetail['targets'][number]): Record<string, unknown> {
+export function publicTarget(target: PostDetail['targets'][number]): Record<string, unknown> {
   return {
     principal: publicPrincipal(target.principal),
     role: target.role,
@@ -263,10 +263,12 @@ export async function readPostList(
 export function presentTaskListItem(item: {
   post: Post;
   task: PostTask;
+  targets?: PostDetail['targets'];
 }): Record<string, unknown> {
   return {
     ...publicPost(item.post),
     task: publicTask(item.task),
+    targets: (item.targets ?? []).map(publicTarget),
   };
 }
 

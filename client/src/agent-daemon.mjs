@@ -171,6 +171,13 @@ function taskDataOf(item) {
   return item?.task && typeof item.task === 'object' ? item.task : {};
 }
 
+function isReopenedClaim(item) {
+  const task = taskDataOf(item);
+  return task.status === 'claimed'
+    && task.assignee_principal_id
+    && task.claimed_at === null;
+}
+
 async function pollTasks() {
   let items = [];
   try {
@@ -195,11 +202,12 @@ async function pollTasks() {
   let started = 0;
   for (const item of items) {
     const taskId = taskIdOf(item);
+    const reopened = isReopenedClaim(item);
     if (
       !taskId
       || execSessions.has(taskId)
       || claimedTasks.has(taskId)
-      || recentlyDone.has(taskId)
+      || (recentlyDone.has(taskId) && !reopened)
     ) continue;
     try {
       await api('POST', `/api/v2/tasks/${encodeURIComponent(taskId)}/claim`);
@@ -214,7 +222,7 @@ async function pollTasks() {
       continue;
     }
     try {
-      spawnTaskAgent(item);
+      await spawnTaskAgent(item);
     } catch (error) {
       claimedTasks.delete(taskId);
       console.log(`[daemon] 拉起任务 ${taskId} 失败：${error.message}`);
@@ -239,7 +247,53 @@ function resolveTaskWorkdir(workdir, home = os.homedir()) {
     : null;
 }
 
-function taskPrompt(item, taskId, cwd, sandboxDir) {
+function threadPostLabel(post) {
+  const author = post?.author?.name || post?.author?.id || '未知主体';
+  const createdAt = String(post?.created_at ?? '未知时间');
+  return `[${author} @ ${createdAt}] ${String(post?.body ?? '')}`;
+}
+
+async function loadTaskThread(taskId) {
+  const detail = await api('GET', `/api/v2/posts/${encodeURIComponent(taskId)}`);
+  const rootId = String(detail?.post?.root_id ?? taskId);
+  const recent = Array.isArray(detail?.recent) ? detail.recent : [];
+  const messages = [...recent];
+  const seen = new Set(messages.map((post) => String(post?.id ?? '')));
+  let remaining = Math.max(0, Number(detail?.more?.count ?? 0));
+  let after = recent[0]?.id ? String(recent[0].id) : null;
+
+  while (remaining > 0 && after) {
+    const params = new URLSearchParams({
+      root_id: rootId,
+      after,
+      limit: '200',
+    });
+    const page = await api('GET', `/api/v2/posts?${params.toString()}`);
+    const items = Array.isArray(page?.items) ? page.items : [];
+    if (items.length === 0) break;
+    let added = 0;
+    for (const post of items) {
+      const id = String(post?.id ?? '');
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      messages.push(post);
+      added += 1;
+    }
+    remaining = Math.max(0, remaining - added);
+    const nextAfter = page?.next_after ? String(page.next_after) : '';
+    if (!nextAfter || nextAfter === after || items.length < 200) break;
+    after = nextAfter;
+  }
+
+  return messages
+    .filter((post) => String(post?.id ?? '') !== taskId)
+    .sort((left, right) => {
+      const timeOrder = String(left?.created_at ?? '').localeCompare(String(right?.created_at ?? ''));
+      return timeOrder || String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
+    });
+}
+
+function taskPrompt(item, taskId, cwd, sandboxDir, thread = []) {
   const task = taskDataOf(item);
   const title = String(item.title ?? '');
   const body = String(item.body ?? item.instruction ?? '');
@@ -251,11 +305,22 @@ function taskPrompt(item, taskId, cwd, sandboxDir) {
     `当前状态：${String(task.status ?? '')}`,
     `交付物要求：${String(task.deliverable_spec ?? '')}`,
   ];
+  if (thread.length > 0) {
+    lines.push(
+      '',
+      '线程回复（按时间顺序，属于对任务的追加上下文）：',
+      ...thread.map(threadPostLabel),
+    );
+  } else {
+    lines.push('', '线程回复：暂无追加要求。');
+  }
   if (cwd && sandboxDir === null) {
     lines.push(`工作目录：${cwd}（在此目录完成任务）`);
   }
   lines.push(
     '',
+    '执行规则：线程里最新的要求优先；如果与原始任务正文冲突，按较新的要求执行，并在交付说明中说明冲突与采用的要求。',
+    '执行过程中可以用 post(action="reply", parent_id=任务 ID, body="...") 简短汇报进度或提问（可选，请勿刷屏）。',
     '先使用 v2 MCP 工具 post(action="detail", id=任务 ID) 获取完整上下文。',
     '如果任务状态是 open，使用 task(action="claim", task_id=任务 ID) 认领；如果任务已是 claimed（你已认领），直接继续处理上次被打回的任务。',
     '完成工作后，使用 task(action="submit", task_id=任务 ID, deliverables=[...], message="...") 提交实际交付物。',
@@ -264,9 +329,10 @@ function taskPrompt(item, taskId, cwd, sandboxDir) {
   return lines.join('\n');
 }
 
-function spawnTaskAgent(item) {
+async function spawnTaskAgent(item) {
   const taskId = taskIdOf(item);
   const task = taskDataOf(item);
+  const thread = await loadTaskThread(taskId);
   const workdir = typeof task.workdir === 'string' ? task.workdir : null;
   const cwd = resolveTaskWorkdir(workdir)
     ?? path.join(WORK_ROOT, 'tasks', taskId);
@@ -292,7 +358,11 @@ function spawnTaskAgent(item) {
     }
   }
 
-  const invocation = buildAgentInvocation(taskPrompt(item, taskId, cwd, sandboxDir));
+  console.log(`[daemon] 任务 ${taskId} prompt 纳入线程回复 ${thread.length} 条`);
+  if (thread.length > 0) {
+    console.log(`[daemon][task-${taskId}] 线程回复上下文：\n${thread.map(threadPostLabel).join('\n')}`);
+  }
+  const invocation = buildAgentInvocation(taskPrompt(item, taskId, cwd, sandboxDir, thread));
   const outputLog = sandboxDir ? path.join(sandboxDir, 'output', 'stdout.txt') : null;
   console.log(`[daemon] 执行任务 ${taskId} cwd=${cwd}` + (workdir ? '（项目目录）' : '（沙箱）'));
   const child = spawnCli(invocation.cmd, invocation.args, {

@@ -309,6 +309,28 @@ test('事务一致性：回滚后状态未变且同事务 event 不存在', { co
 });
 
 test('reopen/reassign/cancel：落点和 attempts 清零', { concurrency: false }, async () => {
+  const rejected = await publishAssigned();
+  await claimTask(rejected.post.id, { principal_id: assignee.id });
+  await submitTask(rejected.post.id, {
+    principal_id: assignee.id,
+    deliverables: [{ name: 'result' }],
+  });
+  await verdictTask(rejected.post.id, {
+    operator_principal_id: author.id,
+    decision: 'reject',
+    opinion: '请按追加要求重做',
+  });
+  const reopenedClaimed = await reopenTask(rejected.post.id, {
+    operator_principal_id: author.id,
+    reason: '继续执行追加要求',
+  });
+  assert.equal(reopenedClaimed.status, 'claimed');
+  assert.equal(reopenedClaimed.assignee_principal_id, assignee.id);
+  assert.equal(reopenedClaimed.claimed_at, null);
+  const reclaimed = await claimTask(rejected.post.id, { principal_id: assignee.id });
+  assert.equal(reclaimed.status, 'claimed');
+  assert.equal(reclaimed.assignee_principal_id, assignee.id);
+
   const failed = await publishAssigned({ task: { max_attempts: 1 } });
   await claimTask(failed.post.id, { principal_id: assignee.id });
   await submitTask(failed.post.id, {

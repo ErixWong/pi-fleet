@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
@@ -17,7 +17,20 @@ const error = ref('');
 const showCreate = ref(false);
 const createBusy = ref(false);
 const createError = ref('');
-const form = ref({ title: '', body: '', visibility: 'private', deliverable_spec: '' });
+const hosts = ref([]);
+const hostsLoading = ref(false);
+const form = ref({ title: '', body: '', visibility: 'public', deliverable_spec: '', targets: [] });
+const hasTargets = computed(() => form.value.targets.some((id) => Boolean(id)));
+const visibilityOptions = computed(() => hasTargets.value
+  ? [
+      ['private', '私有（仅指派主机可见）'],
+      ['account', '账号内'],
+      ['public', '公共池'],
+    ]
+  : [
+      ['account', '账号内'],
+      ['public', '公共池'],
+    ]);
 
 const statuses = [
   ['pending_audit', '待审核'],
@@ -69,10 +82,37 @@ function changeStatus() {
   load();
 }
 
+async function loadHosts() {
+  hostsLoading.value = true;
+  try {
+    const data = await api.hosts();
+    hosts.value = data.items ?? [];
+  } catch (e) {
+    createError.value = e.message;
+  } finally {
+    hostsLoading.value = false;
+  }
+}
+
 function openCreate() {
-  form.value = { title: '', body: '', visibility: 'private', deliverable_spec: '' };
+  form.value = { title: '', body: '', visibility: 'public', deliverable_spec: '', targets: [] };
   createError.value = '';
   showCreate.value = true;
+  void loadHosts();
+}
+
+function normalizeTargets() {
+  const selected = form.value.targets.filter(Boolean);
+  if (selected.length !== form.value.targets.length) form.value.targets = selected;
+}
+
+function hostLabel(host) {
+  const state = host.offline || host.status !== 'active' ? '离线' : '在线';
+  return `${host.name || host.id}（${state}）`;
+}
+
+function targetLabel(target) {
+  return target.principal?.name || target.principal?.id || target.principal_id || target.role;
 }
 
 async function createTask() {
@@ -83,13 +123,18 @@ async function createTask() {
   createBusy.value = true;
   createError.value = '';
   try {
-    await api.createTask({
+    const payload = {
       title: form.value.title.trim() || undefined,
       body: form.value.body.trim(),
       visibility: form.value.visibility,
       deliverable_spec: form.value.deliverable_spec.trim() || '完成任务并提交可验收的交付物',
       task: { is_ready: true },
-    });
+    };
+    const targets = form.value.targets
+      .filter(Boolean)
+      .map((principal_id) => ({ principal_id, role: 'assignee' }));
+    if (targets.length) payload.targets = targets;
+    await api.createTask(payload);
     showCreate.value = false;
     page.value = 1;
     await load();
@@ -107,6 +152,14 @@ onMounted(() => {
 
 watch(() => route.query.create, (value) => {
   if (value === '1') openCreate();
+});
+
+watch(hasTargets, (selected) => {
+  if (selected && form.value.visibility !== 'private') {
+    form.value.visibility = 'private';
+  } else if (!selected && form.value.visibility === 'private') {
+    form.value.visibility = 'public';
+  }
 });
 </script>
 
@@ -145,7 +198,7 @@ watch(() => route.query.create, (value) => {
       </div>
       <div v-else class="table-responsive">
         <table class="table table-hover align-middle mb-0">
-          <thead><tr><th>任务</th><th>状态</th><th>可见性</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
+          <thead><tr><th>任务</th><th>状态</th><th>可见性</th><th>指派目标</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
           <tbody>
             <tr v-for="item in items" :key="item.id">
               <td>
@@ -155,6 +208,14 @@ watch(() => route.query.create, (value) => {
               </td>
               <td><StatusBadge :status="item.task?.status" /></td>
               <td><span class="badge text-bg-secondary">{{ item.visibility }}</span></td>
+              <td class="small">
+                <template v-if="item.targets?.length">
+                  <span v-for="target in item.targets" :key="`${target.principal?.id || target.principal_id}-${target.role}`" class="badge text-bg-light me-1">
+                    {{ targetLabel(target) }} · {{ target.role }}
+                  </span>
+                </template>
+                <span v-else class="text-secondary">公共池</span>
+              </td>
               <td class="small text-secondary">{{ item.created_at }}</td>
               <td class="text-end"><router-link :to="`/tasks/${item.id}`" class="btn btn-sm btn-outline-primary">详情</router-link></td>
             </tr>
@@ -179,11 +240,21 @@ watch(() => route.query.create, (value) => {
               <input v-model="form.title" class="form-control mb-3" maxlength="255" placeholder="可选">
               <label class="form-label">任务描述 *</label>
               <textarea v-model="form.body" class="form-control mb-3" rows="5" required></textarea>
+              <label class="form-label">指派主机</label>
+              <select v-model="form.targets" class="form-select mb-2" multiple size="4" :disabled="hostsLoading" @change="normalizeTargets">
+                <option value="">不指定（使用公共池）</option>
+                <option v-for="host in hosts" :key="host.id" :value="host.id" :disabled="host.status !== 'active'">
+                  {{ hostLabel(host) }}
+                </option>
+              </select>
+              <div class="text-secondary small mb-3">
+                <span v-if="hostsLoading">正在加载主机…</span>
+                <span v-else-if="hasTargets">已指派主机；可见性已切换为私有，只有指派目标可见。</span>
+                <span v-else>不指定主机时任务进入账号内或公共池，主机可自行领取。</span>
+              </div>
               <label class="form-label">可见性</label>
               <select v-model="form.visibility" class="form-select mb-3">
-                <option value="private">私有</option>
-                <option value="account">账号内</option>
-                <option value="public">公共池</option>
+                <option v-for="option in visibilityOptions" :key="option[0]" :value="option[0]">{{ option[1] }}</option>
               </select>
               <label class="form-label">交付要求</label>
               <textarea v-model="form.deliverable_spec" class="form-control" rows="3" placeholder="留空将使用默认交付要求"></textarea>

@@ -267,7 +267,7 @@ function postFromRow(row: DbRow): Post {
   };
 }
 
-function targetFromRow(row: DbRow): PostTarget {
+export function targetFromRow(row: DbRow): PostTarget {
   const principal = row.principal_id === null || row.principal_id === undefined
     ? null
     : {

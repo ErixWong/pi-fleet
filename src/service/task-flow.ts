@@ -7,6 +7,8 @@ import {
   replyPost,
   type Post,
   type PostTask,
+  targetFromRow,
+  type PostTarget,
   type PostVisibility,
   type TargetRole,
   type TaskStatus,
@@ -167,6 +169,7 @@ export interface ListTasksFilter {
 export interface TaskListItem {
   post: Post;
   task: PostTask;
+  targets?: PostTarget[];
   [key: string]: unknown;
 }
 
@@ -455,6 +458,13 @@ export async function claimTask(
     );
     const { task, post } = record;
     if (task.assignee_principal_id !== null) {
+      if (
+        task.assignee_principal_id === input.principal_id
+        && task.status === 'claimed'
+        && task.claimed_at === null
+      ) {
+        return { task, hasAssigneeTarget: false };
+      }
       throw conflict(`Task ${taskId} has already been claimed by another principal`);
     }
     if (task.status !== 'open') {
@@ -911,11 +921,34 @@ export async function listTasks(
     `${taskSelect()} WHERE ${where} ORDER BY p.id ASC LIMIT ? OFFSET ?`,
     [...params, pageSize, (page - 1) * pageSize],
   );
-  const items = rows(result).map((row) => {
+  const items: TaskListItem[] = rows(result).map((row) => {
     const post = postFromTaskRow(row);
     const task = taskFromRow(row);
     return { ...post, ...task, post, task };
   });
+  if (items.length > 0) {
+    const taskIds = items.map((item) => item.post.id);
+    const targetResult = await pool.query(
+      `SELECT t.post_id, t.principal_id, t.role, t.read_at, t.created_at,
+              p.account_id AS principal_account_id, p.kind AS principal_kind,
+              p.name AS principal_name
+         FROM post_target t
+         LEFT JOIN principal p ON p.id = t.principal_id
+        WHERE t.post_id IN (${taskIds.map(() => '?').join(', ')})
+        ORDER BY t.created_at, t.principal_id, t.role`,
+      taskIds,
+    );
+    const targetsByPost = new Map<string, PostTarget[]>();
+    for (const row of rows(targetResult)) {
+      const target = targetFromRow(row);
+      const current = targetsByPost.get(target.post_id) ?? [];
+      current.push(target);
+      targetsByPost.set(target.post_id, current);
+    }
+    for (const item of items) {
+      item.targets = targetsByPost.get(item.post.id) ?? [];
+    }
+  }
   return { items, total };
 }
 
