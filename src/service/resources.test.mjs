@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import test from 'node:test';
 import { tsImport } from 'tsx/esm/api';
 
@@ -34,6 +35,8 @@ const owner = await createPrincipal({
   kind: 'agent',
   name: `resources-owner-${Date.now()}`,
 });
+const testRun = crypto.randomBytes(8).toString('hex');
+const attachmentPath = (name) => `${owner.id}/${testRun}/${name}`;
 const postIds = [];
 const attachmentIds = [];
 
@@ -45,7 +48,7 @@ test('附件按 owner+sha256 去重，配额只统计未删除附件', { concurr
     mime: 'text/plain',
     size_bytes: 10,
     sha256: 'b'.repeat(64),
-    relative_path: `${owner.id}/one.txt`,
+    relative_path: attachmentPath('one.txt'),
   });
   attachmentIds.push(first.attachment.id);
   assert.equal(first.deduped, false);
@@ -57,7 +60,7 @@ test('附件按 owner+sha256 去重，配额只统计未删除附件', { concurr
     mime: 'text/plain',
     size_bytes: 999,
     sha256: 'b'.repeat(64),
-    relative_path: `${owner.id}/renamed.txt`,
+    relative_path: attachmentPath('renamed.txt'),
   });
   assert.equal(duplicate.deduped, true);
   assert.equal(duplicate.attachment.id, first.attachment.id);
@@ -69,7 +72,7 @@ test('附件按 owner+sha256 去重，配额只统计未删除附件', { concurr
     mime: 'text/plain',
     size_bytes: 7,
     sha256: 'c'.repeat(64),
-    relative_path: `${owner.id}/two.txt`,
+    relative_path: attachmentPath('two.txt'),
   });
   attachmentIds.push(second.attachment.id);
   assert.deepEqual(await quotaUsage(owner.id), { bytes: 17, count: 2 });

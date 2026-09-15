@@ -111,14 +111,14 @@ export async function scanPendingNewAttachments(): Promise<{
   let infected = 0;
   for (const attachment of pending) {
     if (!clamdHost) {
-      await markScanStatus(attachment.id, 'skipped');
+      await markScanStatus(attachment.id, 'skipped', 'pending');
       skipped += 1;
       continue;
     }
     try {
       const clean = await clamavInstreamScan(await readFile(attachmentPath(attachment.relative_path)));
       const status: ScanStatus = clean ? 'clean' : 'infected';
-      await markScanStatus(attachment.id, status);
+      await markScanStatus(attachment.id, status, 'pending');
       if (clean) scanned += 1;
       else infected += 1;
     } catch (error) {

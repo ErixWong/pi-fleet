@@ -15,14 +15,24 @@ npm run test:unit    # 新模型单元测试
 npm run test:v2      # MCP2、REST v2、事件 outbox 验收
 npm run test:web     # Playwright Web v2 验收
 npm test             # test:unit + test:v2 + test:web
-npm run db-rebuild   # 如需使用，调用 node scripts/db-rebuild.mjs
-npm run db-verify    # 如需使用，调用 node scripts/db-verify.mjs
+npm run db:backup -- --database erix [--out <path>]  # 备份结构和数据
+npm run db-rebuild -- --database erix               # 清空并重建 25 张表
+npm run db-verify -- --database erix                # 校验新库结构
+npm run create-admin -- --database erix --username <name> --account-name <name>  # 密码用 ADMIN_PASSWORD
 ```
 
 `test:v2` 与 `test:web` 要求平台已启动并连接新库。Web 验收不会把账号密码写入仓库，
 运行前必须设置 `TEST_USERNAME`、`TEST_PASSWORD`，可选 `TEST_ACCOUNT_NAME` 和
 `TEST_BASE`。`DB_NAME_NEW` 优先于 `DB_NAME`，默认库名为 `erix`；若解析到旧库名，
 连接池会在建立连接前失败。生产环境应显式设置 `DB_NAME_NEW`。
+
+新库初始化流程：先执行 `npm run db:backup -- --database <name>` 保存可恢复备份，
+再执行 `npm run db-rebuild -- --database <name>`，然后用
+`ADMIN_USERNAME`、`ADMIN_PASSWORD`、`ADMIN_ACCOUNT_NAME` 环境变量（或命令行参数）
+执行 `npm run create-admin`。管理员登录成功后，再从 Web 或 REST v2 注册主机并保存
+一次性主机 key。备份工具默认写入 `~/backups/<db>-<YYYYMMDD-HHMMSS>.sql`，
+也可通过 `--out <path>` 指定文件；备份包含 `SHOW CREATE TABLE` 结构和逐行数据
+`INSERT`，不依赖 `mysqldump`。
 
 ## 架构速览
 

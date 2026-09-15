@@ -139,6 +139,26 @@ async function createFixtures() {
     [lowKeyId, newPrincipalId, hash(lowKey), JSON.stringify(['task:read']), createdAt],
   );
 
+  if (phase === 'read') {
+    const rootId = id('post');
+    const replyId = id('post');
+    await newDb.query(
+      `INSERT INTO post
+         (id, account_id, kind, subtype, author_principal_id, title, body,
+          visibility, root_id, created_at)
+       VALUES (?, ?, 'note', '', ?, ?, ?, 'public', ?, ?)`,
+      [rootId, accountId, newPrincipalId, 'MCP v2 read root', 'read acceptance root', rootId, createdAt],
+    );
+    await newDb.query(
+      `INSERT INTO post
+         (id, account_id, kind, subtype, author_principal_id, title, body,
+          visibility, parent_id, root_id, created_at)
+       VALUES (?, ?, 'note', '', ?, ?, ?, 'public', ?, ?, ?)`,
+      [replyId, accountId, newPrincipalId, 'MCP v2 read reply', 'read acceptance reply', rootId, rootId, createdAt],
+    );
+    postIds.push(rootId, replyId);
+  }
+
   return accountId;
 }
 

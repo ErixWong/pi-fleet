@@ -112,8 +112,12 @@ function attachmentSelect(): string {
 async function attachmentByIdWithConnection(
   conn: PoolConnection,
   id: string,
+  forUpdate = false,
 ): Promise<Attachment | null> {
-  const result = await conn.query(`${attachmentSelect()} WHERE id = ? LIMIT 1`, [id]);
+  const result = await conn.query(
+    `${attachmentSelect()} WHERE id = ? LIMIT 1${forUpdate ? ' FOR UPDATE' : ''}`,
+    [id],
+  );
   const row = rows(result)[0];
   return row ? attachmentFromRow(row) : null;
 }
@@ -289,14 +293,33 @@ export async function quotaUsage(ownerPrincipalId: string): Promise<{ bytes: num
   };
 }
 
-export async function markScanStatus(id: string, status: ScanStatus): Promise<Attachment> {
+export async function markScanStatus(
+  id: string,
+  status: ScanStatus,
+  expectedStatus?: ScanStatus,
+): Promise<Attachment> {
   if (!['pending', 'clean', 'infected', 'skipped', 'error'].includes(status)) {
     throw new Error(`Unknown scan status: ${status}`);
   }
   return withTransaction(async (conn) => {
-    const before = await attachmentByIdWithConnection(conn, id);
+    const before = await attachmentByIdWithConnection(conn, id, true);
     if (!before) throw new Error(`Attachment not found: ${id}`);
-    await conn.query(`UPDATE attachment SET scan_status = ? WHERE id = ?`, [status, id]);
+    const update = expectedStatus === undefined
+      ? await conn.query(
+        `UPDATE attachment
+            SET scan_status = ?
+          WHERE id = ? AND deleted_at IS NULL`,
+        [status, id],
+      )
+      : await conn.query(
+        `UPDATE attachment
+            SET scan_status = ?
+          WHERE id = ? AND scan_status = ? AND deleted_at IS NULL`,
+        [status, id, expectedStatus],
+      );
+    if (Number((update as { affectedRows?: number }).affectedRows ?? 0) === 0) {
+      return before;
+    }
     await recordEvent(conn, {
       account_id: before.account_id,
       actor_principal_id: before.owner_principal_id,
@@ -314,7 +337,7 @@ export async function markScanStatus(id: string, status: ScanStatus): Promise<At
 
 export async function softDeleteAttachment(id: string): Promise<void> {
   await withTransaction(async (conn) => {
-    const before = await attachmentByIdWithConnection(conn, id);
+    const before = await attachmentByIdWithConnection(conn, id, true);
     if (!before) throw new Error(`Attachment not found: ${id}`);
     if (before.deleted_at) return;
     const deletedAt = nowString();

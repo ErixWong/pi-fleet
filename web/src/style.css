@@ -944,33 +944,3 @@ code { color: var(--code-text); }
 .md-content tr:nth-child(even) td { background: var(--table-stripe-bg); }
 .md-content hr { border-color: var(--border-soft); margin: 1em 0; }
 .md-content img { max-width: 100%; border-radius: 0.5rem; }
-
-/* 任务详情页：左侧计划结构面板（吸附 + 收起） */
-.plan-panel {
-  width: 280px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 0.75rem;
-  max-height: calc(100vh - 1.5rem);
-  overflow-y: auto;
-  transition: width 0.2s ease;
-}
-.plan-panel.collapsed { width: 40px; }
-.plan-panel-head { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border-soft); gap: 0.25rem; }
-.plan-panel-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.plan-panel-body { padding: 0.6rem; }
-.plan-stage-head { min-width: 0; }
-.plan-stage-meta { padding-left: 1.1rem; }
-.plan-task {
-  display: block;
-  padding: 0.2rem 0.45rem;
-  margin: 1px 0;
-  border-radius: 0.3rem;
-  color: var(--text-color);
-  font-size: 0.88rem;
-}
-.plan-task:hover { background: var(--hover-bg, rgba(0,0,0,0.04)); }
-.plan-task-active { background: var(--accent-soft) !important; font-weight: 600; }
-.plan-task .badge { font-size: 0.68rem; }
-.plan-stage-head { cursor: pointer; border-radius: 0.3rem; padding: 0.15rem 0.25rem; }
-.plan-stage-head:hover { background: var(--hover-bg, rgba(0,0,0,0.05)); }

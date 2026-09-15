@@ -437,9 +437,11 @@ export async function getPrincipal(id: string): Promise<Principal | null> {
 async function hostQuery(
   accountId: string,
   hostId?: string,
+  includeDeleted = false,
 ): Promise<HostSummary[]> {
   const predicates = [`p.account_id = ?`, `p.kind = 'host'`];
   const params: unknown[] = [accountId];
+  if (!includeDeleted) predicates.push('p.deleted_at IS NULL');
   if (hostId !== undefined) {
     predicates.push('p.id = ?');
     params.push(hostId);
@@ -503,7 +505,7 @@ export async function updateHost(
       params,
     );
   });
-  return getHost(accountId, hostId);
+  return (await hostQuery(accountId, hostId, changes.status === 'disabled'))[0] ?? null;
 }
 
 export async function deleteHost(
