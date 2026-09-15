@@ -864,13 +864,26 @@ export async function listTasks(
     predicates.push('t.is_ready = 1');
     predicates.push(`p.visibility = 'public'`);
     predicates.push('t.assignee_principal_id IS NULL');
+  } else if (filter.view === 'due') {
+    predicates.push(`(
+      t.assignee_principal_id = ?
+      OR (
+        t.assignee_principal_id IS NULL
+        AND EXISTS (
+          SELECT 1
+            FROM post_target due_target
+           WHERE due_target.post_id = p.id
+             AND due_target.principal_id = ?
+             AND due_target.role = 'assignee'
+        )
+      )
+    )`);
+    params.push(filter.principal_id, filter.principal_id);
+    predicates.push(`t.status IN ('open', 'claimed')`);
+    predicates.push('t.is_ready = 1');
   } else {
     predicates.push('t.assignee_principal_id = ?');
     params.push(filter.principal_id);
-    if (filter.view === 'due') {
-      predicates.push(`t.status IN ('open', 'claimed')`);
-      predicates.push('t.is_ready = 1');
-    }
   }
   if (filter.status !== undefined) {
     const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];

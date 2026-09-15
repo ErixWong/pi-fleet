@@ -241,6 +241,16 @@ test('公开池：public 无 target 的 ready task 可见，认领后消失', { 
   assert.equal(after.items.some((item) => item.post_id === published.post.id), false);
 });
 
+test('due 视图返回 post_target 指派但尚未认领的任务', { concurrency: false }, async () => {
+  const published = await publishAssigned();
+  const due = await listTasks({
+    view: 'due',
+    principal_id: assignee.id,
+    account_id: account.id,
+  });
+  assert.equal(due.items.some((item) => item.post_id === published.post.id), true);
+});
+
 test('唯一入口和 verdict 前置状态：导出集合无旧的直接完成入口', { concurrency: false }, async () => {
   const exports = Object.keys(taskFlow);
   assert.equal(exports.includes('submitTask'), true);
