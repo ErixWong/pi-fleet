@@ -1,78 +1,94 @@
-async function req(method, url, body) {
-  const res = await fetch(url, {
+const API_ROOT = '/api/v2';
+
+function queryString(params = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  }
+  const text = query.toString();
+  return text ? `?${text}` : '';
+}
+
+function authHeaders() {
+  const key = localStorage.getItem('pm_key');
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+async function parseResponse(res) {
+  const type = res.headers.get('content-type') || '';
+  if (type.includes('application/json')) return res.json().catch(() => ({}));
+  return res.text().catch(() => '');
+}
+
+async function req(method, path, body) {
+  const headers = { ...authHeaders() };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const res = await fetch(`${API_ROOT}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    credentials: 'same-origin',
-    body: body ? JSON.stringify(body) : undefined,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (res.status === 401) {
-    if (!url.endsWith('/me') && !url.endsWith('/login')) {
-      window.location.href = '/login';
-    }
-    const err = new Error('unauthorized');
+    localStorage.removeItem('pm_key');
+    if (path !== '/login') window.location.replace('/login');
+    const err = new Error('登录已过期，请重新登录');
     err.status = 401;
     throw err;
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  const data = await parseResponse(res);
+  if (!res.ok) {
+    const message = data && typeof data === 'object' ? data.error : '';
+    throw new Error(message || res.statusText || `请求失败（${res.status}）`);
+  }
   return data;
 }
 
+async function attachmentRequest(id) {
+  const res = await fetch(attachmentUrl(id), { headers: authHeaders() });
+  if (res.status === 401) {
+    localStorage.removeItem('pm_key');
+    window.location.replace('/login');
+    throw new Error('登录已过期，请重新登录');
+  }
+  if (!res.ok) {
+    const data = await parseResponse(res);
+    const message = data && typeof data === 'object' ? data.error : '';
+    throw new Error(message || res.statusText || `附件请求失败（${res.status}）`);
+  }
+  return {
+    blob: await res.blob(),
+    filename: res.headers.get('content-disposition') || '',
+  };
+}
+
+function attachmentUrl(id) {
+  return `${API_ROOT}/attachments/${encodeURIComponent(id)}`;
+}
+
 export const api = {
-  me: () => req('GET', '/api/me'),
-  login: (password) => req('POST', '/api/login', { password }),
-  logout: () => req('POST', '/api/logout'),
-  stats: () => req('GET', '/api/stats'),
-  events: (params = {}) => req('GET', `/api/events?${new URLSearchParams(params)}`),
-  agents: (page = 1, pageSize = 10, tag = '') => req('GET', `/api/agents?page=${page}&page_size=${pageSize}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`),
-  agentsAll: () => req('GET', '/api/agents?all=1'),
-  tags: () => req('GET', '/api/tags'),
-  setAgentTags: (id, tags) => req('POST', `/api/agents/${id}/tags`, { tags }),
-  setTaskTags: (id, tags) => req('POST', `/api/tasks/${id}/tags`, { tags }),
-  createAgent: (payload) => req('POST', '/api/agents', payload),
-  agent: (id, params = {}) => req('GET', `/api/agents/${id}?${new URLSearchParams(params)}`),
-  toggleAgent: (id) => req('POST', `/api/agents/${id}/toggle`),
-  updateAgent: (id, payload) => req('PUT', `/api/agents/${id}`, payload),
-  toggleAgentAccept: (id) => req('POST', `/api/agents/${id}/accept-toggle`),
-  resetAgentKey: (id) => req('POST', `/api/agents/${id}/reset-key`),
-  deleteAgent: (id) => req('POST', `/api/agents/${id}/delete`),
-  tasks: (params = {}) => req('GET', `/api/tasks?${new URLSearchParams(params)}`),
-  createTask: (payload) => req('POST', '/api/tasks', payload),
-  task: (id, params = {}) => req('GET', `/api/tasks/${id}?${new URLSearchParams(params)}`),
-  cancelTask: (id) => req('POST', `/api/tasks/${id}/cancel`),
-  taskReply: (id, content) => req('POST', `/api/tasks/${id}/reply`, { content }),
-  taskResolve: (id, final_result) => req('POST', `/api/tasks/${id}/resolve`, { final_result: final_result || undefined }),
-  taskReject: (id, opinion) => req('POST', `/api/tasks/${id}/reject`, { opinion }),
-  taskReopen: (id) => req('POST', `/api/tasks/${id}/reopen`),
-  taskReassign: (id, assignee_agent_id) => req('POST', `/api/tasks/${id}/reassign`, { assignee_agent_id }),
-  taskDeliverableVisibility: (id, value) => req('POST', `/api/tasks/${id}/deliverable-visibility`, { value }),
-  activity: (page = 1, pageSize = 10) => req('GET', `/api/activity?page=${page}&page_size=${pageSize}`),
-  plans: (page = 1, pageSize = 10) => req('GET', `/api/plans?page=${page}&page_size=${pageSize}`),
-  createPlan: (payload) => req('POST', '/api/plans', payload),
-  plan: (id) => req('GET', `/api/plans/${id}`),
-  settings: () => req('GET', '/api/settings'),
-  saveSettings: (payload) => req('PUT', '/api/settings', payload),
-  testLlm: (opts) => req('POST', '/api/settings/llm-test', opts || {}),
-  llmScan: () => req('POST', '/api/settings/llm-scan'),
-  settingsHistory: (page = 1, pageSize = 10) => req('GET', `/api/settings/history?page=${page}&page_size=${pageSize}`),
-  llmProviders: () => req('GET', '/api/settings/llm-providers'),
-  saveLlmProvider: (payload) => req('PUT', '/api/settings/llm-providers', payload),
-  deleteLlmProvider: (id) => req('DELETE', `/api/settings/llm-providers/${id}`),
-  llmModels: () => req('GET', '/api/settings/llm-models'),
-  saveLlmModel: (payload) => req('PUT', '/api/settings/llm-models', payload),
-  deleteLlmModel: (id) => req('DELETE', `/api/settings/llm-models/${id}`),
-  llmCalls: (page = 1, pageSize = 10) => req('GET', `/api/settings/llm-calls?page=${page}&page_size=${pageSize}`),
-  // 对话通道（管理员 ↔ agent 独立对话；多会话：主机会话可新建/重命名/设运行用户，目录从主机 projects 列表选择）
-  conversations: (page = 1, pageSize = 10) => req('GET', `/api/conversations?page=${page}&page_size=${pageSize}`),
-  createConversation: (payload) => req('POST', '/api/conversations', payload),
-  conversation: (id) => req('GET', `/api/conversations/${id}`),
-  agentConversations: (id, page = 1, pageSize = 20) => req('GET', `/api/agents/${id}/conversations?page=${page}&page_size=${pageSize}`),
-  agentProjects: (id) => req('GET', `/api/agents/${id}/projects`),
-  rescanAgentProjects: (id) => req('POST', `/api/agents/${id}/projects-rescan`),
-  renameConversation: (id, name) => req('POST', `/api/conversations/${id}/rename`, { name }),
-  setConversationRunUser: (id, runUser) => req('POST', `/api/conversations/${id}/run-user`, { run_user: runUser }),
-  conversationMessages: (id, page = 1, pageSize = 20) => req('GET', `/api/conversations/${id}/messages?page=${page}&page_size=${pageSize}`),
-  conversationSince: (id, sinceId) => req('GET', `/api/conversations/${id}/messages/since?since_id=${sinceId}`),
-  sendChatMessage: (id, content) => req('POST', `/api/conversations/${id}/messages`, { content }),
-  archiveConversation: (id) => req('POST', `/api/conversations/${id}/archive`),
+  login: (username, password) => req('POST', '/login', { username, password }),
+  whoami: () => req('GET', '/whoami'),
+  logout() {
+    localStorage.removeItem('pm_key');
+  },
+
+  hosts: () => req('GET', '/hosts'),
+  createHost: (payload) => req('POST', '/hosts', payload),
+  updateHost: (id, payload) => req('PATCH', `/hosts/${encodeURIComponent(id)}`, payload),
+  deleteHost: (id) => req('DELETE', `/hosts/${encodeURIComponent(id)}`),
+  rotateHostKey: (id) => req('POST', `/hosts/${encodeURIComponent(id)}/keys/rotate`),
+
+  tasks: (params = {}) => req('GET', `/tasks${queryString(params)}`),
+  post: (id) => req('GET', `/posts/${encodeURIComponent(id)}`),
+  postList: (params = {}) => req('GET', `/posts${queryString(params)}`),
+  createTask: (payload) => req('POST', '/tasks', payload),
+  claimTask: (id) => req('POST', `/tasks/${encodeURIComponent(id)}/claim`),
+  submitTask: (id, payload) => req('POST', `/tasks/${encodeURIComponent(id)}/submit`, payload),
+  verdictTask: (id, payload) => req('POST', `/tasks/${encodeURIComponent(id)}/verdict`, payload),
+  reopenTask: (id, payload = {}) => req('POST', `/tasks/${encodeURIComponent(id)}/reopen`, payload),
+  replyPost: (id, payload) => req('POST', `/posts/${encodeURIComponent(id)}/reply`, payload),
+
+  events: (params = {}) => req('GET', `/events${queryString(params)}`),
+  attachmentUrl,
+  attachmentBlob: attachmentRequest,
 };

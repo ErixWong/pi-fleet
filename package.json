@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "tsc && npm --prefix web run build",
     "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test-all.mjs",
