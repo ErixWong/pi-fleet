@@ -2,10 +2,24 @@
 // pi-agent daemon：轮询 v2 任务并拉起 pi 执行。
 //
 // daemon 先通过 v2 REST 原子认领到期任务，再由 pi 通过 v2 MCP 读取上下文和提交结果。
-// pi 仍会按 prompt 幂等地尝试 claim；daemon 只在异常退出或超时时提交失败预检。
+// pi 仍会按 prompt 幂等地尝试 claim；正常退出未提交时 daemon 会收集产物兜底提交，
+// 异常退出或超时则提交失败预检。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -61,6 +75,57 @@ const AGENT_KEY = process.env.PI_AGENT_KEY || CLIENT_CONFIG.key || readKeyFromPi
 if (!AGENT_KEY) {
   console.error('缺少 key：请先运行 pi-agent setup --key=<key>');
   process.exit(1);
+}
+
+function syncPiMcpConfig() {
+  let mcpConfig = {};
+  if (existsSync(PI_MCP_CONFIG_PATH)) {
+    try {
+      const parsed = JSON.parse(readFileSync(PI_MCP_CONFIG_PATH, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('顶层结构不是 JSON 对象');
+      }
+      mcpConfig = parsed;
+    } catch (error) {
+      console.log(`[daemon] MCP 配置自愈失败，保留原文件并继续启动：${error.message}`);
+      return;
+    }
+  }
+
+  if (mcpConfig.mcpServers === undefined) {
+    mcpConfig.mcpServers = {};
+  }
+  if (
+    !mcpConfig.mcpServers
+    || typeof mcpConfig.mcpServers !== 'object'
+    || Array.isArray(mcpConfig.mcpServers)
+  ) {
+    console.log('[daemon] MCP 配置自愈失败，mcpServers 不是对象，保留原文件并继续启动');
+    return;
+  }
+
+  const oldServer = mcpConfig.mcpServers['task-dispatch'];
+  mcpConfig.mcpServers['task-dispatch'] = {
+    ...(oldServer && typeof oldServer === 'object' && !Array.isArray(oldServer) ? oldServer : {}),
+    type: 'http',
+    url: `${BASE}/mcp2`,
+    auth: 'bearer',
+    bearerToken: AGENT_KEY,
+    lifecycle: 'lazy',
+  };
+
+  const tempPath = `${PI_MCP_CONFIG_PATH}.tmp-${process.pid}`;
+  try {
+    mkdirSync(path.dirname(PI_MCP_CONFIG_PATH), { recursive: true, mode: 0o700 });
+    writeFileSync(tempPath, `${JSON.stringify(mcpConfig, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, PI_MCP_CONFIG_PATH);
+    chmodSync(PI_MCP_CONFIG_PATH, 0o600);
+    console.log(`[daemon] 已同步 pi MCP 配置：${PI_MCP_CONFIG_PATH}`);
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch { /* 临时文件不存在或已改名 */ }
+    console.log(`[daemon] MCP 配置自愈失败，继续启动：${error.message}`);
+  }
 }
 
 function configuredPiCli() {
@@ -329,6 +394,102 @@ function taskPrompt(item, taskId, cwd, sandboxDir, thread = []) {
   return lines.join('\n');
 }
 
+const IGNORED_ARTIFACT_DIRECTORIES = new Set(['input', 'tmp', '.git', 'node_modules']);
+
+function textPreview(filePath) {
+  let descriptor;
+  try {
+    descriptor = openSync(filePath, 'r');
+    const buffer = Buffer.alloc(4096);
+    const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const sample = buffer.subarray(0, bytesRead);
+    if (sample.includes(0)) return null;
+    return sample.toString('utf8').slice(0, 500).replace(/\s+/g, ' ').trim();
+  } catch (error) {
+    console.log(`[daemon] 读取产物摘要失败 ${filePath}：${error.message}`);
+    return null;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function collectTaskArtifacts(cwd) {
+  const artifacts = [];
+  function walk(directory, prefix = '') {
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      console.log(`[daemon] 读取产物目录失败 ${directory}：${error.message}`);
+      return;
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativeName = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const filePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_ARTIFACT_DIRECTORIES.has(entry.name)) {
+          walk(filePath, relativeName);
+        }
+        continue;
+      }
+      if (!entry.isFile() || relativeName === 'AGENTS.md' || relativeName === 'output/stdout.txt') {
+        continue;
+      }
+      let stats;
+      try {
+        stats = statSync(filePath);
+      } catch (error) {
+        console.log(`[daemon] 读取产物信息失败 ${filePath}：${error.message}`);
+        continue;
+      }
+      const preview = textPreview(filePath);
+      const note = [
+        `大小：${stats.size} 字节`,
+        preview === null
+          ? '二进制或不可预览文本'
+          : `文本摘要：${preview || '（空文件）'}`,
+      ].join('；');
+      artifacts.push({ name: relativeName, note });
+    }
+  }
+  walk(cwd);
+  return artifacts;
+}
+
+async function verifySuccessfulTask(taskId, cwd) {
+  try {
+    const detail = await api('GET', `/api/v2/posts/${encodeURIComponent(taskId)}`);
+    const status = detail?.task?.status;
+    if (status === 'submitted' || status === 'done') {
+      console.log(`[daemon] 任务 ${taskId} 正常完成（code=0，状态=${status}，pi 已通过 MCP 提交）`);
+      return;
+    }
+    if (status !== 'claimed') {
+      console.log(`[daemon] 任务 ${taskId} code=0，但当前状态为 ${String(status ?? 'unknown')}，不执行兜底提交`);
+      return;
+    }
+
+    const deliverables = collectTaskArtifacts(cwd);
+    const result = await api('POST', `/api/v2/tasks/${encodeURIComponent(taskId)}/submit`, {
+      deliverables,
+      message: '由 daemon 兜底提交（执行 agent 未通过 MCP 提交）',
+    });
+    if (result?.ok === true && ['submitted', 'done'].includes(result?.task?.status)) {
+      console.log(`[daemon] 任务 ${taskId} 兜底提交成功（${deliverables.length} 个产物）`);
+    } else {
+      console.log(
+        `[daemon] 任务 ${taskId} 兜底提交未完成：状态=${String(result?.task?.status ?? 'unknown')} `
+        + `原因=${JSON.stringify(result?.precheck?.issues ?? [])}`,
+      );
+    }
+  } catch (error) {
+    console.log(`[daemon] 任务 ${taskId} 状态校验或兜底提交失败：${error.message}`);
+  } finally {
+    claimedTasks.delete(taskId);
+  }
+}
+
 async function spawnTaskAgent(item) {
   const taskId = taskIdOf(item);
   const task = taskDataOf(item);
@@ -403,8 +564,7 @@ async function spawnTaskAgent(item) {
     execSessions.delete(taskId);
     recentlyDone.set(taskId, Date.now());
     if (code === 0) {
-      claimedTasks.delete(taskId);
-      console.log(`[daemon] 任务 ${taskId} 正常完成（code=0，提交由 pi MCP 完成）`);
+      void verifySuccessfulTask(taskId, cwd);
       return;
     }
     const tail = session.output.split('\n').slice(-5).join('\n');
@@ -458,5 +618,6 @@ async function startTaskPolling() {
   }
 }
 
+syncPiMcpConfig();
 void startTaskPolling();
 console.log(`[daemon] agent-daemon 启动 key=${AGENT_KEY.slice(0, 8)}… pi work=${WORK_ROOT} poll=${POLL_MS / 1000}s`);

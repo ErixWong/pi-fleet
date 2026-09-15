@@ -48,7 +48,8 @@ sudo pi-agent uninstall-service
 
 - `~/.config/pi-agent/config.json`：平台 URL 和 API key（权限 `600`）。
 - `~/.pi/agent/mcp.json`：合并 `task-dispatch` MCP server，URL 为
-  `<platform>/mcp2`，原文件备份为 `mcp.json.bak-pi-agent`。
+  `<platform>/mcp2`，原文件备份为 `mcp.json.bak-pi-agent`。daemon 每次启动都会
+  幂等同步这个条目，保留其他 MCP server，并在平台地址或 key 变化后自动更新。
 
 pi 的模型/provider 配置仍由用户自行维护。daemon 不运行专用心跳；每次带
 Bearer key 的任务列表请求会自动刷新主机活跃时间。
@@ -59,10 +60,11 @@ Bearer key 的任务列表请求会自动刷新主机活跃时间。
   `Authorization: Bearer <key>`。
 - 每个返回任务由一个 pi 进程处理。pi 使用 MCP `post(detail)` 获取完整上下文，
   必要时使用 `task(claim)`，完成后使用 `task(submit)` 提交交付物。
-- 正常完成不由 daemon 代提交。只有 pi 异常退出或超过
-  `TASK_TIMEOUT_MS` 时，daemon 才调用
-  `POST /api/v2/tasks/:id/submit`，body 为
-  `{ "deliverables": [], "message": "..." }`，触发平台失败预检和重试计数。
+- pi 正常退出后 daemon 会校验任务状态；如果 pi 已通过 MCP 提交则保持正常路径，
+  如果仍为 `claimed`，daemon 会收集沙箱产物并调用
+  `POST /api/v2/tasks/:id/submit` 兜底提交。pi 异常退出或超过 `TASK_TIMEOUT_MS`
+  时仍按失败预检路径提交 `{ "deliverables": [], "message": "..." }`，触发平台
+  失败预检和重试计数。
 
 可选环境变量：
 
