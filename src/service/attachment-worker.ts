@@ -34,6 +34,17 @@ async function clamavInstreamScan(buffer: Buffer): Promise<boolean> {
   const host = getSetting('clamd_host');
   const port = getSettingInt('clamd_port', 3310);
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const succeed = (clean: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(clean);
+    };
     const socket = net.createConnection({ host, port }, () => {
       socket.write('zINSTREAM\0');
       const maxChunk = 64 * 1024;
@@ -51,14 +62,30 @@ async function clamavInstreamScan(buffer: Buffer): Promise<boolean> {
     socket.on('data', (data) => {
       response += data.toString();
     });
-    socket.on('end', () => resolve(!/FOUND/i.test(response)));
+    socket.on('end', () => {
+      const normalized = response.trim();
+      if (/FOUND/i.test(response)) {
+        succeed(false);
+      } else if (/^stream:\s*OK$/i.test(normalized)) {
+        succeed(true);
+      } else {
+        const fragment = response.slice(0, 256);
+        fail(new Error(`clamd returned an unexpected response: ${JSON.stringify(fragment)}`));
+      }
+    });
     socket.on('timeout', () => {
       socket.destroy();
-      reject(new Error('clamd scan timed out'));
+      fail(new Error('clamd scan timed out'));
     });
     socket.on('error', (error) => {
       socket.destroy();
-      reject(error);
+      fail(error);
+    });
+    socket.on('close', () => {
+      if (!settled) {
+        const fragment = response.slice(0, 256);
+        fail(new Error(`clamd closed before a valid response: ${JSON.stringify(fragment)}`));
+      }
     });
   });
 }

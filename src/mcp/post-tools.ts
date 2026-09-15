@@ -17,6 +17,7 @@ import {
   type PostTask,
 } from '../service/posts.js';
 import { publishTask } from '../service/task-flow.js';
+import { canReadAttachment, type Attachment } from '../service/resources.js';
 import {
   mcpPrincipal,
   guardScope,
@@ -234,10 +235,17 @@ export function applyRecentOptions(
 export async function readPostDetail(
   id: string,
   accountId: string,
+  principalId: string,
 ): Promise<Record<string, unknown> | null> {
   const detail = await getPostDetail(id);
   if (!detail || detail.post.deleted_at || detail.post.account_id !== accountId) return null;
-  return presentPostDetail(detail);
+  const deliverables = await Promise.all(detail.deliverables.map(async (deliverable) => {
+    const attachment = deliverable.attachment;
+    if (!attachment || typeof attachment !== 'object') return deliverable;
+    const readable = await canReadAttachment(attachment as Attachment, principalId);
+    return readable ? deliverable : { ...deliverable, attachment: null };
+  }));
+  return presentPostDetail({ ...detail, deliverables });
 }
 
 export async function readPostList(
@@ -426,7 +434,7 @@ export function registerPostTools(server: McpServer): void {
         guardScope('post:read');
         if (args.action === 'detail') {
           if (!args.id) return toolErr('id is required');
-          const detail = await readPostDetail(args.id, context.account_id);
+          const detail = await readPostDetail(args.id, context.account_id, context.principal.id);
           if (!detail) return toolErr('not found');
           applyRecentOptions(detail, args);
           return toolOk(detail);

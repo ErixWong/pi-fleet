@@ -363,7 +363,7 @@ postsV2Router.get(
   async (req, res, next) => {
     try {
       const context = requirePrincipal();
-      const detail = await readPostDetail(req.params.id, context.account_id);
+      const detail = await readPostDetail(req.params.id, context.account_id, context.principal.id);
       if (!detail) {
         res.status(404).json({ error: 'not found' });
         return;
