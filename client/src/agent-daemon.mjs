@@ -330,17 +330,60 @@ async function loadChannelHistory(channelId, currentId) {
     .slice(-20);
 }
 
+function stripChannelDirectoryDirective(body) {
+  const text = String(body ?? '');
+  if (!text.startsWith('@dir=')) return text;
+  const match = text.match(/^@dir=\S+(?:\s+([\s\S]*))?$/);
+  return match ? (match[1] ?? '') : text;
+}
+
+function parseChannelMessage(message) {
+  const body = String(message?.body ?? '');
+  if (!body.startsWith('@dir=')) {
+    return {
+      body,
+      cwd: path.join(os.homedir(), 'tmp'),
+    };
+  }
+
+  const match = body.match(/^@dir=([^\s]*)(?:\s+([\s\S]*))?$/);
+  const requestedPath = match?.[1] ?? '';
+  const home = path.resolve(os.homedir());
+  const resolved = requestedPath && path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : null;
+  if (!resolved || (resolved !== home && !resolved.startsWith(home + path.sep))) {
+    return {
+      invalidPath: requestedPath,
+      body: match?.[2] ?? '',
+    };
+  }
+  return {
+    body: match?.[2] ?? '',
+    cwd: resolved,
+  };
+}
+
 function channelPrompt(channel, message, history, cwd) {
   const lines = [
     '你正在参与人与主机的一对一实时对话，不是任务执行。',
     `对话通道 ID：${channel.id}`,
     `对方主机名称：${String(channel.host?.name ?? '')}`,
-    `当前新消息：${threadPostLabel(message)}`,
+    `当前新消息：${threadPostLabel({
+      ...message,
+      body: stripChannelDirectoryDirective(message?.body),
+    })}`,
     '',
     '最近对话历史（含双方，最多 20 条）：',
-    ...(history.length > 0 ? history.map(threadPostLabel) : ['暂无历史']),
+    ...(history.length > 0
+      ? history.map((post) => threadPostLabel({
+        ...post,
+        body: stripChannelDirectoryDirective(post?.body),
+      }))
+      : ['暂无历史']),
     '',
     `工作目录：${cwd}`,
+    '允许在 ~ 下自由 cd 与执行命令。',
     '回答规则：简短、直接回答用户；这是对话，不要调用任何 task 相关工具，也不要认领、提交或处理任务。',
     `需要回复时，必须使用 post(action="reply", parent_id="${channel.id}", body="...") 回复到当前通道。`,
     '需要执行命令时可以执行，但不要把命令执行当成任务流程；完成后仍用上述 post reply 汇报。',
@@ -396,19 +439,34 @@ async function reportChannelFailure(channelId, error) {
   }
 }
 
-async function runChannelMessage(channel, message) {
-  await acquireChannelSlot();
+async function reportChannelDirectoryRejected(channelId, requestedPath) {
+  console.log(`[daemon][channel-${channelId}] 拒绝工作目录：${requestedPath}`);
   try {
-    const cwd = path.join(WORK_ROOT, 'channels', channel.id);
-    mkdirSync(cwd, { recursive: true });
-    for (const directory of ['input', 'tmp', 'output']) {
-      mkdirSync(path.join(cwd, directory), { recursive: true });
+    await api('POST', `/api/v2/channels/${encodeURIComponent(channelId)}/messages`, {
+      body: `工作目录必须在 ~ 下：${requestedPath}`,
+    });
+  } catch (replyError) {
+    console.log(`[daemon][channel-${channelId}] 发送工作目录错误说明也失败：${replyError.message}`);
+  }
+}
+
+async function runChannelMessage(channel, message) {
+  const parsed = parseChannelMessage(message);
+  let slotAcquired = false;
+  try {
+    if (parsed.invalidPath !== undefined) {
+      await reportChannelDirectoryRejected(channel.id, parsed.invalidPath);
+      return;
     }
+    await acquireChannelSlot();
+    slotAcquired = true;
+    const cwd = parsed.cwd;
+    mkdirSync(cwd, { recursive: true });
     const history = await loadChannelHistory(channel.id, message.id);
     console.log(`[daemon][channel-${channel.id}] 收到 ${message.id}，纳入历史 ${history.length} 条`);
     await runPiForChannel(
       channel.id,
-      channelPrompt(channel, message, history, cwd),
+      channelPrompt(channel, { ...message, body: parsed.body }, history, cwd),
       cwd,
     );
     console.log(`[daemon][channel-${channel.id}] pi 完成 ${message.id}`);
@@ -417,7 +475,7 @@ async function runChannelMessage(channel, message) {
   } finally {
     setChannelCursor(channel.id, String(message.id));
     channelSessions.delete(channel.id);
-    releaseChannelSlot();
+    if (slotAcquired) releaseChannelSlot();
   }
 }
 

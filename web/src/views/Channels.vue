@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
             <div v-if="sendError" class="alert alert-danger py-2 mb-2">{{ sendError }}</div>
             <div class="input-group">
               <textarea v-model="draft" class="form-control" rows="2" maxlength="10000"
-                placeholder="输入消息，Enter 发送也可以使用下方按钮" aria-label="消息内容"
+                placeholder="输入消息，可写 @dir=&lt;路径&gt; 问题内容；Enter 发送也可以使用下方按钮" aria-label="消息内容"
                 @keydown.enter.exact.prevent="sendMessage"></textarea>
               <button class="btn btn-primary px-4" :disabled="sending || !draft.trim()">
                 <i class="bi bi-send me-1"></i>{{ sending ? '发送中…' : '发送' }}
