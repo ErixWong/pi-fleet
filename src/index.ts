@@ -18,6 +18,7 @@ import { scanPendingAttachments } from './service/attachments.js';
 import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
 import { runPeriodicClones, runStageGates } from './service/plans.js';
 import { startOutboxWorker } from './service/outbox-worker.js';
+import { startLifecycleWorker } from './service/lifecycle.js';
 import { startAttachmentScanWorker } from './service/attachment-worker.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
         },
       })
     : () => {};
+  const stopLifecycleWorker = newDbReady ? startLifecycleWorker() : () => {};
   const stopAttachmentWorker = newDbReady ? startAttachmentScanWorker() : () => {};
 
   const app = express();
@@ -114,6 +116,7 @@ async function main(): Promise<void> {
   });
   server.on('close', () => {
     stopWorker();
+    stopLifecycleWorker();
     stopAttachmentWorker();
   });
 
