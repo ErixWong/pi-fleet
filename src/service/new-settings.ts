@@ -18,6 +18,8 @@ const DEFAULTS: Record<string, string> = {
   llm_verifier_read_bytes: String(64 * 1024),
   llm_timeout_ms: String(60_000),
   agent_offline_after_min: '30',
+  claim_timeout_hours: '2',
+  pending_confirm_timeout_days: '7',
 };
 
 let cache = new Map<string, string>();

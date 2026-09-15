@@ -116,8 +116,8 @@ async function staleTaskRows(
         AND pt.status = ?
         AND pt.${activityColumn} IS NOT NULL
         AND pt.${activityColumn} < ?
-      LIMIT ? FOR UPDATE SKIP LOCKED`,
-    [...candidateIds, status, boundary, batchSize],
+      FOR UPDATE SKIP LOCKED`,
+    [...candidateIds, status, boundary],
   ));
   return locked.map((row) => ({
     ...row,
@@ -230,22 +230,23 @@ async function autoConfirmBatch(
 export async function runLifecycleCollection(
   options: LifecycleOptions = {},
 ): Promise<LifecycleResult> {
+  const reclaimed = await reclaimStaleClaims(options);
+  const autoConfirmed = await autoConfirmStale(options);
+  return { reclaimed, autoConfirmed };
+}
+
+export async function reclaimStaleClaims(
+  options: LifecycleOptions = {},
+): Promise<number> {
   const nowDate = options.now ?? new Date();
   const now = dateString(nowDate);
   const claimTimeoutHours = positiveNumber(
     options.claim_timeout_hours ?? options.claimTimeoutHours,
     getSettingInt('claim_timeout_hours', DEFAULT_CLAIM_TIMEOUT_HOURS),
   );
-  const pendingConfirmTimeoutDays = positiveNumber(
-    options.pending_confirm_timeout_days ?? options.pendingConfirmTimeoutDays,
-    getSettingInt('pending_confirm_timeout_days', DEFAULT_PENDING_CONFIRM_TIMEOUT_DAYS),
-  );
   const batchSize = positiveInteger(options.batch, DEFAULT_BATCH_SIZE);
   const claimBoundary = cutoffString(nowDate, claimTimeoutHours * 60 * 60 * 1000);
-  const pendingConfirmBoundary = cutoffString(nowDate, pendingConfirmTimeoutDays * 24 * 60 * 60 * 1000);
-
   let reclaimed = 0;
-  let autoConfirmed = 0;
   while (true) {
     const count = await reclaimBatch(
       claimBoundary,
@@ -256,6 +257,21 @@ export async function runLifecycleCollection(
     reclaimed += count;
     if (count === 0 || count < batchSize) break;
   }
+  return reclaimed;
+}
+
+export async function autoConfirmStale(
+  options: LifecycleOptions = {},
+): Promise<number> {
+  const nowDate = options.now ?? new Date();
+  const now = dateString(nowDate);
+  const pendingConfirmTimeoutDays = positiveNumber(
+    options.pending_confirm_timeout_days ?? options.pendingConfirmTimeoutDays,
+    getSettingInt('pending_confirm_timeout_days', DEFAULT_PENDING_CONFIRM_TIMEOUT_DAYS),
+  );
+  const batchSize = positiveInteger(options.batch, DEFAULT_BATCH_SIZE);
+  const pendingConfirmBoundary = cutoffString(nowDate, pendingConfirmTimeoutDays * 24 * 60 * 60 * 1000);
+  let autoConfirmed = 0;
   while (true) {
     const count = await autoConfirmBatch(
       pendingConfirmBoundary,
@@ -266,7 +282,7 @@ export async function runLifecycleCollection(
     autoConfirmed += count;
     if (count === 0 || count < batchSize) break;
   }
-  return { reclaimed, autoConfirmed };
+  return autoConfirmed;
 }
 
 /** Alias used by callers that treat lifecycle collection as a worker tick. */
