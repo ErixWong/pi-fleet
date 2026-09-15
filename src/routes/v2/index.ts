@@ -1,7 +1,9 @@
 import express from 'express';
 import { principalAuthMiddleware, requirePrincipal } from '../../auth-principal.js';
 import { attachmentsV2Router } from './attachments.js';
+import { authV2Router } from './auth.js';
 import { eventsV2Router } from './events.js';
+import { hostsV2Router } from './hosts.js';
 import { identitiesV2Router } from './identities.js';
 import { postsV2Router } from './posts.js';
 import { tasksV2Router } from './tasks.js';
@@ -28,4 +30,6 @@ v2Router.use('/posts', postsV2Router);
 v2Router.use('/tasks', tasksV2Router);
 v2Router.use('/attachments', attachmentsV2Router);
 v2Router.use('/events', eventsV2Router);
+v2Router.use('/hosts', hostsV2Router);
 v2Router.use('/keys', identitiesV2Router);
+v2Router.use(authV2Router);

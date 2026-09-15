@@ -1,4 +1,4 @@
-import crypto from 'node:crypto';
+import crypto, { scryptSync, timingSafeEqual } from 'node:crypto';
 import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
@@ -7,7 +7,7 @@ import { recordEvent } from './event-outbox.js';
 export { getPool, initSchema } from '../db/pool.js';
 
 const PRINCIPAL_KINDS = new Set(['user', 'host', 'agent', 'service']);
-const SCOPES = new Set([
+export const SCOPES = new Set([
   'post:read',
   'post:write',
   'task:read',
@@ -19,6 +19,7 @@ const SCOPES = new Set([
   'attachment:write',
   'device:execute',
   'key:manage',
+  'host:manage',
   'moderate',
 ]);
 
@@ -37,6 +38,7 @@ export type Scope = (
   | 'attachment:write'
   | 'device:execute'
   | 'key:manage'
+  | 'host:manage'
   | 'moderate'
 );
 
@@ -65,6 +67,17 @@ export interface Device {
   hostname: string;
   os: string;
   run_user: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+}
+
+export type HostStatus = 'active' | 'disabled';
+
+export interface HostSummary {
+  id: string;
+  account_id: string;
+  name: string;
+  status: HostStatus;
   last_seen_at: string | null;
   created_at: string;
 }
@@ -155,6 +168,31 @@ function booleanValue(value: unknown): boolean {
   return Number(value) === 1;
 }
 
+/** Validate the scrypt format used by migrated administrator passwords. */
+export function verifyPassword(password: string, stored: string): boolean {
+  const [scheme, saltHex, hashHex] = stored.split(':');
+  if (
+    scheme !== 'scrypt'
+    || !saltHex
+    || !hashHex
+    || saltHex.length % 2 !== 0
+    || hashHex.length % 2 !== 0
+    || !/^[0-9a-f]+$/i.test(saltHex)
+    || !/^[0-9a-f]+$/i.test(hashHex)
+  ) {
+    return false;
+  }
+  try {
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(hashHex, 'hex');
+    if (salt.length === 0 || expected.length === 0) return false;
+    const derived = scryptSync(password, salt, expected.length) as Buffer;
+    return timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
 function validateScopes(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string')) {
     throw new Error('scopes must be an array of strings');
@@ -212,6 +250,17 @@ function deviceFromRow(row: DbRow): Device {
     hostname: stringValue(row.hostname),
     os: stringValue(row.os),
     run_user: nullableString(row.run_user),
+    last_seen_at: nullableString(row.last_seen_at),
+    created_at: stringValue(row.created_at),
+  };
+}
+
+function hostFromRow(row: DbRow): HostSummary {
+  return {
+    id: stringValue(row.id),
+    account_id: stringValue(row.account_id),
+    name: stringValue(row.name),
+    status: row.deleted_at === null || row.deleted_at === undefined ? 'active' : 'disabled',
     last_seen_at: nullableString(row.last_seen_at),
     created_at: stringValue(row.created_at),
   };
@@ -383,6 +432,109 @@ export async function getPrincipal(id: string): Promise<Principal | null> {
   );
   const row = rows(result)[0];
   return row ? principalFromRow(row) : null;
+}
+
+async function hostQuery(
+  accountId: string,
+  hostId?: string,
+): Promise<HostSummary[]> {
+  const predicates = [`p.account_id = ?`, `p.kind = 'host'`];
+  const params: unknown[] = [accountId];
+  if (hostId !== undefined) {
+    predicates.push('p.id = ?');
+    params.push(hostId);
+  }
+  const result = await getPool().query(
+    `SELECT p.id, p.account_id, p.name, p.deleted_at, p.created_at,
+            d.last_seen_at
+       FROM principal p
+       LEFT JOIN device d ON d.principal_id = p.id
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY p.created_at DESC, p.id DESC`,
+    params,
+  );
+  return rows(result).map(hostFromRow);
+}
+
+export async function listHosts(accountId: string): Promise<HostSummary[]> {
+  return hostQuery(accountId);
+}
+
+export async function getHost(
+  accountId: string,
+  hostId: string,
+): Promise<HostSummary | null> {
+  return (await hostQuery(accountId, hostId))[0] ?? null;
+}
+
+export async function updateHost(
+  accountId: string,
+  hostId: string,
+  changes: { name?: string; status?: HostStatus },
+): Promise<HostSummary | null> {
+  const updatedAt = nowString();
+  await withTransaction(async (conn) => {
+    const result = await conn.query(
+      `SELECT id
+         FROM principal
+        WHERE id = ? AND account_id = ? AND kind = 'host'
+        LIMIT 1
+        FOR UPDATE`,
+      [hostId, accountId],
+    );
+    if (rows(result).length === 0) return;
+
+    const assignments: string[] = [];
+    const params: unknown[] = [];
+    if (changes.name !== undefined) {
+      assignments.push('name = ?');
+      params.push(changes.name);
+    }
+    if (changes.status !== undefined) {
+      assignments.push('deleted_at = ?');
+      params.push(changes.status === 'disabled' ? updatedAt : null);
+    }
+    if (assignments.length === 0) return;
+    params.push(hostId, accountId);
+    await conn.query(
+      `UPDATE principal
+          SET ${assignments.join(', ')}
+        WHERE id = ? AND account_id = ? AND kind = 'host'`,
+      params,
+    );
+  });
+  return getHost(accountId, hostId);
+}
+
+export async function deleteHost(
+  accountId: string,
+  hostId: string,
+): Promise<boolean> {
+  const deletedAt = nowString();
+  return withTransaction(async (conn) => {
+    const result = await conn.query(
+      `SELECT id
+         FROM principal
+        WHERE id = ? AND account_id = ? AND kind = 'host'
+        LIMIT 1
+        FOR UPDATE`,
+      [hostId, accountId],
+    );
+    if (rows(result).length === 0) return false;
+    await conn.query(
+      `UPDATE principal
+          SET deleted_at = ?
+        WHERE id = ? AND account_id = ? AND kind = 'host'`,
+      [deletedAt, hostId, accountId],
+    );
+    await conn.query(
+      `UPDATE api_key
+          SET revoked_at = ?
+        WHERE principal_id = ? AND revoked_at IS NULL`,
+      [deletedAt, hostId],
+    );
+    return true;
+  });
 }
 
 export async function listPrincipals({

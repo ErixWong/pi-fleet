@@ -31,6 +31,14 @@ let lowBearer;
 let manageOnlyBearer;
 let otherReadBearer;
 let otherTaskBearer;
+let loginPrincipalId;
+let loginPassword;
+let loginBearer;
+let createdHostId;
+let createdHostBearer;
+let otherAccountId;
+let otherHostId;
+let loginAccountName;
 const postIds = [];
 const attachmentIds = [];
 let passed = 0;
@@ -46,11 +54,17 @@ function check(label, condition, detail = '') {
   }
 }
 
+function passwordHash(password) {
+  const salt = crypto.randomBytes(16);
+  const derived = crypto.scryptSync(password, salt, 64);
+  return `scrypt:${salt.toString('hex')}:${derived.toString('hex')}`;
+}
+
 async function request(method, path, token, body) {
   const response = await fetch(`${base}${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${token}`,
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -90,13 +104,18 @@ async function pollScanStatus(attachmentId) {
 
 async function fixture() {
   const accounts = await db.query(
-    `SELECT id FROM account WHERE deleted_at IS NULL ORDER BY id LIMIT 1`,
+    `SELECT id, name FROM account WHERE deleted_at IS NULL ORDER BY id LIMIT 1`,
   );
   if (accounts.length === 0) throw new Error('erix has no active account');
   const accountId = String(accounts[0].id);
+  loginAccountName = String(accounts[0].name);
   principalId = id('prn');
   deviceId = principalId;
   otherPrincipalId = id('prn');
+  loginPrincipalId = id('prn');
+  loginPassword = `rest-v2-password-${Date.now()}`;
+  otherAccountId = id('acc');
+  otherHostId = id('prn');
   keyId = id('key');
   lowKeyId = id('key');
   manageOnlyKeyId = id('key');
@@ -116,6 +135,25 @@ async function fixture() {
     `INSERT INTO principal (id, account_id, kind, name, created_at)
      VALUES (?, ?, 'user', ?, ?)`,
     [otherPrincipalId, accountId, `rest-v2-other-${otherPrincipalId}`, now()],
+  );
+  await db.query(
+    `INSERT INTO principal (id, account_id, kind, name, password_hash, created_at)
+     VALUES (?, ?, 'user', ?, ?, ?)`,
+    [loginPrincipalId, accountId, `rest-v2-login-${loginPrincipalId}`, passwordHash(loginPassword), now()],
+  );
+  await db.query(
+    `INSERT INTO account (id, name, created_at) VALUES (?, ?, ?)`,
+    [otherAccountId, `rest-v2-other-account-${otherAccountId}`, now()],
+  );
+  await db.query(
+    `INSERT INTO principal (id, account_id, kind, name, created_at)
+     VALUES (?, ?, 'host', ?, ?)`,
+    [otherHostId, otherAccountId, `rest-v2-other-host-${otherHostId}`, now()],
+  );
+  await db.query(
+    `INSERT INTO device (principal_id, hostname, os, created_at)
+     VALUES (?, 'rest-v2-other-host', 'linux', ?)`,
+    [otherHostId, now()],
   );
   await db.query(
     `INSERT INTO device (principal_id, hostname, os, created_at)
@@ -184,15 +222,75 @@ async function cleanup() {
       keyIds,
     );
   }
-  if (deviceId) await db.query(`DELETE FROM device WHERE principal_id = ?`, [deviceId]);
-  if (otherPrincipalId) await db.query(`DELETE FROM principal WHERE id = ?`, [otherPrincipalId]);
-  if (principalId) await db.query(`DELETE FROM principal WHERE id = ?`, [principalId]);
+  const createdPrincipalIds = [principalId, otherPrincipalId, loginPrincipalId, createdHostId, otherHostId]
+    .filter(Boolean);
+  if (createdPrincipalIds.length > 0) {
+    const principalPlaceholders = createdPrincipalIds.map(() => '?').join(', ');
+    await db.query(`DELETE FROM api_key WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
+    await db.query(`DELETE FROM device_executor WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
+    await db.query(`DELETE FROM device WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
+    await db.query(`DELETE FROM principal WHERE id IN (${principalPlaceholders})`, createdPrincipalIds);
+  }
+  if (otherAccountId) await db.query(`DELETE FROM account WHERE id = ?`, [otherAccountId]);
   await db.end();
 }
 
 try {
   const accountId = await fixture();
   console.log('== REST v2 write acceptance ==');
+  const badPassword = await request('POST', '/api/v2/login', undefined, {
+    username: `rest-v2-login-${loginPrincipalId}`,
+    password: 'wrong-password',
+    account_name: loginAccountName,
+  });
+  check('0a. login rejects a wrong password with 401', badPassword.response.status === 401);
+  const missingUser = await request('POST', '/api/v2/login', undefined, {
+    username: `rest-v2-missing-${Date.now()}`,
+    password: loginPassword,
+    account_name: loginAccountName,
+  });
+  check('0b. login rejects an unknown user with 401', missingUser.response.status === 401);
+  const login = await request('POST', '/api/v2/login', undefined, {
+    username: `rest-v2-login-${loginPrincipalId}`,
+    password: loginPassword,
+    account_name: loginAccountName,
+  });
+  loginBearer = login.data.key;
+  check('0c. login returns a 12-hour key',
+    login.response.status === 200
+      && typeof loginBearer === 'string'
+      && login.data.principal?.kind === 'user'
+      && typeof login.data.expires_at === 'string');
+  const loginWhoami = await request('GET', '/api/v2/whoami', loginBearer);
+  check('0d. login key authenticates /whoami',
+    loginWhoami.response.status === 200 && loginWhoami.data.principal?.kind === 'user');
+  const hostCreated = await request('POST', '/api/v2/hosts', loginBearer, {
+    name: `rest-v2-login-host-${Date.now()}`,
+  });
+  createdHostId = hostCreated.data.host?.id;
+  createdHostBearer = hostCreated.data.key;
+  check('0e. host registration returns 201 and a one-time key',
+    hostCreated.response.status === 201
+      && typeof createdHostId === 'string'
+      && typeof createdHostBearer === 'string');
+  const hostWhoami = await request('GET', '/api/v2/whoami', createdHostBearer);
+  check('0f. host key authenticates as a host',
+    hostWhoami.response.status === 200 && hostWhoami.data.principal?.kind === 'host');
+  const hostDenied = await request('GET', '/api/v2/hosts', createdHostBearer);
+  check('0g. host key without host:manage is hidden as 404', hostDenied.response.status === 404);
+  const crossAccountPatch = await request('PATCH', `/api/v2/hosts/${otherHostId}`, loginBearer, {
+    name: 'cross-account-update',
+  });
+  check('0h. cross-account host update is hidden as 404', crossAccountPatch.response.status === 404);
+  const crossAccountDelete = await request('DELETE', `/api/v2/hosts/${otherHostId}`, loginBearer);
+  check('0i. cross-account host delete is hidden as 404', crossAccountDelete.response.status === 404);
+  const rotatedHost = await request('POST', `/api/v2/hosts/${createdHostId}/keys/rotate`, loginBearer);
+  const rotatedHostBearer = rotatedHost.data.key;
+  check('0j. host key rotation returns a new usable key',
+    rotatedHost.response.status === 200 && typeof rotatedHostBearer === 'string');
+  const rotatedWhoami = await request('GET', '/api/v2/whoami', rotatedHostBearer);
+  check('0k. rotated host key authenticates',
+    rotatedWhoami.response.status === 200 && rotatedWhoami.data.principal?.kind === 'host');
   const note = await request('POST', '/api/v2/posts', bearer, {
     kind: 'note',
     body: 'REST v2 note',

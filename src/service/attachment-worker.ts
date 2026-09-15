@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { getPool } from '../db/pool.js';
-import { getSetting, getSettingInt } from './settings.js';
+import { getSetting, getSettingInt } from './new-settings.js';
 import { markScanStatus, type ScanStatus } from './resources.js';
 
 interface PendingAttachment {

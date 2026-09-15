@@ -13,6 +13,7 @@ import { agentRouter } from './routes/agent.js';
 import { v2Router } from './routes/v2/index.js';
 import { recoverStaleRunningTasks, recoverStaleClaimedTasks, autoConfirmPendingConfirm } from './scheduler.js';
 import { initSettings } from './service/settings.js';
+import { initNewSettings } from './service/new-settings.js';
 import { scanPendingAttachments } from './service/attachments.js';
 import { scanPendingAudits, scanPendingVerifications } from './service/llm.js';
 import { runPeriodicClones, runStageGates } from './service/plans.js';
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
       `✓ 新库 schema 就绪（${created.length > 0 ? `新增 ${created.length} 表：${created.join(', ')}` : '无新建表'}）`,
     );
     await initSettings();
+    await initNewSettings();
     newDbReady = true;
   } catch (error) {
     markNewDbUnavailable();
