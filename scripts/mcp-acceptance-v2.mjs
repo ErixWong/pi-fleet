@@ -49,15 +49,12 @@ const scopes = [
 ];
 
 const newDb = createPool({ ...dbOptions(process.env.DB_NAME_NEW ?? 'erix'), connectionLimit: 4 });
-const oldDb = createPool({ ...dbOptions(process.env.DB_NAME ?? 'task_dispatch'), connectionLimit: 2 });
 let newPrincipalId;
 let newDeviceId;
 let newKeyId;
 let lowKeyId;
-let oldAgentId;
 let mainKey;
 let lowKey;
-let oldKey;
 const postIds = [];
 const attachmentIds = [];
 let passed = 0;
@@ -142,16 +139,6 @@ async function createFixtures() {
     [lowKeyId, newPrincipalId, hash(lowKey), JSON.stringify(['task:read']), createdAt],
   );
 
-  const oldKeyValue = key('pd');
-  oldKey = oldKeyValue;
-  const oldRows = await oldDb.query(
-    `INSERT INTO agents
-       (agent_id, name, hostname, description, system_prompt, tags, accept_external,
-        run_user, agent_cli, key_hash, status, visible, created_at)
-     VALUES (?, ?, ?, '', NULL, '', 0, NULL, NULL, ?, 'active', 1, ?)`,
-    [`mcp-v2-${Date.now()}`, 'mcp-v2-legacy', 'mcp-acceptance-v2', hash(oldKeyValue), createdAt],
-  );
-  oldAgentId = oldRows.insertId;
   return accountId;
 }
 
@@ -199,16 +186,13 @@ async function cleanup() {
   }
   if (newDeviceId) await newDb.query(`DELETE FROM device WHERE principal_id = ?`, [newDeviceId]);
   if (newPrincipalId) await newDb.query(`DELETE FROM principal WHERE id = ?`, [newPrincipalId]);
-  if (oldAgentId) await oldDb.query(`DELETE FROM agents WHERE id = ?`, [oldAgentId]);
   await newDb.end();
-  await oldDb.end();
 }
 
 try {
   await createFixtures();
   const client = await mcpClient(mcpPath, mainKey);
   const lowClient = await mcpClient(mcpPath, lowKey);
-  const legacyClient = await mcpClient('/mcp', oldKey);
 
   if (phase === 'write') {
     console.log('== MCP v2 write acceptance ==');
@@ -376,7 +360,6 @@ try {
     }
     await client.close();
     await lowClient.close();
-    await legacyClient.close();
   } else {
   console.log('== MCP v2 read acceptance ==');
   const who = await call(client, 'whoami', {});
@@ -475,14 +458,8 @@ try {
       && !deniedText.includes(String(detailRows[0].kind)),
     deniedText);
 
-  const legacyWho = await call(legacyClient, 'whoami', {});
-  check('8. old /mcp still exposes legacy whoami agent_id',
-    typeof legacyWho.payload.agent_id === 'string',
-    JSON.stringify(legacyWho.payload));
-
   await client.close();
   await lowClient.close();
-  await legacyClient.close();
   }
 } catch (error) {
   failed += 1;

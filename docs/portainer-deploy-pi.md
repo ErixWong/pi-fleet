@@ -15,7 +15,7 @@
 | 容器 | `pi-host-1` / `pi-host-2` / `pi-host-3` |
 | 镜像 | `node:22-slim`（node 官方镜像，**不 build 自定义镜像**；pi/sshd/sudo 由挂载的初始化脚本首次启动自动安装） |
 | 端口 | `2201 / 2202 / 2203 → 22`（SSH 登录用） |
-| 每容器内容 | node + pi CLI + agent-daemon 常驻 + sshd（任务执行 + 对话桥接合一，entrypoint 自动初始化） |
+| 每容器内容 | node + pi CLI + agent-daemon 常驻 + sshd（任务执行，entrypoint 自动初始化） |
 
 **bind mount（统一 `/docker/<名称>/` 约定，数据持久化）：**
 
@@ -55,7 +55,7 @@ docker image inspect node:22-slim >/dev/null && echo 'node:22-slim 已就绪'   
 
 ### 2.2 平台侧注册 agent
 
-1. 平台 Web/API 注册 3 台主机（如 `docker主机-1/2/3`），各拿一个 agent key
+1. 平台 Web/API v2 注册 3 台主机（如 `docker主机-1/2/3`），各拿一个 host key
 2. 把 key 填进 `/docker/pi-hosts/.env`（**600 权限，不入仓库**）：
 
 ```bash
@@ -182,7 +182,7 @@ docker logs pi-host-1 | tail -20    # 应看到 [init] pi 配置已就绪 / sshd
 ssh app@127.0.0.1 -p 2201           # SSH 可登录（密码 = SSH_PASSWORD）
 ```
 
-平台侧：Agent 列表 3 台在线、目录上报（各 3 个 `~/projects` 子目录）、对话会话可通。
+平台侧：主机列表显示 3 台在线；任务执行通过 `/api/v2` 和 `/mcp2` 验证。
 
 ---
 

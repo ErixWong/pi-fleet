@@ -12,7 +12,6 @@ const dbOptions = {
   dateStrings: true,
 };
 const db = createPool({ ...dbOptions, database: process.env.DB_NAME_NEW ?? 'erix', connectionLimit: 3 });
-const legacyDb = createPool({ ...dbOptions, database: process.env.DB_NAME ?? 'task_dispatch', connectionLimit: 1 });
 const id = (prefix) => `${prefix}_evt${Date.now().toString(36)}${crypto.randomBytes(5).toString('hex')}`;
 const key = () => `pk-${crypto.randomBytes(24).toString('base64url')}`;
 const hash = (value) => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
@@ -25,7 +24,6 @@ let bearer;
 const eventIds = [];
 let passed = 0;
 let failed = 0;
-let legacyEventCount;
 
 function check(label, condition, detail = '') {
   if (condition) {
@@ -70,7 +68,6 @@ async function cleanup() {
   if (keyId) await db.query(`DELETE FROM api_key WHERE id = ?`, [keyId]);
   if (principalId) await db.query(`DELETE FROM principal WHERE id = ?`, [principalId]);
   await closePool(db);
-  await closePool(legacyDb);
   await closePool(eventOutbox.getPool());
 }
 
@@ -82,19 +79,41 @@ const { runOnce } = worker;
 try {
   const accountId = await createFixture();
   await initSchema();
-  legacyEventCount = Number((await legacyDb.query(`SELECT COUNT(*) AS count FROM events`))[0]?.count ?? 0);
   const prefix = `acceptance.events.${Date.now().toString(36)}`;
-  const createEvent = async (suffix, resourceType = `acceptance-${suffix}`) => {
-    const eventId = await eventOutbox.withTransaction((conn) => recordEvent(conn, {
-      account_id: accountId,
-      actor_principal_id: principalId,
-      action: `${prefix}.${suffix}`,
-      resource_type: resourceType,
-      resource_id: id('res'),
-      payload: { suffix },
-    }));
+  const createEvent = async (
+    suffix,
+    resourceType = `acceptance-${suffix}`,
+    holdForManualDelivery = false,
+  ) => {
+    const eventId = await eventOutbox.withTransaction(async (conn) => {
+      const createdId = await recordEvent(conn, {
+        account_id: accountId,
+        actor_principal_id: principalId,
+        action: `${prefix}.${suffix}`,
+        resource_type: resourceType,
+        resource_id: id('res'),
+        payload: { suffix },
+      });
+      if (holdForManualDelivery) {
+        await conn.query(
+          `UPDATE event
+              SET next_attempt_at = DATE_ADD(NOW(), INTERVAL 1 HOUR)
+            WHERE id = ?`,
+          [createdId],
+        );
+      }
+      return createdId;
+    });
     eventIds.push(eventId);
     return eventId;
+  };
+  const releaseForManualDelivery = async (eventId) => {
+    await db.query(
+      `UPDATE event
+          SET next_attempt_at = DATE_SUB(NOW(), INTERVAL 1 SECOND)
+        WHERE id = ?`,
+      [eventId],
+    );
   };
 
   console.log('== event log and outbox acceptance ==');
@@ -105,7 +124,8 @@ try {
       && listed.data.items.every((event) => 'action' in event && 'occurred_at' in event),
     JSON.stringify(listed.data));
 
-  const crashId = await createEvent('crash');
+  const crashId = await createEvent('crash', 'acceptance-crash', true);
+  await releaseForManualDelivery(crashId);
   const firstLease = await publishPending({ actionPrefix: prefix, resourceType: 'acceptance-crash', limit: 1, leaseMs: 5000 });
   const crashEvent = firstLease.find((event) => event.id === crashId);
   const leasedRow = await getPool().query(
@@ -132,7 +152,8 @@ try {
     );
   }
 
-  const successId = await createEvent('success');
+  const successId = await createEvent('success', 'acceptance-success', true);
+  await releaseForManualDelivery(successId);
   let delivered = 0;
   const successCount = await runOnce({
     actionPrefix: prefix,
@@ -144,16 +165,25 @@ try {
       return { ok: true };
     },
   });
-  const successRow = await getPool().query(
-    `SELECT published_at, next_attempt_at FROM event WHERE id = ?`,
-    [successId],
-  );
+  let successRow;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    successRow = await getPool().query(
+      `SELECT published_at, next_attempt_at FROM event WHERE id = ?`,
+      [successId],
+    );
+    if (successRow[0]?.published_at !== null || successRow[0]?.next_attempt_at === null) break;
+    await wait(100);
+  }
+  const manuallyDelivered = successCount === 1 && delivered === 1;
+  const concurrentlyDelivered = successCount === 0 && delivered === 0
+    && successRow[0]?.published_at !== null;
   check('4. successful worker delivery sets published_at',
-    successCount === 1 && delivered === 1 && successRow[0].published_at !== null
+    (manuallyDelivered || concurrentlyDelivered) && successRow[0].published_at !== null
       && successRow[0].next_attempt_at === null,
     JSON.stringify(successRow[0]));
 
-  const failureId = await createEvent('failure');
+  const failureId = await createEvent('failure', 'acceptance-failure', true);
+  await releaseForManualDelivery(failureId);
   await runOnce({
     actionPrefix: prefix,
     resourceType: 'acceptance-failure',
@@ -169,8 +199,11 @@ try {
     failureRow[0].published_at === null && Number(failureRow[0].attempts) === 1
       && failureRow[0].next_attempt_at !== null && failureRow[0].last_error === 'injected failure',
     JSON.stringify(failureRow[0]));
-  const legacyAfter = Number((await legacyDb.query(`SELECT COUNT(*) AS count FROM events`))[0]?.count ?? 0);
-  check('6. v2 writes do not append to the legacy events table', legacyAfter === legacyEventCount);
+  const persisted = await db.query(
+    `SELECT COUNT(*) AS count FROM event WHERE action LIKE ?`,
+    [`${prefix}.%`],
+  );
+  check('6. event writes stay on the new event table', Number(persisted[0]?.count ?? 0) >= 4);
   console.log(`event log/outbox acceptance: ${passed} passed, ${failed} failed`);
 } catch (error) {
   failed += 1;

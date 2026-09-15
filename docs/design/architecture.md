@@ -1,60 +1,59 @@
-# 架构设计（任务分发平台）
+# 当前架构：任务分发平台 v2
 
-> 长期有效的架构决策记录。任务流水见 docs/tasks/，本文件只沉淀跨任务结论。
+> 本文是当前实现说明。旧的 session 管理员 API、旧 agent REST、旧 MCP、对话 WS、
+> 编排、LLM 审核和旧设置面已在 issue #23 步 4 删除；旧设计文档不再是运行契约。
 
-## 定位
+## 运行面
 
-人类在 Web 上注册 agent、发布任务（指派/定时），多台 Linux 设备上的 pi-agent
-通过 REST/MCP 接入平台：领任务、执行、汇报结果、投递报告。
+```
+Web ── Bearer key ──► /api/v2 ──► service/ ──► 新库
+pi ── Bearer key ──► /mcp2  ────► mcp/    ──► service/ ──► 新库
+```
 
-## 核心原则
+平台只启动一个 MariaDB 连接池。数据库名解析顺序是
+`DB_NAME_NEW`、`DB_NAME`、`erix`；旧库名会在连接前拒绝。`src/db/schema.ts` 是唯一
+schema 来源，启动时使用幂等 `CREATE TABLE IF NOT EXISTS` 初始化。
 
-1. **程序的事交给程序，智能的事交给 LLM**
-   - 调度层（systemd 闹钟脚本）做心跳/轮询/回传——纯程序，零 token，永不打断
-   - LLM（pi）只在有任务时存在，干完销毁；无常驻 LLM = 零 token 浪费
-2. **两通道独立，共用同一 agent key**
-   - REST `/api/agent/*`（Bearer key）：调度脚本的程序通道
-   - MCP `/mcp`（Bearer key）：pi 的 LLM 工具通道
-   - 两通道共享同一业务层 `src/service/tasks.ts`，防止双套实现漂移
-3. **单任务单进程**：每个 pi 进程只干一个任务，任务身份在拉起时绑定
-   （进程命名 exec-T-xxx + AGENTS.md 简报 + 工作目录）
+## 代码分层
 
-## 任务模型
+- `auth-principal.ts` 从 Bearer key 建立 principal context，统一处理 scope 和账号隔离。
+- `service/identity.ts` 管理 account、principal、device 和 api_key。
+- `service/posts.ts` 管理 post 原语、线程、目标和摘要。
+- `service/task-flow.ts` 管理 `post_task` 状态机：发布、认领、提交、验收、打回、
+  重开、取消和改派。
+- `service/resources.ts` 管理附件、交付物、去重、引用和下载权限。
+- `service/event-outbox.ts` 在业务事务内写入 `event`，并提供可租约的待发布事件。
+- `service/event-log.ts` 为管理端读取事件；`outbox-worker.ts` 负责发布和重试。
+- `attachment-worker.ts` 扫描待处理附件；`lifecycle.ts` 回收超时认领并自动确认过期
+  `pending_confirm` 任务。
+- `new-settings.ts` 只缓存附件和生命周期 worker 所需的运行参数，不提供旧设置管理 API。
 
-- **指派任务（manual）**：管理员写自然语言指令，assign 给指定 agent，状态 pending → done/failed
-- **定时任务（scheduled）**：周期（daily/weekly/hourly）+ 时间窗口（错峰）+ 报告主题
-- **状态机**：pending → running（放行/认领）→ done / failed / cancelled
-- **workdir（可选）**：有则原地模式（cwd=项目目录），无则沙箱（cwd=tasks/{id}/）
+REST v2 和 MCP2 都调用同一 service 层。REST 路由负责 HTTP 校验和 JSON 形状，MCP
+工具负责 MCP 参数和工具错误封装；业务规则不在两处复制。
 
-## 关键决策
+## 任务状态
 
-### 错峰调度（next_due_at = 窗口内随机时刻）
-定时任务不固定准点，`next_due_at` 取「下一周期窗口内的随机时刻」，各家 agent
-到期时刻散布在整个窗口 → 天然错峰，避免 provider 压力。放行只判断
-`next_due_at <= now`，窗口语义已编码进随机时刻；放行即推进下一周期。
+任务是一个 `post(kind='task')` 加一个 `post_task` 扩展。核心状态为：
 
-### 超时回收 + 长任务续期
-- 平台每小时回收「认领后 2h 无活动」的 running 任务 → failed（防卡死/离线僵尸）
-- 长任务（>1h）通过 `report_progress`/`renew` 刷新 `last_activity_at` 续期，避免误杀
-- 超时判定基于 last_activity_at（最后活跃），而非 claimed_at（认领）
+```
+pending_audit → open → claimed → submitted → pending_confirm → done
+                         └─────────────── reject ───────────────┘
+```
 
-### 同 workdir 防并发
-poll/check_due_tasks 放行时，排除「同 agent 同 workdir 已有 running」的任务，
-防止多个 pi 同时改同一项目目录。项目内并发靠 git 分支隔离（建议）。
+当前实现不提供旧的 `pending/running/resolved/blocked/active` 任务面，也不提供 plan、
+stage、周期克隆或 LLM 门禁。任务列表通过 `/api/v2/tasks?view=due|mine|pool` 分页。
 
-### 时间处理
-所有时间由 Node 侧生成本地字符串（YYYY-MM-DD HH:MM:SS），数据库只存不判断
-（窗口判断不依赖 DB NOW()），避免容器 UTC 与宿主时区错位。
+## 事件和后台 worker
 
-### 安全
-- agent key：`pd-` 前缀 + 32 字符 base64url（192bit 熵）；库存 sha256，只展示一次，支持重置
-- 越权隔离：所有任务查询按 assignee_id 过滤
-- agent 侧：pi 以专用低权限用户运行，特权走 sudoers 白名单
+业务事务通过 `recordEvent` 将状态变更和审计 payload 同步写入 `event`。HTTP
+`/api/v2/events` 读取 `event-log.ts` 的公共投影；outbox worker 对需要发布的事件执行
+lease、成功确认和退避重试。它不是另一套事件表，也不会访问旧库。
 
-## 演进储备（未做）
+启动时依次初始化 schema、加载 `new-settings` 缓存，并启动 outbox、attachment scan
+和 lifecycle 三个 worker。新库不可用时进程直接退出，不会挂载降级 API。
 
-- MCP 官方 Tasks 规范（2025-11）异步任务——协议标准化方向
-- 附件上传（结果文件由 agent 本地保留，平台只记文本/路径）
-- 任务依赖/跨机编排
-- 向量检索（见 db-mariadb.md）
-- **私有可信 → 开放协作**：多账号、公开任务池、agent 自主接单、跨机协作（见 `open-ecosystem.md`）
+## 保留的 schema 预留
+
+`tag`、`post_tag`、`reputation_event`、`pipeline`、`pipeline_step`、`trigger`、
+`llm_provider`、`llm_model`、`llm_call` 等表仍由 schema 定义。它们当前没有服务层
+消费者，是后续能力的预留，不代表对应旧功能仍存在。

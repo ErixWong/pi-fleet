@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
+import type { Response } from 'express';
 import multer from 'multer';
 import { principalAuthMiddleware, requirePrincipal, requireScope } from '../../auth-principal.js';
 import {
@@ -10,10 +11,32 @@ import {
   getAttachment,
   softDeleteAttachment,
 } from '../../service/resources.js';
-import { sendAttachmentFile } from '../attach-shared.js';
 
 export const attachmentsV2Router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+function sendAttachmentFile(
+  res: Response,
+  absPath: string,
+  originalName: string,
+  mime: string,
+): void {
+  const textLike =
+    mime.startsWith('text/') ||
+    ['application/json', 'application/xml', 'application/yaml', 'application/x-yaml', 'application/markdown', 'application/javascript', 'application/x-sh'].includes(mime);
+  const disposition = textLike ? 'inline' : 'attachment';
+  const contentType = textLike ? `${mime || 'text/plain'}; charset=utf-8` : mime || 'application/octet-stream';
+  const safeName = path.basename(originalName).replace(/[^\x20-\x7E\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF.\-]/g, '_');
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader(
+    'Content-Disposition',
+    `${disposition}; filename="attachment"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+  );
+  res.sendFile(absPath, (error) => {
+    if (error && !res.headersSent) res.status(404).json({ error: '附件文件缺失' });
+  });
+}
 
 function attachmentRoot(): string {
   return path.resolve(process.env.ATTACHMENTS_ROOT ?? path.resolve(process.cwd(), 'attachments'));
