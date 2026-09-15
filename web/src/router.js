@@ -7,6 +7,7 @@ const routes = [
   { path: '/tasks', component: () => import('./views/Tasks.vue'), meta: { auth: true } },
   { path: '/tasks/:taskId', component: () => import('./views/TaskDetail.vue'), meta: { auth: true } },
   { path: '/hosts', component: () => import('./views/Hosts.vue'), meta: { auth: true } },
+  { path: '/channels/:channelId?', component: () => import('./views/Channels.vue'), meta: { auth: true } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];
 

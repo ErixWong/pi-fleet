@@ -171,6 +171,7 @@ export interface PostDetail {
 
 export interface ListPostsFilter {
   account_id: string;
+  principal_id?: string;
   kind?: PostKind;
   root_id?: string;
   parent_id?: string | null;
@@ -462,6 +463,32 @@ async function createPostWithConnection(
       throw notFound('parent post belongs to another account');
     }
     rootId = stringValue(parent.root_id);
+    if (input.kind === 'message') {
+      const channelRows = rows(await conn.query(
+        `SELECT c.author_principal_id, ch.host_principal_id, ch.status,
+                hp.deleted_at AS host_deleted_at
+           FROM post c
+           JOIN post_channel ch ON ch.post_id = c.id
+           JOIN principal hp ON hp.id = ch.host_principal_id
+          WHERE c.id = ? AND c.kind = 'channel'
+          LIMIT 1`,
+        [rootId],
+      ));
+      const channel = channelRows[0];
+      if (
+        channel
+        && (
+          channel.status !== 'open'
+          || channel.host_deleted_at !== null && channel.host_deleted_at !== undefined
+          || (
+            stringValue(channel.author_principal_id) !== input.author_principal_id
+            && stringValue(channel.host_principal_id) !== input.author_principal_id
+          )
+        )
+      ) {
+        throw notFound('channel not found');
+      }
+    }
   }
 
   await conn.query(
@@ -755,6 +782,18 @@ export async function listPosts(filter: ListPostsFilter): Promise<ListPostsResul
     }
     predicates.push('p.kind = ?');
     params.push(filter.kind);
+  }
+  if (filter.kind === 'channel' && filter.principal_id) {
+    predicates.push(
+      `(p.author_principal_id = ?
+        OR EXISTS (
+          SELECT 1 FROM post_channel visible_channel
+           WHERE visible_channel.post_id = p.id
+             AND visible_channel.host_principal_id = ?
+             AND visible_channel.status = 'open'
+        ))`,
+    );
+    params.push(filter.principal_id, filter.principal_id);
   }
   if (filter.root_id !== undefined) {
     predicates.push('p.root_id = ?');

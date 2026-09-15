@@ -50,6 +50,9 @@ function logout() {
         <router-link to="/hosts" class="rail-link" :class="{ active: isRouteActive('/hosts') }" title="主机">
           <i class="bi bi-pc-display"></i>
         </router-link>
+        <router-link to="/channels" class="rail-link" :class="{ active: isRouteActive('/channels') }" title="对话">
+          <i class="bi bi-chat-dots"></i>
+        </router-link>
       </div>
     </aside>
 

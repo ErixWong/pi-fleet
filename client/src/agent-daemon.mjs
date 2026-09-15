@@ -27,6 +27,11 @@ const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'confi
 const PI_MCP_CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json');
 const WORK_ROOT = process.env.WORK_ROOT ?? path.join(os.homedir(), 'pi-agent-work');
 const POLL_MS = Number(process.env.POLL_MS ?? 60_000);
+const CHANNEL_POLL_MS = Number(process.env.CHANNEL_POLL_MS ?? 5_000);
+const CHANNEL_TIMEOUT_MS = Number(process.env.CHANNEL_TIMEOUT_MS ?? 300_000);
+const CHANNEL_MAX_CONCURRENCY = Math.max(1, Number(process.env.CHANNEL_MAX_CONCURRENCY ?? 2));
+const CHANNEL_STATE_PATH = process.env.CHANNEL_STATE_PATH
+  ?? path.join(os.homedir(), '.config', 'pi-agent', 'channels-state.json');
 const PAGE_SIZE = Number(process.env.TASK_PAGE_SIZE ?? 20);
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS ?? 1_800_000);
 const RECENT_DONE_TTL_MS = Number(process.env.RECENT_DONE_TTL_MS ?? 600_000);
@@ -222,6 +227,230 @@ async function api(method, pathname, body) {
     throw error;
   }
   return data;
+}
+
+const channelState = readJsonFile(CHANNEL_STATE_PATH);
+const channelCursors = new Map(
+  Object.entries(channelState).filter(([, value]) => typeof value === 'string'),
+);
+const channelSessions = new Map();
+let channelActive = 0;
+const channelWaiters = [];
+let daemonPrincipalId = '';
+
+function saveChannelState() {
+  const state = Object.fromEntries(channelCursors);
+  const tempPath = `${CHANNEL_STATE_PATH}.tmp-${process.pid}`;
+  try {
+    mkdirSync(path.dirname(CHANNEL_STATE_PATH), { recursive: true, mode: 0o700 });
+    writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, CHANNEL_STATE_PATH);
+    chmodSync(CHANNEL_STATE_PATH, 0o600);
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch { /* 临时文件不存在或已改名 */ }
+    console.log(`[daemon] 对话游标落盘失败：${error.message}`);
+  }
+}
+
+function setChannelCursor(channelId, cursor) {
+  if (!cursor) return;
+  if (channelCursors.get(channelId) === cursor) return;
+  channelCursors.set(channelId, cursor);
+  saveChannelState();
+}
+
+async function acquireChannelSlot() {
+  if (channelActive < CHANNEL_MAX_CONCURRENCY) {
+    channelActive += 1;
+    return;
+  }
+  await new Promise((resolve) => channelWaiters.push(resolve));
+  channelActive += 1;
+}
+
+function releaseChannelSlot() {
+  channelActive = Math.max(0, channelActive - 1);
+  const next = channelWaiters.shift();
+  if (next) next();
+}
+
+async function loadDaemonPrincipal() {
+  if (daemonPrincipalId) return daemonPrincipalId;
+  const result = await api('GET', '/api/v2/whoami');
+  const id = result?.principal?.id;
+  if (typeof id !== 'string' || !id) throw new Error('whoami response has no principal id');
+  daemonPrincipalId = id;
+  return daemonPrincipalId;
+}
+
+function channelMessageUrl(channelId, params = {}) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return `/api/v2/channels/${encodeURIComponent(channelId)}/messages${suffix}`;
+}
+
+async function nextChannelMessage(channel, principalId) {
+  let after = channelCursors.get(channel.id);
+  let firstPage = true;
+  while (true) {
+    const page = await api('GET', channelMessageUrl(channel.id, {
+      ...(after ? { after } : {}),
+      limit: 100,
+    }));
+    const items = Array.isArray(page?.items) ? page.items : [];
+    for (const item of items) {
+      const id = String(item?.id ?? '');
+      if (!id) continue;
+      if (String(item?.author_principal_id ?? '') === principalId) {
+        console.log(`[daemon][channel-${channel.id}] 跳过自身消息 ${id}`);
+        setChannelCursor(channel.id, id);
+        after = id;
+        continue;
+      }
+      return item;
+    }
+    if (!page?.has_more || !page?.next_after || page.next_after === after) return null;
+    after = String(page.next_after);
+    if (firstPage && !channelCursors.has(channel.id)) {
+      console.log(`[daemon][channel-${channel.id}] 初次同步历史消息`);
+    }
+    firstPage = false;
+  }
+}
+
+async function loadChannelHistory(channelId, currentId) {
+  const result = await api('GET', channelMessageUrl(channelId, { limit: 20 }));
+  const items = Array.isArray(result?.items) ? result.items : [];
+  return items
+    .filter((item) => String(item?.id ?? '').localeCompare(String(currentId)) <= 0)
+    .slice(-20);
+}
+
+function channelPrompt(channel, message, history, cwd) {
+  const lines = [
+    '你正在参与人与主机的一对一实时对话，不是任务执行。',
+    `对话通道 ID：${channel.id}`,
+    `对方主机名称：${String(channel.host?.name ?? '')}`,
+    `当前新消息：${threadPostLabel(message)}`,
+    '',
+    '最近对话历史（含双方，最多 20 条）：',
+    ...(history.length > 0 ? history.map(threadPostLabel) : ['暂无历史']),
+    '',
+    `工作目录：${cwd}`,
+    '回答规则：简短、直接回答用户；这是对话，不要调用任何 task 相关工具，也不要认领、提交或处理任务。',
+    `需要回复时，必须使用 post(action="reply", parent_id="${channel.id}", body="...") 回复到当前通道。`,
+    '需要执行命令时可以执行，但不要把命令执行当成任务流程；完成后仍用上述 post reply 汇报。',
+  ];
+  return lines.join('\n');
+}
+
+function runPiForChannel(channelId, prompt, cwd) {
+  return new Promise((resolve, reject) => {
+    const invocation = buildAgentInvocation(prompt);
+    const child = spawnCli(invocation.cmd, invocation.args, {
+      cwd,
+      env: invocation.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let output = '';
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    child.stdout?.on('data', (data) => {
+      output = (output + data.toString()).slice(-64 * 1024);
+    });
+    child.stderr?.on('data', (data) => {
+      console.log(`[daemon][channel-${channelId}] ${String(data).slice(0, 400)}`);
+    });
+    const timeoutTimer = setTimeout(() => {
+      console.log(`[daemon][channel-${channelId}] 对话执行超时（>${CHANNEL_TIMEOUT_MS / 1000}s）`);
+      try { child.kill(); } catch { /* already dead */ }
+      finish(new Error(`对话执行超时（超过 ${CHANNEL_TIMEOUT_MS / 60000} 分钟）`));
+    }, CHANNEL_TIMEOUT_MS);
+    child.on('close', (code, signal) => {
+      if (code === 0) finish(null, output);
+      else finish(new Error(`对话执行器异常退出（code=${code ?? signal ?? '?'})`));
+    });
+    child.on('error', (error) => finish(error));
+  });
+}
+
+async function reportChannelFailure(channelId, error) {
+  console.log(`[daemon][channel-${channelId}] pi 处理失败：${error.message}`);
+  try {
+    await api('POST', `/api/v2/channels/${encodeURIComponent(channelId)}/messages`, {
+      body: '抱歉，这次处理失败，请稍后再试。',
+    });
+  } catch (replyError) {
+    console.log(`[daemon][channel-${channelId}] 发送失败说明也失败：${replyError.message}`);
+  }
+}
+
+async function runChannelMessage(channel, message) {
+  await acquireChannelSlot();
+  try {
+    const cwd = path.join(WORK_ROOT, 'channels', channel.id);
+    mkdirSync(cwd, { recursive: true });
+    for (const directory of ['input', 'tmp', 'output']) {
+      mkdirSync(path.join(cwd, directory), { recursive: true });
+    }
+    const history = await loadChannelHistory(channel.id, message.id);
+    console.log(`[daemon][channel-${channel.id}] 收到 ${message.id}，纳入历史 ${history.length} 条`);
+    await runPiForChannel(
+      channel.id,
+      channelPrompt(channel, message, history, cwd),
+      cwd,
+    );
+    console.log(`[daemon][channel-${channel.id}] pi 完成 ${message.id}`);
+  } catch (error) {
+    await reportChannelFailure(channel.id, error);
+  } finally {
+    setChannelCursor(channel.id, String(message.id));
+    channelSessions.delete(channel.id);
+    releaseChannelSlot();
+  }
+}
+
+async function pollChannels() {
+  let principalId;
+  try {
+    principalId = await loadDaemonPrincipal();
+  } catch (error) {
+    console.log(`[daemon] channel poll 鉴权失败：${error.message}`);
+    return;
+  }
+  let result;
+  try {
+    result = await api('GET', '/api/v2/channels');
+  } catch (error) {
+    console.log(`[daemon] channel poll 失败：${error.message}`);
+    return;
+  }
+  const channels = Array.isArray(result?.items) ? result.items : [];
+  for (const channel of channels) {
+    const channelId = String(channel?.id ?? '');
+    if (!channelId || channelSessions.has(channelId)) continue;
+    let message;
+    try {
+      message = await nextChannelMessage(channel, principalId);
+    } catch (error) {
+      console.log(`[daemon][channel-${channelId}] 拉取消息失败：${error.message}`);
+      continue;
+    }
+    if (!message) continue;
+    channelSessions.set(channelId, { messageId: String(message.id), startedAt: Date.now() });
+    void runChannelMessage(channel, message);
+  }
 }
 
 const execSessions = new Map();
@@ -620,4 +849,18 @@ async function startTaskPolling() {
 
 syncPiMcpConfig();
 void startTaskPolling();
-console.log(`[daemon] agent-daemon 启动 key=${AGENT_KEY.slice(0, 8)}… pi work=${WORK_ROOT} poll=${POLL_MS / 1000}s`);
+let channelPolling = false;
+async function startChannelPolling() {
+  if (channelPolling) return;
+  channelPolling = true;
+  while (true) {
+    await pollChannels();
+    await new Promise((resolve) => setTimeout(resolve, CHANNEL_POLL_MS));
+  }
+}
+
+void startChannelPolling();
+console.log(
+  `[daemon] agent-daemon 启动 key=${AGENT_KEY.slice(0, 8)}… `
+  + `pi work=${WORK_ROOT} task-poll=${POLL_MS / 1000}s channel-poll=${CHANNEL_POLL_MS / 1000}s`,
+);

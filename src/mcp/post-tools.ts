@@ -18,6 +18,7 @@ import {
 } from '../service/posts.js';
 import { publishTask } from '../service/task-flow.js';
 import { canReadAttachment, type Attachment } from '../service/resources.js';
+import { canAccessChannel } from '../service/channels.js';
 import {
   mcpPrincipal,
   guardScope,
@@ -239,6 +240,12 @@ export async function readPostDetail(
 ): Promise<Record<string, unknown> | null> {
   const detail = await getPostDetail(id);
   if (!detail || detail.post.deleted_at || detail.post.account_id !== accountId) return null;
+  if (
+    detail.post.kind === 'channel'
+    && (!detail.channel || !await canAccessChannel(accountId, principalId, detail.post.id))
+  ) {
+    return null;
+  }
   const deliverables = await Promise.all(detail.deliverables.map(async (deliverable) => {
     const attachment = deliverable.attachment;
     if (!attachment || typeof attachment !== 'object') return deliverable;
@@ -368,6 +375,15 @@ export function registerPostTools(server: McpServer): void {
         if (args.action === 'reply') {
           guardScope('post:write');
           if (!args.parent_id || args.body === undefined) return toolErr('parent_id and body are required');
+          const parent = await getPostDetail(args.parent_id);
+          if (!parent || parent.post.account_id !== context.account_id) return toolErr('not found');
+          if (
+            parent.post.kind === 'channel'
+            && (!parent.channel
+              || !await canAccessChannel(context.account_id, context.principal.id, parent.post.id))
+          ) {
+            return toolErr('not found');
+          }
           const post = await replyPost({
             parent_id: args.parent_id,
             author_principal_id: context.principal.id,
@@ -447,6 +463,7 @@ export function registerPostTools(server: McpServer): void {
           : args.page_size;
         return toolOk(await readPostList({
           account_id: context.account_id,
+          principal_id: context.principal.id,
           kind: args.kind,
           root_id: args.root_id,
           parent_id: args.parent_id,

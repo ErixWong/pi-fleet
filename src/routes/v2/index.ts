@@ -3,6 +3,7 @@ import { principalAuthMiddleware, requirePrincipal } from '../../auth-principal.
 import { AppError } from '../../util/errors.js';
 import { attachmentsV2Router } from './attachments.js';
 import { authV2Router } from './auth.js';
+import { channelsV2Router } from './channels.js';
 import { eventsV2Router } from './events.js';
 import { hostsV2Router } from './hosts.js';
 import { identitiesV2Router } from './identities.js';
@@ -28,6 +29,7 @@ v2Router.get('/whoami', principalAuthMiddleware(), (_req, res) => {
 });
 
 v2Router.use('/posts', postsV2Router);
+v2Router.use('/channels', channelsV2Router);
 v2Router.use('/tasks', tasksV2Router);
 v2Router.use('/attachments', attachmentsV2Router);
 v2Router.use('/events', eventsV2Router);

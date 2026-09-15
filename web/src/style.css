@@ -944,3 +944,58 @@ code { color: var(--code-text); }
 .md-content tr:nth-child(even) td { background: var(--table-stripe-bg); }
 .md-content hr { border-color: var(--border-soft); margin: 1em 0; }
 .md-content img { max-width: 100%; border-radius: 0.5rem; }
+
+/* 一对一主机对话 */
+.channel-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 1rem;
+  min-height: min(70vh, 760px);
+}
+.channel-sidebar, .channel-conversation { min-height: 0; overflow: hidden; }
+.channel-sidebar { display: flex; flex-direction: column; }
+.channel-list { overflow-y: auto; }
+.channel-list-item { border-color: var(--border-soft); min-height: 88px; }
+.channel-list-item.active { color: var(--text-strong); background: var(--accent-soft) !important; border-left: 3px solid var(--accent); }
+.channel-online-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--text-faint);
+  box-shadow: 0 0 0 3px var(--surface-strong);
+}
+.channel-online-dot.online { background: var(--badge-success-color); }
+.channel-conversation { display: flex; flex-direction: column; }
+.channel-conversation > .card-header { flex-shrink: 0; }
+.channel-messages { flex: 1; min-height: 260px; overflow-y: auto; padding: 1.25rem; }
+.channel-message-stack { display: flex; flex-direction: column; gap: 0.75rem; }
+.channel-message-row { display: flex; justify-content: flex-start; }
+.channel-message-row.mine { justify-content: flex-end; }
+.channel-message-bubble {
+  max-width: min(75%, 680px);
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.85rem 0.85rem 0.85rem 0.2rem;
+  background: var(--surface-strong);
+  color: var(--text-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.channel-message-row.mine .channel-message-bubble {
+  border-radius: 0.85rem 0.85rem 0.2rem 0.85rem;
+  border-color: var(--accent-border-hover);
+  background: var(--accent-soft);
+}
+.channel-message-author { color: var(--accent-text); font-size: 0.75rem; font-weight: 700; margin-bottom: 0.2rem; }
+.channel-message-body { line-height: 1.55; }
+.channel-message-bubble time { display: block; color: var(--text-faint); font-size: 0.7rem; margin-top: 0.35rem; }
+.channel-composer { flex-shrink: 0; padding: 0.85rem 1rem 1rem; border-top: 1px solid var(--border-soft); }
+.channel-composer textarea { resize: vertical; min-height: 48px; }
+.channel-empty { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+
+@media (max-width: 800px) {
+  .channel-layout { grid-template-columns: 1fr; min-height: 0; }
+  .channel-sidebar { max-height: 360px; }
+  .channel-conversation { min-height: 65vh; }
+  .channel-message-bubble { max-width: 88%; }
+}

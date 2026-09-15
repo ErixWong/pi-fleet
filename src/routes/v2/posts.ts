@@ -20,6 +20,7 @@ import {
   removeTarget,
   replyPost,
 } from '../../service/posts.js';
+import { canAccessChannel } from '../../service/channels.js';
 import { publishTask } from '../../service/task-flow.js';
 import type { ListPostsFilter, PostKind, PostVisibility } from '../../service/posts.js';
 
@@ -162,6 +163,19 @@ postsV2Router.post(
       const body = req.body as Record<string, unknown>;
       if (typeof body.body !== 'string') {
         res.status(400).json({ error: 'body is required' });
+        return;
+      }
+      const parent = await getPostDetail(req.params.id);
+      if (!parent || parent.post.account_id !== context.account_id || parent.post.deleted_at) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      if (
+        parent.post.kind === 'channel'
+        && (!parent.channel
+          || !await canAccessChannel(context.account_id, context.principal.id, parent.post.id))
+      ) {
+        res.status(404).json({ error: 'not found' });
         return;
       }
       const post = await replyPost({

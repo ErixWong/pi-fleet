@@ -73,6 +73,10 @@ Bearer key 的任务列表请求会自动刷新主机活跃时间。
 | `PLATFORM_URL` | setup 中的 URL | 覆盖平台地址 |
 | `PI_AGENT_KEY` | setup 中的 key | 覆盖 API key |
 | `POLL_MS` | `60000` | 任务轮询间隔（毫秒） |
+| `CHANNEL_POLL_MS` | `5000` | 一对一主机对话轮询间隔（毫秒） |
+| `CHANNEL_TIMEOUT_MS` | `300000` | 单次主机对话 pi 超时（毫秒） |
+| `CHANNEL_MAX_CONCURRENCY` | `2` | 同时运行的不同通道 pi 实例上限 |
+| `CHANNEL_STATE_PATH` | `~/.config/pi-agent/channels-state.json` | 通道消息游标持久化路径 |
 | `TASK_PAGE_SIZE` | `20` | 每次请求任务数（最大 200） |
 | `TASK_TIMEOUT_MS` | `1800000` | 单任务超时（毫秒） |
 | `WORK_ROOT` | `~/pi-agent-work` | 无指定 workdir 时的沙箱根目录 |

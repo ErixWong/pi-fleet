@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { Modal } from 'bootstrap';
+import { useRouter } from 'vue-router';
 import { api } from '../api';
 import StatusBadge from '../components/StatusBadge.vue';
 
@@ -20,6 +21,7 @@ const editBusy = ref(false);
 const editError = ref('');
 const registerModalEl = ref(null);
 let registerModal = null;
+const router = useRouter();
 
 const selectedHost = computed(() => hosts.value.find((host) => String(host.id) === String(selectedId.value)) || null);
 
@@ -51,6 +53,15 @@ function selectHost(host) {
   editName.value = host.name;
   editStatus.value = host.status;
   editError.value = '';
+}
+
+async function openChannel(host) {
+  try {
+    const data = await api.createChannel({ host_principal_id: host.id });
+    await router.push(`/channels/${encodeURIComponent(data.channel.id)}`);
+  } catch (e) {
+    error.value = e.message;
+  }
 }
 
 function openRegister() {
@@ -181,16 +192,20 @@ onMounted(async () => {
             <i class="bi bi-pc-display"></i><strong>还没有主机</strong><span>注册一台主机开始接入。</span>
           </div>
           <div v-else class="list-group list-group-flush">
-            <button v-for="host in hosts" :key="host.id" class="list-group-item list-group-item-action bg-transparent text-start"
-              :class="{ active: String(selectedId) === String(host.id) }" @click="selectHost(host)">
+            <div v-for="host in hosts" :key="host.id" class="list-group-item list-group-item-action bg-transparent text-start"
+              :class="{ active: String(selectedId) === String(host.id) }" role="button" tabindex="0"
+              @click="selectHost(host)" @keydown.enter="selectHost(host)">
               <div class="d-flex align-items-center gap-2">
                 <i class="bi bi-pc-display"></i>
                 <strong class="text-truncate">{{ hostTitle(host) }}</strong>
                 <StatusBadge class="ms-auto" kind="host" :status="host.status" :offline="host.offline"
                   :title="host.offline ? `超过 ${offlineAfter} 分钟无心跳` : ''" />
+                <button type="button" class="btn btn-sm btn-ghost py-0 px-2" title="打开对话" @click.stop="openChannel(host)">
+                  <i class="bi bi-chat-dots"></i>
+                </button>
               </div>
               <div class="small opacity-75 mt-1 text-truncate">{{ host.id }} · 最近活跃：{{ fmtTime(host.last_seen) }}</div>
-            </button>
+            </div>
           </div>
         </div>
       </section>
@@ -225,6 +240,7 @@ onMounted(async () => {
               <dt class="col-sm-4 text-secondary">创建时间</dt><dd class="col-sm-8">{{ fmtTime(selectedHost.created_at) }}</dd>
             </dl>
             <div class="d-flex flex-wrap gap-2">
+              <button class="btn btn-outline-primary" @click="openChannel(selectedHost)"><i class="bi bi-chat-dots me-1"></i>对话</button>
               <button class="btn btn-primary" :disabled="editBusy" @click="saveHost">{{ editBusy ? '保存中…' : '保存修改' }}</button>
               <button class="btn btn-outline-warning" @click="rotateKey"><i class="bi bi-arrow-repeat me-1"></i>轮换 key</button>
               <button class="btn btn-outline-danger ms-auto" @click="deleteHost"><i class="bi bi-trash me-1"></i>删除主机</button>

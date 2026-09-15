@@ -78,6 +78,11 @@ export const api = {
   deleteHost: (id) => req('DELETE', `/hosts/${encodeURIComponent(id)}`),
   rotateHostKey: (id) => req('POST', `/hosts/${encodeURIComponent(id)}/keys/rotate`),
 
+  channels: () => req('GET', '/channels'),
+  createChannel: (payload) => req('POST', '/channels', payload),
+  channelMessages: (id, params = {}) => req('GET', `/channels/${encodeURIComponent(id)}/messages${queryString(params)}`),
+  sendChannelMessage: (id, payload) => req('POST', `/channels/${encodeURIComponent(id)}/messages`, payload),
+
   tasks: (params = {}) => req('GET', `/tasks${queryString(params)}`),
   post: (id) => req('GET', `/posts/${encodeURIComponent(id)}`),
   postList: (params = {}) => req('GET', `/posts${queryString(params)}`),
