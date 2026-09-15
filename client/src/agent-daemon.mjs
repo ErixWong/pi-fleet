@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // pi-agent daemon：轮询 v2 任务并拉起 pi 执行。
 //
-// 任务的认领、上下文读取和正常提交全部由 pi 通过 v2 MCP 完成。
-// daemon 只负责领取到期任务，以及在 pi 异常退出或超时时提交失败预检。
+// daemon 先通过 v2 REST 原子认领到期任务，再由 pi 通过 v2 MCP 读取上下文和提交结果。
+// pi 仍会按 prompt 幂等地尝试 claim；daemon 只在异常退出或超时时提交失败预检。
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -16,6 +16,9 @@ const POLL_MS = Number(process.env.POLL_MS ?? 60_000);
 const PAGE_SIZE = Number(process.env.TASK_PAGE_SIZE ?? 20);
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS ?? 1_800_000);
 const RECENT_DONE_TTL_MS = Number(process.env.RECENT_DONE_TTL_MS ?? 600_000);
+const CLAIM_TTL_MS = Number(
+  process.env.CLAIM_TTL_MS ?? Math.max(TASK_TIMEOUT_MS, RECENT_DONE_TTL_MS),
+);
 
 function readJsonFile(filePath) {
   try {
@@ -149,12 +152,15 @@ async function api(method, pathname, body) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = typeof data?.error === 'string' ? `: ${data.error}` : '';
-    throw new Error(`${method} ${pathname}: ${response.status}${detail}`);
+    const error = new Error(`${method} ${pathname}: ${response.status}${detail}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
 
 const execSessions = new Map();
+const claimedTasks = new Map();
 const recentlyDone = new Map();
 
 function taskIdOf(item) {
@@ -179,12 +185,41 @@ async function pollTasks() {
   for (const [taskId, timestamp] of recentlyDone) {
     if (now - timestamp > RECENT_DONE_TTL_MS) recentlyDone.delete(taskId);
   }
+  for (const [taskId, claim] of claimedTasks) {
+    if (!execSessions.has(taskId) && now - claim.claimedAt > CLAIM_TTL_MS) {
+      claimedTasks.delete(taskId);
+      console.log(`[daemon] 清理过期认领记录 ${taskId}`);
+    }
+  }
 
   let started = 0;
   for (const item of items) {
     const taskId = taskIdOf(item);
-    if (!taskId || execSessions.has(taskId) || recentlyDone.has(taskId)) continue;
-    spawnTaskAgent(item);
+    if (
+      !taskId
+      || execSessions.has(taskId)
+      || claimedTasks.has(taskId)
+      || recentlyDone.has(taskId)
+    ) continue;
+    try {
+      await api('POST', `/api/v2/tasks/${encodeURIComponent(taskId)}/claim`);
+      claimedTasks.set(taskId, { claimedAt: Date.now() });
+    } catch (error) {
+      const status = Number(error?.status ?? 0);
+      if (status === 404 || status === 409) {
+        console.log(`[daemon] 跳过任务 ${taskId}：claim 返回 ${status}（任务已被认领、状态不对或不可见）`);
+      } else {
+        console.log(`[daemon] 认领任务 ${taskId} 失败，跳过本轮：${error.message}`);
+      }
+      continue;
+    }
+    try {
+      spawnTaskAgent(item);
+    } catch (error) {
+      claimedTasks.delete(taskId);
+      console.log(`[daemon] 拉起任务 ${taskId} 失败：${error.message}`);
+      continue;
+    }
     started += 1;
   }
   if (started > 0) {
@@ -222,7 +257,7 @@ function taskPrompt(item, taskId, cwd, sandboxDir) {
   lines.push(
     '',
     '先使用 v2 MCP 工具 post(action="detail", id=任务 ID) 获取完整上下文。',
-    '如果任务状态是 open，使用 task(action="claim", task_id=任务 ID) 认领；如果是 claimed，继续处理上次被打回的任务。',
+    '如果任务状态是 open，使用 task(action="claim", task_id=任务 ID) 认领；如果任务已是 claimed（你已认领），直接继续处理上次被打回的任务。',
     '完成工作后，使用 task(action="submit", task_id=任务 ID, deliverables=[...], message="...") 提交实际交付物。',
     '正常完成必须通过 MCP 提交；不要调用任何旧版接口，也不要处理其他任务。',
   );
@@ -298,6 +333,7 @@ function spawnTaskAgent(item) {
     execSessions.delete(taskId);
     recentlyDone.set(taskId, Date.now());
     if (code === 0) {
+      claimedTasks.delete(taskId);
       console.log(`[daemon] 任务 ${taskId} 正常完成（code=0，提交由 pi MCP 完成）`);
       return;
     }
@@ -319,7 +355,17 @@ function spawnTaskAgent(item) {
 async function reportTaskFailure(taskId, session, result) {
   if (session.failureReported) return;
   session.failureReported = true;
+  if (!claimedTasks.has(taskId)) {
+    console.log(`[daemon] 跳过任务 ${taskId} 失败上报：本实例没有有效认领记录`);
+    return;
+  }
   try {
+    const detail = await api('GET', `/api/v2/posts/${encodeURIComponent(taskId)}`);
+    const status = detail?.task?.status;
+    if (status !== 'claimed') {
+      console.log(`[daemon] 跳过任务 ${taskId} 失败上报：当前状态为 ${String(status ?? 'unknown')}`);
+      return;
+    }
     await api('POST', `/api/v2/tasks/${encodeURIComponent(taskId)}/submit`, {
       deliverables: [],
       message: `pi-agent daemon 兜底：${String(result).slice(0, 7900)}`,
@@ -327,6 +373,8 @@ async function reportTaskFailure(taskId, session, result) {
     console.log(`[daemon] 已通过 v2 submit 上报任务 ${taskId} 失败预检`);
   } catch (error) {
     console.log(`[daemon] 上报任务 ${taskId} 失败结果时出错: ${error.message}`);
+  } finally {
+    claimedTasks.delete(taskId);
   }
 }
 

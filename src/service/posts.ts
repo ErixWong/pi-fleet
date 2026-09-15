@@ -1,6 +1,7 @@
 import type { PoolConnection } from 'mariadb';
 import { getPool, withTransaction } from '../db/pool.js';
 import { newId } from '../id.js';
+import { badRequest, notFound } from '../util/errors.js';
 import { recordEvent } from './event-outbox.js';
 
 export type PostKind = 'note' | 'task' | 'message' | 'verdict' | 'channel';
@@ -335,17 +336,17 @@ function normalizeLimit(value: number | undefined, fallback: number): number {
 }
 
 function validateCreateInput(input: CreatePostInput): void {
-  if (!input.account_id) throw new Error('account_id is required');
-  if (!input.author_principal_id) throw new Error('author_principal_id is required');
-  if (!input.body && input.body !== '') throw new Error('body is required');
+  if (!input.account_id) throw badRequest('account_id is required');
+  if (!input.author_principal_id) throw badRequest('author_principal_id is required');
+  if (!input.body && input.body !== '') throw badRequest('body is required');
   if (!['note', 'task', 'message', 'verdict', 'channel'].includes(input.kind)) {
-    throw new Error(`Unknown post kind: ${input.kind}`);
+    throw badRequest(`Unknown post kind: ${input.kind}`);
   }
   if (!['private', 'account', 'public'].includes(input.visibility)) {
-    throw new Error(`Unknown post visibility: ${input.visibility}`);
+    throw badRequest(`Unknown post visibility: ${input.visibility}`);
   }
   if (input.targets?.some((target) => !['assignee', 'mention', 'watcher'].includes(target.role))) {
-    throw new Error('Unknown post target role');
+    throw badRequest('Unknown post target role');
   }
 }
 
@@ -371,7 +372,7 @@ function validateExtension(input: CreatePostInput): {
   const verdict = verdictExtension(input);
   if (input.kind === 'task') {
     if (!task || typeof task.deliverable_spec !== 'string' || task.deliverable_spec.trim() === '') {
-      throw new Error('task deliverable_spec is required');
+      throw badRequest('task deliverable_spec is required');
     }
     let parsed: unknown;
     try {
@@ -386,16 +387,16 @@ function validateExtension(input: CreatePostInput): {
       && ((Array.isArray(parsed) && parsed.length === 0)
         || (!Array.isArray(parsed) && Object.keys(parsed).length === 0))
     ) {
-      throw new Error('task deliverable_spec cannot be empty');
+      throw badRequest('task deliverable_spec cannot be empty');
     }
   }
   if (input.kind === 'channel' && (!channel || !channel.host_principal_id)) {
-    throw new Error('channel host_principal_id is required');
+    throw badRequest('channel host_principal_id is required');
   }
   if (input.kind === 'verdict') {
-    if (!verdict || !verdict.target_task_id) throw new Error('verdict target_task_id is required');
+    if (!verdict || !verdict.target_task_id) throw badRequest('verdict target_task_id is required');
     if (!['accept', 'reject'].includes(verdict.decision)) {
-      throw new Error(`Unknown verdict decision: ${verdict.decision}`);
+      throw badRequest(`Unknown verdict decision: ${verdict.decision}`);
     }
   }
   return { task, channel, verdict };
@@ -424,9 +425,9 @@ async function createPostWithConnection(
     [input.author_principal_id],
   ));
   const author = authorRows[0];
-  if (!author) throw new Error(`author principal not found: ${input.author_principal_id}`);
+  if (!author) throw notFound(`author principal not found: ${input.author_principal_id}`);
   if (stringValue(author.account_id) !== input.account_id) {
-    throw new Error('author principal belongs to another account');
+    throw notFound('author principal belongs to another account');
   }
 
   const targetIds = [...new Set((input.targets ?? []).map((target) => target.principal_id))];
@@ -442,7 +443,7 @@ async function createPostWithConnection(
     const validTargetIds = new Set(targetRows.map((row) => stringValue(row.id)));
     const invalidTarget = targetIds.find((principalId) => !validTargetIds.has(principalId));
     if (invalidTarget) {
-      throw new Error(`target principal belongs to another account or does not exist: ${invalidTarget}`);
+      throw notFound(`target principal belongs to another account or does not exist: ${invalidTarget}`);
     }
   }
 
@@ -456,9 +457,9 @@ async function createPostWithConnection(
       [input.parent_id],
     ));
     const parent = parentRows[0];
-    if (!parent) throw new Error(`Parent post not found: ${input.parent_id}`);
+    if (!parent) throw notFound(`Parent post not found: ${input.parent_id}`);
     if (stringValue(parent.account_id) !== input.account_id) {
-      throw new Error('parent post belongs to another account');
+      throw notFound('parent post belongs to another account');
     }
     rootId = stringValue(parent.root_id);
   }
@@ -517,9 +518,9 @@ async function createPostWithConnection(
         LIMIT 1`,
       [channel.host_principal_id],
     ));
-    if (!hostRows[0]) throw new Error(`channel host principal not found: ${channel.host_principal_id}`);
+    if (!hostRows[0]) throw notFound(`channel host principal not found: ${channel.host_principal_id}`);
     if (stringValue(hostRows[0].account_id) !== input.account_id) {
-      throw new Error('channel host principal belongs to another account');
+      throw notFound('channel host principal belongs to another account');
     }
     await conn.query(
       `INSERT INTO post_channel
@@ -545,10 +546,10 @@ async function createPostWithConnection(
     ));
     const targetTask = targetTaskRows[0];
     if (!targetTask || targetTask.kind !== 'task') {
-      throw new Error(`verdict target task not found: ${verdict.target_task_id}`);
+      throw notFound(`verdict target task not found: ${verdict.target_task_id}`);
     }
     if (stringValue(targetTask.account_id) !== input.account_id) {
-      throw new Error('verdict target task belongs to another account');
+      throw notFound('verdict target task belongs to another account');
     }
     await conn.query(
       `INSERT INTO post_verdict
@@ -745,12 +746,12 @@ async function queryPosts(sql: string, params: unknown[]): Promise<Post[]> {
 }
 
 export async function listPosts(filter: ListPostsFilter): Promise<ListPostsResult> {
-  if (!filter.account_id) throw new Error('account_id is required');
+  if (!filter.account_id) throw badRequest('account_id is required');
   const predicates = ['p.account_id = ?', 'p.deleted_at IS NULL'];
   const params: unknown[] = [filter.account_id];
   if (filter.kind) {
     if (!['note', 'task', 'message', 'verdict', 'channel'].includes(filter.kind)) {
-      throw new Error(`Unknown post kind: ${filter.kind}`);
+      throw badRequest(`Unknown post kind: ${filter.kind}`);
     }
     predicates.push('p.kind = ?');
     params.push(filter.kind);
@@ -772,7 +773,7 @@ export async function listPosts(filter: ListPostsFilter): Promise<ListPostsResul
   }
   if (filter.visibility) {
     if (!['private', 'account', 'public'].includes(filter.visibility)) {
-      throw new Error(`Unknown post visibility: ${filter.visibility}`);
+      throw badRequest(`Unknown post visibility: ${filter.visibility}`);
     }
     predicates.push('p.visibility = ?');
     params.push(filter.visibility);
@@ -827,7 +828,7 @@ async function replyPostWithConnection(
       [input.parent_id],
     ));
     const parent = parentRows[0];
-    if (!parent) throw new Error(`Parent post not found: ${input.parent_id}`);
+    if (!parent) throw notFound(`Parent post not found: ${input.parent_id}`);
     const post = await createPostWithConnection(conn, {
       account_id: stringValue(parent.account_id),
       kind: 'message',
@@ -871,10 +872,10 @@ export async function editPost(
 ): Promise<Post> {
   return withTransaction(async (conn) => {
     const before = await getPostByIdWithConnection(conn, id);
-    if (!before) throw new Error(`Post not found: ${id}`);
-    if (before.deleted_at) throw new Error(`Post is deleted: ${id}`);
+    if (!before) throw notFound(`Post not found: ${id}`);
+    if (before.deleted_at) throw notFound(`Post is deleted: ${id}`);
     if (input.title === undefined && input.body === undefined) {
-      throw new Error('title or body is required');
+      throw badRequest('title or body is required');
     }
     const nextTitle = input.title ?? before.title;
     const nextBody = input.body ?? before.body;
@@ -903,7 +904,7 @@ export async function editPost(
 export async function deletePost(id: string): Promise<void> {
   await withTransaction(async (conn) => {
     const before = await getPostByIdWithConnection(conn, id);
-    if (!before) throw new Error(`Post not found: ${id}`);
+    if (!before) throw notFound(`Post not found: ${id}`);
     if (!before.deleted_at) {
       const deletedAt = nowString();
       await conn.query(`UPDATE post SET deleted_at = ? WHERE id = ?`, [deletedAt, id]);
@@ -937,7 +938,7 @@ async function targetPostContext(
     [postId],
   ));
   const row = result[0];
-  if (!row) throw new Error(`Post not found: ${postId}`);
+  if (!row) throw notFound(`Post not found: ${postId}`);
   return {
     account_id: stringValue(row.account_id),
     author_principal_id: stringValue(row.author_principal_id),
@@ -956,9 +957,9 @@ async function requireTargetAccount(
       LIMIT 1`,
     [principalId],
   ));
-  if (!result[0]) throw new Error(`target principal not found: ${principalId}`);
+  if (!result[0]) throw notFound(`target principal not found: ${principalId}`);
   if (stringValue(result[0].account_id) !== accountId) {
-    throw new Error('target principal belongs to another account');
+    throw notFound('target principal belongs to another account');
   }
 }
 
@@ -967,7 +968,7 @@ export async function addTarget(
   principalId: string,
   role: TargetRole,
 ): Promise<void> {
-  if (!['assignee', 'mention', 'watcher'].includes(role)) throw new Error(`Unknown target role: ${role}`);
+  if (!['assignee', 'mention', 'watcher'].includes(role)) throw badRequest(`Unknown target role: ${role}`);
   await withTransaction(async (conn) => {
     const context = await targetPostContext(conn, postId);
     await requireTargetAccount(conn, principalId, context.account_id);
@@ -993,7 +994,7 @@ export async function removeTarget(
   principalId: string,
   role: TargetRole,
 ): Promise<void> {
-  if (!['assignee', 'mention', 'watcher'].includes(role)) throw new Error(`Unknown target role: ${role}`);
+  if (!['assignee', 'mention', 'watcher'].includes(role)) throw badRequest(`Unknown target role: ${role}`);
   await withTransaction(async (conn) => {
     const context = await targetPostContext(conn, postId);
     await requireTargetAccount(conn, principalId, context.account_id);
@@ -1017,7 +1018,7 @@ export async function markTargetRead(
   principalId: string,
   role: TargetRole,
 ): Promise<void> {
-  if (!['assignee', 'mention', 'watcher'].includes(role)) throw new Error(`Unknown target role: ${role}`);
+  if (!['assignee', 'mention', 'watcher'].includes(role)) throw badRequest(`Unknown target role: ${role}`);
   await withTransaction(async (conn) => {
     const context = await targetPostContext(conn, postId);
     await conn.query(
@@ -1078,13 +1079,13 @@ export async function saveSummary(
       `SELECT account_id FROM post WHERE id = ? AND root_id = ? LIMIT 1 FOR UPDATE`,
       [rootId, rootId],
     ));
-    if (rootRows.length === 0) throw new Error(`Root post not found: ${rootId}`);
+    if (rootRows.length === 0) throw notFound(`Root post not found: ${rootId}`);
     const coveredRows = rows(await conn.query(
       `SELECT id FROM post WHERE id = ? AND root_id = ? LIMIT 1`,
       [input.up_to_post_id, rootId],
     ));
     if (coveredRows.length === 0) {
-      throw new Error(`Summary boundary is not in root thread: ${input.up_to_post_id}`);
+      throw notFound(`Summary boundary is not in root thread: ${input.up_to_post_id}`);
     }
     const revisionResult = await conn.query(
       `SELECT COALESCE(MAX(revision), 0) AS revision

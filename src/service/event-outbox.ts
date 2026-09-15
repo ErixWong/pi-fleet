@@ -1,6 +1,7 @@
 import type { PoolConnection } from 'mariadb';
 import { getPool, initSchema, withTransaction } from '../db/pool.js';
 import { newId } from '../id.js';
+import { badRequest, notFound } from '../util/errors.js';
 
 export { getPool, initSchema, withTransaction };
 
@@ -253,7 +254,7 @@ export async function markPublished(id: string, lease?: EventLease): Promise<voi
   );
   if (Number((result as { affectedRows?: number }).affectedRows ?? 0) === 0) {
     const existing = await getPool().query('SELECT id FROM event WHERE id = ?', [id]);
-    if (rows(existing).length === 0) throw new Error(`Event not found: ${id}`);
+    if (rows(existing).length === 0) throw notFound(`Event not found: ${id}`);
   }
 }
 
@@ -280,7 +281,7 @@ export async function markFailed(
   );
   if (Number((result as { affectedRows?: number }).affectedRows ?? 0) === 0) {
     const existing = await getPool().query('SELECT id FROM event WHERE id = ?', [id]);
-    if (rows(existing).length === 0) throw new Error(`Event not found: ${id}`);
+    if (rows(existing).length === 0) throw notFound(`Event not found: ${id}`);
   }
 }
 
@@ -290,7 +291,7 @@ export async function pruneNotified({
   olderThanDays: number;
 }): Promise<number> {
   if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
-    throw new Error('olderThanDays must be a non-negative finite number');
+    throw badRequest('olderThanDays must be a non-negative finite number');
   }
   const cutoff = new Date(Date.now() - olderThanDays * 86400_000);
   const pad = (value: number) => String(value).padStart(2, '0');

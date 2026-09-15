@@ -5,6 +5,7 @@ import {
   type PrincipalContext,
 } from '../auth-principal.js';
 import type { Scope } from '../service/identity.js';
+import { AppError } from '../util/errors.js';
 
 export type ToolResult = CallToolResult;
 
@@ -54,6 +55,22 @@ export function guardScope(...scopes: Scope[]): void {
 
 export function toolFailure(error: unknown): ToolResult {
   if (error instanceof ScopeDenied) return toolErr('not found');
-  if (error instanceof Error) return toolErr(error.message);
-  return toolErr(String(error));
+  if (error instanceof AppError) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            ok: false,
+            error: {
+              message: error.message,
+              status: error.status,
+            },
+          }, null, 2),
+        },
+      ],
+      isError: true,
+    };
+  }
+  return toolErr('internal error');
 }

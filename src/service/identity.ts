@@ -2,6 +2,7 @@ import crypto, { scryptSync, timingSafeEqual } from 'node:crypto';
 import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
+import { badRequest, notFound } from '../util/errors.js';
 import { recordEvent } from './event-outbox.js';
 
 export { getPool, initSchema } from '../db/pool.js';
@@ -195,11 +196,11 @@ export function verifyPassword(password: string, stored: string): boolean {
 
 function validateScopes(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string')) {
-    throw new Error('scopes must be an array of strings');
+    throw badRequest('scopes must be an array of strings');
   }
   const unique = [...new Set(scopes)];
   const invalid = unique.find((scope) => !SCOPES.has(scope));
-  if (invalid) throw new Error(`Unknown scope: ${invalid}`);
+  if (invalid) throw badRequest(`Unknown scope: ${invalid}`);
   return unique;
 }
 
@@ -313,8 +314,8 @@ async function requireHostPrincipal(
     [principalId],
   );
   const row = rows(result)[0];
-  if (!row) throw new Error(`Principal not found: ${principalId}`);
-  if (row.kind !== 'host') throw new Error(`Principal is not a host: ${principalId}`);
+  if (!row) throw notFound(`Principal not found: ${principalId}`);
+  if (row.kind !== 'host') throw badRequest(`Principal is not a host: ${principalId}`);
 }
 
 async function getDeviceByPrincipalId(principalId: string): Promise<Device | null> {
@@ -385,10 +386,10 @@ export async function listAccounts({
 
 export async function createPrincipal(input: CreatePrincipalInput): Promise<Principal> {
   if (!PRINCIPAL_KINDS.has(input.kind)) {
-    throw new Error(`Unknown principal kind: ${input.kind}`);
+    throw badRequest(`Unknown principal kind: ${input.kind}`);
   }
   if (input.kind !== 'agent' && input.host_principal_id) {
-    throw new Error('host_principal_id is only valid for agent principals');
+    throw badRequest('host_principal_id is only valid for agent principals');
   }
   const id = newId('prn');
   const createdAt = nowString();
@@ -550,7 +551,7 @@ export async function listPrincipals({
   page?: number;
   page_size?: number;
 }): Promise<{ items: Principal[]; total: number; page: number; page_size: number }> {
-  if (kind && !PRINCIPAL_KINDS.has(kind)) throw new Error(`Unknown principal kind: ${kind}`);
+  if (kind && !PRINCIPAL_KINDS.has(kind)) throw badRequest(`Unknown principal kind: ${kind}`);
   const currentPage = Math.max(1, Math.floor(page) || 1);
   const pageSize = Math.min(200, Math.max(1, Math.floor(page_size) || 20));
   const params: unknown[] = [account_id];
@@ -607,7 +608,7 @@ export async function registerDevice(
     );
   });
   const device = await getDeviceByPrincipalId(input.principal_id);
-  if (!device) throw new Error(`Device was not registered: ${input.principal_id}`);
+  if (!device) throw notFound(`Device was not registered: ${input.principal_id}`);
   return device;
 }
 
@@ -618,7 +619,7 @@ export async function touchDevice(principalId: string): Promise<Device> {
     [touchedAt, principalId],
   );
   const device = await getDeviceByPrincipalId(principalId);
-  if (!device) throw new Error(`Device not found: ${principalId}`);
+  if (!device) throw notFound(`Device not found: ${principalId}`);
   return device;
 }
 
@@ -631,10 +632,10 @@ export async function reportExecutors(
 ): Promise<DeviceExecutor[]> {
   const clis = [...new Set(input.clis)];
   if (clis.some((cli) => !cli || cli.length > 32)) {
-    throw new Error('Each executor CLI must be 1-32 characters');
+    throw badRequest('Each executor CLI must be 1-32 characters');
   }
   if (input.selected !== undefined && !clis.includes(input.selected)) {
-    throw new Error('selected executor must be included in clis');
+    throw badRequest('selected executor must be included in clis');
   }
   const reportedAt = nowString();
   await withTransaction(async (conn) => {
@@ -682,7 +683,7 @@ async function insertApiKey(
   createdAt: string,
 ): Promise<ApiKeyCreation> {
   const principal = await getPrincipalWithConnection(conn, input.principal_id);
-  if (!principal) throw new Error(`Principal not found: ${input.principal_id}`);
+  if (!principal) throw notFound(`Principal not found: ${input.principal_id}`);
   const scopes = validateScopes(input.scopes);
   const key = createSecret();
   const id = newId('key');
@@ -770,7 +771,7 @@ export async function rotateApiKey(
 ): Promise<ApiKeyCreation> {
   const graceHours = options.grace_hours ?? 24;
   if (!Number.isFinite(graceHours) || graceHours < 0) {
-    throw new Error('grace_hours must be a non-negative finite number');
+    throw badRequest('grace_hours must be a non-negative finite number');
   }
   const issuedAt = nowString();
   const graceUntil = new Date(Date.now() + graceHours * 3600_000);
@@ -778,7 +779,7 @@ export async function rotateApiKey(
   const expiresAt = `${graceUntil.getFullYear()}-${pad(graceUntil.getMonth() + 1)}-${pad(graceUntil.getDate())} ${pad(graceUntil.getHours())}:${pad(graceUntil.getMinutes())}:${pad(graceUntil.getSeconds())}`;
   return withTransaction(async (conn) => {
     const principal = await getPrincipalWithConnection(conn, principalId);
-    if (!principal) throw new Error(`Principal not found: ${principalId}`);
+    if (!principal) throw notFound(`Principal not found: ${principalId}`);
     const targetResult = await conn.query(
       `SELECT id, scopes
          FROM api_key
@@ -792,7 +793,7 @@ export async function rotateApiKey(
     );
     const target = rows(targetResult)[0];
     if (options.key_id !== undefined && !target) {
-      throw new Error(`API key not found or revoked: ${options.key_id}`);
+      throw notFound(`API key not found or revoked: ${options.key_id}`);
     }
     let scopes = options.scopes;
     if (scopes === undefined) {
@@ -832,14 +833,14 @@ export async function revokeApiKey(keyId: string): Promise<void> {
       [keyId],
     ));
     const key = keyRows[0];
-    if (!key || key.revoked_at) throw new Error(`API key not found or already revoked: ${keyId}`);
+    if (!key || key.revoked_at) throw notFound(`API key not found or already revoked: ${keyId}`);
     const revokedAt = nowString();
     const result = await conn.query(
       `UPDATE api_key SET revoked_at = ?
         WHERE id = ? AND revoked_at IS NULL`,
       [revokedAt, keyId],
     );
-    if (affectedRows(result) === 0) throw new Error(`API key not found or already revoked: ${keyId}`);
+    if (affectedRows(result) === 0) throw notFound(`API key not found or already revoked: ${keyId}`);
     await recordEvent(conn, {
       account_id: stringValue(key.account_id),
       actor_principal_id: stringValue(key.principal_id),

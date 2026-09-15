@@ -18,6 +18,7 @@ import {
 } from './resources.js';
 import { recordEvent } from './event-outbox.js';
 import { getPrincipal } from './identity.js';
+import { badRequest, conflict, notFound, type AppError } from '../util/errors.js';
 
 export type TaskTargetInput = string | {
   principal_id: string;
@@ -50,7 +51,7 @@ async function requirePrincipalInAccount(
   accountId: string,
   label: string,
 ): Promise<void> {
-  if (!principalId) throw new Error(`${label} is required`);
+  if (!principalId) throw badRequest(`${label} is required`);
   const result = rows(await conn.query(
     `SELECT account_id
        FROM principal
@@ -58,9 +59,9 @@ async function requirePrincipalInAccount(
       LIMIT 1`,
     [principalId],
   ));
-  if (!result[0]) throw new Error(`${label} not found: ${principalId}`);
+  if (!result[0]) throw notFound(`${label} not found: ${principalId}`);
   if (stringValue(result[0].account_id) !== accountId) {
-    throw new Error(`${label} belongs to another account`);
+    throw notFound(`${label} belongs to another account`);
   }
 }
 
@@ -330,9 +331,9 @@ async function getTaskRecord(taskId: string): Promise<TaskRecord | null> {
 }
 
 async function requirePrincipal(principalId: string, label: string): Promise<void> {
-  if (!principalId) throw new Error(`${label} is required`);
+  if (!principalId) throw badRequest(`${label} is required`);
   const principal = await getPrincipal(principalId);
-  if (!principal) throw new Error(`${label} not found: ${principalId}`);
+  if (!principal) throw notFound(`${label} not found: ${principalId}`);
 }
 
 async function requireTaskOperator(
@@ -340,7 +341,7 @@ async function requireTaskOperator(
   principalId: string,
   accountId: string,
 ): Promise<void> {
-  if (!principalId) throw new Error('operator_principal_id is required');
+  if (!principalId) throw badRequest('operator_principal_id is required');
   const result = await conn.query(
     `SELECT id, account_id
        FROM principal
@@ -349,9 +350,9 @@ async function requireTaskOperator(
     [principalId],
   );
   const row = rows(result)[0];
-  if (!row) throw new Error(`operator principal not found: ${principalId}`);
+  if (!row) throw notFound(`operator principal not found: ${principalId}`);
   if (stringValue(row.account_id) !== accountId) {
-    throw new Error('operator principal belongs to another account');
+    throw notFound('operator principal belongs to another account');
   }
 }
 
@@ -367,8 +368,8 @@ function taskState(task: PostTask): Record<string, unknown> {
   };
 }
 
-function taskNotFound(taskId: string): Error {
-  return new Error(`Task not found: ${taskId}`);
+function taskNotFound(taskId: string): AppError {
+  return notFound(`Task not found: ${taskId}`);
 }
 
 function normalizeTargets(targets: TaskTargetInput[] | undefined): Array<{
@@ -387,9 +388,9 @@ function normalizeTargets(targets: TaskTargetInput[] | undefined): Array<{
 export async function publishTask(
   input: PublishTaskInput,
 ): Promise<{ post: Post; task: PostTask }> {
-  if (!input.account_id) throw new Error('account_id is required');
-  if (!input.author_principal_id) throw new Error('author_principal_id is required');
-  if (!input.body && input.body !== '') throw new Error('body is required');
+  if (!input.account_id) throw badRequest('account_id is required');
+  if (!input.author_principal_id) throw badRequest('author_principal_id is required');
+  if (!input.body && input.body !== '') throw badRequest('body is required');
   const rawSpec = input.deliverable_spec ?? input.task?.deliverable_spec;
   const serializedSpec = typeof rawSpec === 'string'
     ? rawSpec.trim()
@@ -397,18 +398,18 @@ export async function publishTask(
       ? ''
       : JSON.stringify(rawSpec) ?? '';
   if (serializedSpec === '') {
-    throw new Error('task deliverable_spec is required and cannot be empty');
+    throw badRequest('task deliverable_spec is required and cannot be empty');
   }
   const visibility = input.visibility ?? 'private';
   const targets = normalizeTargets(input.targets);
   const assigneeTargets = targets.filter((target) => target.role === 'assignee');
   if (visibility !== 'public' && assigneeTargets.length === 0) {
-    throw new Error('assigned task requires at least one assignee target; use public visibility for an open offer');
+    throw badRequest('assigned task requires at least one assignee target; use public visibility for an open offer');
   }
   const author = await getPrincipal(input.author_principal_id);
-  if (!author) throw new Error(`author principal not found: ${input.author_principal_id}`);
+  if (!author) throw notFound(`author principal not found: ${input.author_principal_id}`);
   if (author.account_id !== input.account_id) {
-    throw new Error('author principal belongs to another account');
+    throw notFound('author principal belongs to another account');
   }
 
   const post = await withTransaction((conn) =>
@@ -454,13 +455,13 @@ export async function claimTask(
     );
     const { task, post } = record;
     if (task.assignee_principal_id !== null) {
-      throw new Error(`Task ${taskId} has already been claimed by another principal`);
+      throw conflict(`Task ${taskId} has already been claimed by another principal`);
     }
     if (task.status !== 'open') {
-      throw new Error(`Task ${taskId} is ${task.status}; only open tasks can be claimed`);
+      throw conflict(`Task ${taskId} is ${task.status}; only open tasks can be claimed`);
     }
     if (!task.is_ready) {
-      throw new Error(`Task ${taskId} is not ready and cannot be claimed`);
+      throw conflict(`Task ${taskId} is not ready and cannot be claimed`);
     }
     const targetRows = rows(await conn.query(
       `SELECT principal_id, role
@@ -475,10 +476,10 @@ export async function claimTask(
         stringValue(target.role) === 'assignee',
     );
     if (hasTargets && !isAssigneeTarget) {
-      throw new Error(`Principal ${input.principal_id} is not an assignee target for task ${taskId}`);
+      throw notFound(`Principal ${input.principal_id} is not an assignee target for task ${taskId}`);
     }
     if (!hasTargets && post.visibility !== 'public') {
-      throw new Error(`Task ${taskId} has no target and is not a public offer`);
+      throw conflict(`Task ${taskId} has no target and is not a public offer`);
     }
     const claimedAt = nowString();
     await conn.query(
@@ -522,10 +523,10 @@ export async function submitTask(
       'principal_id',
     );
     if (record.task.status !== 'claimed') {
-      throw new Error(`Task ${taskId} is ${record.task.status}; only claimed tasks can be submitted`);
+      throw conflict(`Task ${taskId} is ${record.task.status}; only claimed tasks can be submitted`);
     }
     if (record.task.assignee_principal_id !== input.principal_id) {
-      throw new Error(`Principal ${input.principal_id} is not the assignee of task ${taskId}`);
+      throw notFound(`Principal ${input.principal_id} is not the assignee of task ${taskId}`);
     }
 
     const precheck = await precheckDeliverablesWithConnection(
@@ -658,14 +659,14 @@ export async function verdictTask(
   input: VerdictTaskInput,
 ): Promise<VerdictTaskResult> {
   if (!['accept', 'reject'].includes(input.decision)) {
-    throw new Error(`Unknown verdict decision: ${input.decision}`);
+    throw badRequest(`Unknown verdict decision: ${input.decision}`);
   }
   return withTransaction(async (conn) => {
     const record = await taskRecord(conn, taskId, true);
     if (!record) throw taskNotFound(taskId);
     await requireTaskOperator(conn, input.operator_principal_id, record.author_account_id);
     if (!['pending_confirm', 'submitted'].includes(record.task.status)) {
-      throw new Error(`Task ${taskId} is ${record.task.status}; verdict requires submitted or pending_confirm`);
+      throw conflict(`Task ${taskId} is ${record.task.status}; verdict requires submitted or pending_confirm`);
     }
     const currentAttempts = record.task.attempts;
     const nextAttempts = input.decision === 'reject'
@@ -739,7 +740,7 @@ export async function reopenTask(
     if (!record) throw taskNotFound(taskId);
     await requireTaskOperator(conn, input.operator_principal_id, record.author_account_id);
     if (!['failed', 'done', 'cancelled', 'pending_confirm', 'claimed'].includes(record.task.status)) {
-      throw new Error(`Task ${taskId} is ${record.task.status}; only failed, done, cancelled, pending_confirm, or claimed tasks can be reopened`);
+      throw conflict(`Task ${taskId} is ${record.task.status}; only failed, done, cancelled, pending_confirm, or claimed tasks can be reopened`);
     }
     const keepClaimed = record.task.status === 'claimed' && record.task.assignee_principal_id !== null;
     const privateAssigned = record.post.visibility !== 'public' && record.task.assignee_principal_id !== null;
@@ -788,6 +789,9 @@ export async function reassignTask(
         'assignee_principal_id',
       );
     }
+    if (!['open', 'claimed', 'failed'].includes(record.task.status)) {
+      throw conflict(`Task ${taskId} is ${record.task.status}; only open, claimed, or failed tasks can be reassigned`);
+    }
     const assigned = input.assignee_principal_id !== null;
     const nextStatus: TaskStatus = assigned ? 'claimed' : 'open';
     await conn.query(
@@ -822,7 +826,10 @@ export async function cancelTask(
     if (!record) throw taskNotFound(taskId);
     await requireTaskOperator(conn, input.operator_principal_id, record.author_account_id);
     if (record.task.status === 'cancelled') {
-      throw new Error(`Task ${taskId} is already cancelled`);
+      throw conflict(`Task ${taskId} is already cancelled`);
+    }
+    if (record.task.status === 'done') {
+      throw conflict(`Task ${taskId} is done; completed tasks cannot be cancelled`);
     }
     await conn.query(
       `UPDATE post_task SET status = 'cancelled', closed_at = ? WHERE post_id = ?`,
@@ -848,10 +855,10 @@ export async function listTasks(
   filter: ListTasksFilter,
 ): Promise<{ items: TaskListItem[]; total: number }> {
   if (!['pool', 'mine', 'due'].includes(filter.view)) {
-    throw new Error(`Unknown task list view: ${filter.view}`);
+    throw badRequest(`Unknown task list view: ${filter.view}`);
   }
   if (filter.view !== 'pool' && !filter.principal_id) {
-    throw new Error(`${filter.view} view requires principal_id`);
+    throw badRequest(`${filter.view} view requires principal_id`);
   }
   const predicates = ['p.kind = \'task\'', 'p.deleted_at IS NULL'];
   const params: unknown[] = [];
@@ -887,7 +894,7 @@ export async function listTasks(
   }
   if (filter.status !== undefined) {
     const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-    if (statuses.length === 0) throw new Error('status filter cannot be empty');
+    if (statuses.length === 0) throw badRequest('status filter cannot be empty');
     predicates.push(`t.status IN (${statuses.map(() => '?').join(', ')})`);
     params.push(...statuses);
   }

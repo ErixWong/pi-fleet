@@ -1,5 +1,6 @@
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import { principalAuthMiddleware, requirePrincipal } from '../../auth-principal.js';
+import { AppError } from '../../util/errors.js';
 import { attachmentsV2Router } from './attachments.js';
 import { authV2Router } from './auth.js';
 import { eventsV2Router } from './events.js';
@@ -33,3 +34,18 @@ v2Router.use('/events', eventsV2Router);
 v2Router.use('/hosts', hostsV2Router);
 v2Router.use('/keys', identitiesV2Router);
 v2Router.use(authV2Router);
+
+v2Router.use((
+  err: unknown,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+) => {
+  console.error('[v2 error]', err);
+  if (res.headersSent) return;
+  if (err instanceof AppError) {
+    res.status(err.status).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: '内部错误' });
+});

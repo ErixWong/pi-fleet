@@ -1,6 +1,7 @@
 import type { PoolConnection } from 'mariadb';
 import { getPool, withTransaction } from '../db/pool.js';
 import { newId } from '../id.js';
+import { badRequest, notFound } from '../util/errors.js';
 import { recordEvent } from './event-outbox.js';
 
 export type ScanStatus = 'pending' | 'clean' | 'infected' | 'skipped' | 'error';
@@ -131,12 +132,12 @@ function isDuplicateKeyError(error: unknown): boolean {
 export async function createAttachment(
   input: CreateAttachmentInput,
 ): Promise<{ attachment: Attachment; deduped: boolean }> {
-  if (!input.account_id || !input.owner_principal_id) throw new Error('attachment owner is required');
-  if (!input.filename) throw new Error('attachment filename is required');
+  if (!input.account_id || !input.owner_principal_id) throw badRequest('attachment owner is required');
+  if (!input.filename) throw badRequest('attachment filename is required');
   if (!Number.isFinite(input.size_bytes) || input.size_bytes < 0) {
-    throw new Error('attachment size_bytes must be a non-negative number');
+    throw badRequest('attachment size_bytes must be a non-negative number');
   }
-  if (!input.sha256) throw new Error('attachment sha256 is required');
+  if (!input.sha256) throw badRequest('attachment sha256 is required');
   return withTransaction(async (conn) => {
     const ownerRows = rows(await conn.query(
       `SELECT account_id
@@ -145,9 +146,9 @@ export async function createAttachment(
         LIMIT 1`,
       [input.owner_principal_id],
     ));
-    if (!ownerRows[0]) throw new Error(`attachment owner not found: ${input.owner_principal_id}`);
+    if (!ownerRows[0]) throw notFound(`attachment owner not found: ${input.owner_principal_id}`);
     if (stringValue(ownerRows[0].account_id) !== input.account_id) {
-      throw new Error('attachment owner belongs to another account');
+      throw notFound('attachment owner belongs to another account');
     }
 
     const existingResult = await conn.query(
@@ -299,11 +300,11 @@ export async function markScanStatus(
   expectedStatus?: ScanStatus,
 ): Promise<Attachment> {
   if (!['pending', 'clean', 'infected', 'skipped', 'error'].includes(status)) {
-    throw new Error(`Unknown scan status: ${status}`);
+    throw badRequest(`Unknown scan status: ${status}`);
   }
   return withTransaction(async (conn) => {
     const before = await attachmentByIdWithConnection(conn, id, true);
-    if (!before) throw new Error(`Attachment not found: ${id}`);
+    if (!before) throw notFound(`Attachment not found: ${id}`);
     const update = expectedStatus === undefined
       ? await conn.query(
         `UPDATE attachment
@@ -338,7 +339,7 @@ export async function markScanStatus(
 export async function softDeleteAttachment(id: string): Promise<void> {
   await withTransaction(async (conn) => {
     const before = await attachmentByIdWithConnection(conn, id, true);
-    if (!before) throw new Error(`Attachment not found: ${id}`);
+    if (!before) throw notFound(`Attachment not found: ${id}`);
     if (before.deleted_at) return;
     const deletedAt = nowString();
     await conn.query(`UPDATE attachment SET deleted_at = ? WHERE id = ?`, [deletedAt, id]);
@@ -388,7 +389,7 @@ async function createDeliverableWithConnection(
   conn: PoolConnection,
   input: CreateDeliverableInput,
 ): Promise<Deliverable> {
-  if (!input.post_id || !input.name) throw new Error('deliverable post_id and name are required');
+  if (!input.post_id || !input.name) throw badRequest('deliverable post_id and name are required');
   const postResult = await conn.query(
     `SELECT account_id, author_principal_id
        FROM post
@@ -398,7 +399,7 @@ async function createDeliverableWithConnection(
     [input.post_id],
   );
   const post = rows(postResult)[0];
-  if (!post) throw new Error(`Post not found: ${input.post_id}`);
+  if (!post) throw notFound(`Post not found: ${input.post_id}`);
 
   if (input.attachment_id) {
     const attachmentResult = await conn.query(
@@ -409,10 +410,10 @@ async function createDeliverableWithConnection(
       [input.attachment_id],
     );
     const attachment = rows(attachmentResult)[0];
-    if (!attachment) throw new Error(`Attachment not found: ${input.attachment_id}`);
-    if (attachment.deleted_at) throw new Error(`Attachment is deleted: ${input.attachment_id}`);
+    if (!attachment) throw notFound(`Attachment not found: ${input.attachment_id}`);
+    if (attachment.deleted_at) throw notFound(`Attachment is deleted: ${input.attachment_id}`);
     if (stringValue(attachment.account_id) !== stringValue(post.account_id)) {
-      throw new Error('deliverable attachment belongs to another account');
+      throw notFound('deliverable attachment belongs to another account');
     }
     const ownerResult = await conn.query(
       `SELECT account_id
@@ -422,7 +423,7 @@ async function createDeliverableWithConnection(
       [attachment.owner_principal_id],
     );
     if (stringValue(rows(ownerResult)[0]?.account_id) !== stringValue(post.account_id)) {
-      throw new Error('deliverable attachment owner belongs to another account');
+      throw notFound('deliverable attachment owner belongs to another account');
     }
   }
 
