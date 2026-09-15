@@ -2,93 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawnSync } from 'node:child_process';
 
 export const AGENT_CONFIG_DIR = path.join(os.homedir(), '.config', 'pi-agent');
 export const AGENT_CONFIG_PATH = path.join(AGENT_CONFIG_DIR, 'config.json');
 const PI_AGENT_DIR = path.join(os.homedir(), '.pi', 'agent');
 const PI_MCP_PATH = path.join(PI_AGENT_DIR, 'mcp.json');
 const PI_MCP_BACKUP_PATH = path.join(PI_AGENT_DIR, 'mcp.json.bak-pi-agent');
-const SUPPORTED_CLIS = new Set(['pi', 'copilot', 'claude', 'codex', 'erix', 'auto']);
-
-/** 执行器代装命令（平台相关；LLM 订阅/models.json 仍用户自理） */
-function installCommandFor(cli) {
-  const isWin = process.platform === 'win32';
-  switch (cli) {
-    case 'pi': return isWin ? 'powershell -c "irm https://pi.dev/install.ps1 | iex"' : 'curl -fsSL https://pi.dev/install.sh | sh';
-    case 'copilot': return 'npm install -g @github/copilot';
-    case 'claude': return 'npm install -g @anthropic-ai/claude-code';
-    case 'codex': return 'npm install -g @openai/codex';
-    case 'erix': return 'npm install -g erix-agent || (cd ~/projects/erix-llm-kit && npm link)';
-    default: return '';
-  }
-}
-
-/** 常见 npm/本地 bin 目录（systemd/非登录 shell 的 PATH 常缺 npm 全局目录） */
-function extraBinDirs() {
-  const dirs = [];
-  if (process.platform === 'win32' && process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'));
-  const home = os.homedir();
-  dirs.push(path.join(home, '.npm-global', 'bin'), path.join(home, '.local', 'bin'), path.join(home, 'bin'));
-  if (process.env.NVM_BIN) dirs.push(process.env.NVM_BIN);
-  return [...new Set(dirs)];
-}
-
-/** 探测指定 CLI 是否已安装（PATH + 常见 bin 目录兑底） */
-export function hasCli(cli) {
-  const probe = process.platform === 'win32' ? 'where' : 'which';
-  const result = spawnSync(probe, [cli], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  if (result.status === 0) return true;
-  for (const dir of extraBinDirs()) {
-    const exts = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
-    for (const ext of exts) {
-      try {
-        if (fs.existsSync(path.join(dir, cli + ext))) return true;
-      } catch { /* 忽略 */ }
-    }
-  }
-  return false;
-}
-
-/** 已安装的候选执行器（auto 时选第一个） */
-export function detectClis() {
-  return [...SUPPORTED_CLIS].filter((cli) => cli !== 'auto' && hasCli(cli));
-}
-
-/** 提示 + 可选代装缺失的执行器；拒绝代装只 warn 不阻断（用户可事后自装） */
-async function ensureCliInstalled(cli) {
-  if (cli === 'auto') {
-    const found = detectClis();
-    if (found.length === 0) {
-      console.log('未检测到任何执行器（pi/copilot/claude/codex）。建议先安装一个，例如：');
-      console.log(`  ${installCommandFor('pi')}`);
-      console.log('auto 模式下将回退 pi（若之后安装，重启 pi-agent run 即生效）。');
-    } else {
-      console.log(`已检测到执行器：${found.join('、')}（auto 将优先用 ${found[0]}）`);
-    }
-    return;
-  }
-  if (hasCli(cli)) return;
-  const installCmd = installCommandFor(cli);
-  console.log(`未检测到执行器 ${cli}。安装命令：`);
-  console.log(`  ${installCmd || `请参考 ${cli} 官方安装方式`}`);
-  if (!installCmd) {
-    console.log(`暂不支持自动安装 ${cli}，请手动安装。`);
-    return;
-  }
-  const ans = await ask('是否现在代装？（将执行远程安装脚本）', 'n');
-  if (!/^y/i.test(ans)) {
-    console.log(`已跳过代装。安装 ${cli} 后重新运行 pi-agent setup 或直接 pi-agent run（未安装时任务会兜底报错）。`);
-    return;
-  }
-  console.log(`执行：${installCmd}`);
-  const r = spawnSync(installCmd, { stdio: 'inherit', shell: true, cwd: os.homedir() });
-  if (r.status !== 0) {
-    console.log(`代装失败（exit=${r.status}），请手动安装 ${cli} 后重试。`);
-    return;
-  }
-  console.log(hasCli(cli) ? `✓ ${cli} 已就绪` : `代装完成但未探测到 ${cli}（可能不在 PATH，新开终端/重启 daemon 即生效）。`);
-}
 
 function readObject(filePath) {
   if (!fs.existsSync(filePath)) return {};
@@ -107,14 +26,13 @@ function writeJsonAtomic(filePath, value) {
   fs.chmodSync(filePath, 0o600);
 }
 
-// 共享 readline 单例（管道/EOF 下多次提问稳定；EOF 时用默认值兑底，避免挂起或静默退出）
 let sharedRl = null;
 const pendingAsks = new Set();
+
 function getRl() {
   if (sharedRl) return sharedRl;
   sharedRl = readline.createInterface({ input: process.stdin, output: process.stdout });
   sharedRl.on('close', () => {
-    // EOF：所有未回答的 ask 用默认值兑底（已回答的已从 pending 移除，resolve 幂等）
     for (const handler of [...pendingAsks]) handler('');
     pendingAsks.clear();
   });
@@ -144,11 +62,8 @@ async function ask(question, defaultValue = '') {
             resolve(value || defaultValue);
             return;
           }
-          if (char === '\u007f') {
-            value = value.slice(0, -1);
-          } else if (char >= ' ') {
-            value += char;
-          }
+          if (char === '\u007f') value = value.slice(0, -1);
+          else if (char >= ' ') value += char;
         }
       };
       process.stdin.setRawMode(true);
@@ -156,12 +71,12 @@ async function ask(question, defaultValue = '') {
       process.stdin.on('data', onData);
     });
   }
-  if (sharedRl?.closed) return defaultValue; // stdin 已 EOF，直接默认值
+  if (sharedRl?.closed) return defaultValue;
   const rl = getRl();
   return new Promise((resolve) => {
     const handler = (raw) => {
       pendingAsks.delete(handler);
-      resolve(raw || defaultValue); // 回车 = 接受默认值
+      resolve(raw || defaultValue);
     };
     pendingAsks.add(handler);
     rl.question(`${question}${suffix}：`, handler);
@@ -182,37 +97,28 @@ function normalizeUrl(value) {
   return url;
 }
 
-function normalizeCli(value) {
-  const cli = String(value ?? '').trim().toLowerCase();
-  if (!SUPPORTED_CLIS.has(cli)) throw new Error(`执行器必须是 ${[...SUPPORTED_CLIS].join('|')}`);
-  return cli;
-}
-
 export function loadAgentConfig(home = os.homedir()) {
   const configPath = path.join(home, '.config', 'pi-agent', 'config.json');
   if (!fs.existsSync(configPath)) return null;
   const config = readObject(configPath);
   if (!config.url || !config.key) return null;
   return {
-    ...config,
     url: normalizeUrl(config.url),
     key: String(config.key),
-    name: String(config.name ?? os.hostname()),
-    cli: normalizeCli(config.cli || 'auto'),
   };
 }
 
+/**
+ * Configure the key issued by a platform administrator.
+ * Registration and principal creation happen on the platform, not on the client.
+ */
 export async function runSetup(options = {}) {
-  const existing = fs.existsSync(AGENT_CONFIG_PATH) ? readObject(AGENT_CONFIG_PATH) : {};
-  const url = normalizeUrl(options.url ?? await ask('平台地址', 'http://127.0.0.1:3200'));
+  const url = normalizeUrl(
+    options.url ?? await ask('平台地址', process.env.PLATFORM_URL || 'http://127.0.0.1:3000'),
+  );
   const key = String(options.key ?? await ask('Agent key（不回显）')).trim();
-  const name = String(options.name ?? await ask('主机名', os.hostname())).trim() || os.hostname();
-  const cli = normalizeCli(options.cli ?? await ask('执行器（pi|erix|copilot|claude|codex|auto）', 'auto'));
   if (!key) throw new Error('agent key 不能为空');
-  if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(key)) throw new Error('主机名和 agent key 不能包含换行符');
-
-  // 执行器缺失检测 + 代装提示（不阻断：拒绝代装可后续自装）
-  await ensureCliInstalled(cli);
+  if (/[\r\n]/.test(key)) throw new Error('agent key 不能包含换行符');
 
   fs.mkdirSync(PI_AGENT_DIR, { recursive: true, mode: 0o700 });
   let mcp = {};
@@ -222,13 +128,17 @@ export async function runSetup(options = {}) {
     mcp = readObject(PI_MCP_PATH);
   }
   if (!mcp.mcpServers) mcp.mcpServers = {};
-  if (!mcp.mcpServers || typeof mcp.mcpServers !== 'object' || Array.isArray(mcp.mcpServers)) {
+  if (
+    typeof mcp.mcpServers !== 'object'
+    || Array.isArray(mcp.mcpServers)
+  ) {
     throw new Error('已有 mcp.json 的 mcpServers 不是对象');
   }
   const oldServer = mcp.mcpServers['task-dispatch'];
   mcp.mcpServers['task-dispatch'] = {
     ...(oldServer && typeof oldServer === 'object' && !Array.isArray(oldServer) ? oldServer : {}),
-    url: `${url}/mcp`,
+    type: 'http',
+    url: `${url}/mcp2`,
     auth: 'bearer',
     bearerToken: key,
     lifecycle: 'lazy',
@@ -236,35 +146,7 @@ export async function runSetup(options = {}) {
   writeJsonAtomic(PI_MCP_PATH, mcp);
   console.log(`已写入 ${PI_MCP_PATH}`);
 
-  // erix-agent：标准 .mcp.json（url + headers）；本机装了 erix 就预写（幂等——即使当前用 pi，切 erix 即用）
-  if (hasCli('erix')) {
-    const erixHome = path.join(os.homedir(), '.erix');
-    const ERIX_MCP_PATH = path.join(erixHome, 'mcp.json');
-    const ERIX_MCP_BACKUP = path.join(erixHome, 'mcp.json.bak-pi-agent');
-    fs.mkdirSync(erixHome, { recursive: true, mode: 0o700 });
-    let emcp = {};
-    if (fs.existsSync(ERIX_MCP_PATH)) {
-      fs.copyFileSync(ERIX_MCP_PATH, ERIX_MCP_BACKUP);
-      fs.chmodSync(ERIX_MCP_BACKUP, 0o600);
-      emcp = readObject(ERIX_MCP_PATH);
-    }
-    if (!emcp.mcpServers) emcp.mcpServers = {};
-    const oldErix = emcp.mcpServers['task-dispatch'];
-    emcp.mcpServers['task-dispatch'] = {
-      ...(oldErix && typeof oldErix === 'object' && !Array.isArray(oldErix) ? oldErix : {}),
-      url: `${url}/mcp`,
-      headers: { Authorization: `Bearer ${key}` },
-    };
-    writeJsonAtomic(ERIX_MCP_PATH, emcp);
-    console.log(`已写入 ${ERIX_MCP_PATH}`);
-  }
-
   fs.mkdirSync(AGENT_CONFIG_DIR, { recursive: true, mode: 0o700 });
-  writeJsonAtomic(AGENT_CONFIG_PATH, { ...existing, url, key, name, cli });
+  writeJsonAtomic(AGENT_CONFIG_PATH, { url, key });
   console.log(`已写入 ${AGENT_CONFIG_PATH}`);
-
-  const modelsPath = path.join(os.homedir(), '.pi', 'agent', 'models.json');
-  if (!fs.existsSync(modelsPath)) {
-    console.log('LLM provider 用户自理：请自行配置 ~/.pi/agent/models.json');
-  }
 }

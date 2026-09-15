@@ -1,7 +1,8 @@
 # 数据模型：post 原语模型
 
 > **状态**：设计契约（2026-09-13）。落地 issue：**#11**（总纲）、**#12**（principal+scope）、**#13**（ID 约定）。
-> **实现落点**：`src/db.ts`（DDL）、`src/id.ts`（ID 生成）、`src/service/*`（业务层）。
+> **实现落点**：`src/db/schema.ts`（DDL）、`src/id.ts`（ID 生成）、
+> `src/service/*`（业务层）。
 > **前提**：开发阶段**直接重建**，不迁移历史数据（旧库丢弃）。
 
 ---
@@ -362,8 +363,9 @@ CREATE TABLE post_summary (
 
 **服务层约定**（批次 2b 定下）：
 - **唯一验收入口**：`done`/`failed` **只能**由 `verdictTask` 产生；不存在绕过验收链直接完成任务的函数（旧模型的 `/tasks/resolve` 类旁路不迁移）
-- **预检与 LLM 验收**：`submitTask` 先跑**程序预检**（交付物存在性/非空/附件未删且 `scan_status ≠ infected`）；LLM 验收通过**可注入的 `verifier` 接口**（本批只定义接口，批次 4 接入）。`verifier` 返回失败 = 一次验收失败（`attempts+1`，回 `claimed` 或超限 `failed`）
-- **scope 门禁不在此层**：本层只校验“主体存在 + operator 与任务账号一致”；`hasScope` 门禁由**接入层**（批次 4）统一执行
+- **预检只做程序校验**：`submitTask` 校验交付物存在性、非空、附件未删且
+  `scan_status != infected`；当前不存在 LLM 审核/验收旁路
+- **scope 门禁不在此层**：本层只校验主体和账号；`hasScope` 门禁由 REST/MCP2 接入层执行
 
 ### 3.3 资源
 
@@ -497,7 +499,7 @@ CREATE TABLE `trigger` (
 
 **关键**：`post_task.pipeline_step_id` 可空 → 独立任务是一等公民；编排是**可选组织层**（issue #10 的目标在此自然达成）。
 
-### 3.6 配置
+### 3.6 运行配置（非管理设置面）
 
 ```sql
 CREATE TABLE setting (
@@ -517,6 +519,7 @@ CREATE TABLE setting_history (
   KEY idx_seth_key (setting_key, id)
 ) ENGINE=InnoDB;
 
+-- 以下 LLM 表是 schema 预留；当前没有 LLM service 或管理端配置入口
 CREATE TABLE llm_provider (
   id         VARCHAR(32) PRIMARY KEY,
   account_id VARCHAR(32) NOT NULL,
@@ -557,7 +560,7 @@ CREATE TABLE llm_call (
 ) ENGINE=InnoDB;
 ```
 
-### 3.7 标签与声望
+### 3.7 标签与声望（schema 预留，当前不存在业务功能）
 
 ```sql
 CREATE TABLE tag (
@@ -668,30 +671,15 @@ post(detail, id) → {
 
 ## 8. 摘要机制
 
-**触发**（前提：线程有效消息 ≥ **5** 条，短线程读原文比读摘要快）：
-- 新增单条 > **50** 字符，或
-- 未摘要累积 > **200** 字符，或
-- **显式请求**（人类浏览时点按钮 / agent 调 `post(summary, refresh=true)`）
-
-**必须的配套**（否则 agent 时代字符爆炸 = 成本黑洞）：
-
-| 配套 | 做法 |
-|---|---|
-| 合并触发 | 同一 `root_id` 的触发在 ~500ms 窗口内合并成一次 |
-| 每线程串行 | 同一线程同时只有一个摘要任务；跑完再看有无新消息 |
-| 增量输入 | 旧摘要 + `up_to_post_id` 之后的新消息（否则 O(n²)） |
-| 失败降级 | 保留旧摘要，不阻塞任何东西 |
-| 便宜模型 | 复用 `llm_model` 用途映射（`purpose=summary`），`tokens` 留痕 |
-| 排除 | system 消息 / deleted / 摘要自身（防循环） |
-| 全量重摘 | 每 20 次增量重摘一次（防压缩漂移） |
-
-**实现形态**：摘要 worker 是 **`event` 表的消费者**（不需要新基础设施）。
+当前没有摘要 worker、LLM provider 或设置管理 API。`post_summary`、`llm_*` 表保留为
+schema 预留，`post(detail)` 可以返回已有摘要记录，但平台不会自动生成摘要或调用外部
+模型。
 
 ---
 
 ## 9. 重建方案（开发阶段，不做迁移）
 
-1. **旧库丢弃**：`initDb()` 只建表（`CREATE TABLE IF NOT EXISTS`），**无迁移分支、无 DROP 路径**（旧 `db.ts` 里"检测旧结构即 DROP 六张表"的危险逻辑必须不出现）
+1. **新库初始化**：`initSchema()` 只建表（`CREATE TABLE IF NOT EXISTS`），**无迁移分支、无 DROP 路径**
 2. **一把建起**：新 schema 全量创建；测试数据由脚本重新生成
 3. **验收**：`npm test`（MCP/REST/Web 三套）全部重写为适配新模型后跑绿
 4. **前置确认**：现有数据（docker 测试主机 + 测试任务）可丢
@@ -721,7 +709,6 @@ post(detail, id) → {
 ## 关联
 
 - **issue #11**（总纲）· **#12**（principal+scope+审计）· **#13**（ID 约定）
-- **#9**（event 驱动推送）：§3.4 的 `event` 表是其底座
+- `docs/design/architecture.md`（当前 v2 service 与后台 worker）
 - `docs/design/db-mariadb.md`（选型与连接池约定）
-- `docs/design/open-ecosystem.md`（可见性/验收链语义，本模型是其结构落地）
-- `docs/design/orchestration.md`（编排语义，本模型把 plan/stage 降级为 `pipeline`/`pipeline_step`）
+- `docs/design/open-ecosystem.md`（当前公共任务视图）

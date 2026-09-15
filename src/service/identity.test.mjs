@@ -145,6 +145,23 @@ test('key 轮换只宽限指定 key，其他未撤销 key 的过期时间不变'
   assert.equal(secondAfter?.expires_at, '2099-01-01 00:00:00');
 });
 
+test('禁用账号的 key 不再通过认证', async () => {
+  const created = await createApiKey({
+    principal_id: agent.id,
+    scopes: ['task:read'],
+  });
+  createdApiKeyIds.push(created.apiKey.id);
+  await getPool().query(
+    `UPDATE account SET status = 'disabled' WHERE id = ?`,
+    [account.id],
+  );
+  assert.equal(await verifyApiKey(created.key), null);
+  await getPool().query(
+    `UPDATE account SET status = 'active' WHERE id = ?`,
+    [account.id],
+  );
+});
+
 test('hasScope 支持单 scope 和 all-of 检查', () => {
   assert.equal(hasScope(['task:read', 'task:submit'], 'task:read'), true);
   assert.equal(hasScope(['task:read'], 'task:write'), false);

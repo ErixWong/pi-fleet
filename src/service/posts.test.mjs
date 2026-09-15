@@ -20,6 +20,7 @@ const {
   addTarget,
   createPost,
   deletePost,
+  getDirectReplies,
   getPostDetail,
   getSummary,
   getThread,
@@ -28,7 +29,7 @@ const {
   replyPost,
   saveSummary,
 } = posts;
-const { createDeliverable } = resources;
+const { createDeliverable, softDeleteAttachment } = resources;
 
 await initSchema();
 
@@ -222,7 +223,7 @@ test('0/1/3 targets 可寻址，收件箱过滤和已读标记生效', { concurr
   assert.ok(target.read_at);
 });
 
-test('软删保留行并且线程查询仍包含已删 post', { concurrency: false }, async () => {
+test('软删保留行但线程和详情读取不返回已删 post', { concurrency: false }, async () => {
   const post = await createPost({
     account_id: account.id,
     kind: 'note',
@@ -236,7 +237,8 @@ test('软删保留行并且线程查询仍包含已删 post', { concurrency: fal
   assert.equal(rows.length, 1);
   assert.ok(rows[0].deleted_at);
   const thread = await getThread(post.root_id);
-  assert.equal(thread.some((item) => item.id === post.id), true);
+  assert.equal(thread.some((item) => item.id === post.id), false);
+  assert.equal(await getPostDetail(post.id), null);
 });
 
 test('getPostDetail 返回结构化上下文，recent 限制为 5 条并计算 more', { concurrency: false }, async () => {
@@ -305,6 +307,23 @@ test('getPostDetail 返回结构化上下文，recent 限制为 5 条并计算 m
   assert.equal(detail.recent.length, 5);
   assert.equal(detail.more.count, 2);
   assert.match(detail.more.hint, /post\(list, root_id=/);
+
+  const deletedReply = await replyPost({
+    parent_id: task.id,
+    author_principal_id: recipientOne.id,
+    body: 'soft-deleted detail reply',
+  });
+  postIds.push(deletedReply.id);
+  await deletePost(deletedReply.id);
+  const afterDelete = await getPostDetail(task.id);
+  assert.equal(afterDelete.recent.some((item) => item.id === deletedReply.id), false);
+  assert.equal(afterDelete.more.count, 2);
+  assert.equal(afterDelete.post.reply_count, 5);
+  assert.equal((await getDirectReplies(task.id)).some((item) => item.id === deletedReply.id), false);
+  assert.equal(afterDelete.summary.pending, 6);
+  await softDeleteAttachment(attachment.attachment.id);
+  const afterAttachmentDelete = await getPostDetail(task.id);
+  assert.equal(afterAttachmentDelete.deliverables[0].attachment, null);
 });
 
 test('创建写入和事件同事务，回滚后两者都不存在', { concurrency: false }, async () => {

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { api } from '../api';
 
 const router = useRouter();
+const username = ref('');
 const password = ref('');
 const error = ref('');
 const loading = ref(false);
@@ -12,8 +13,9 @@ async function submit() {
   error.value = '';
   loading.value = true;
   try {
-    await api.login(password.value);
-    router.push('/');
+    const data = await api.login(username.value.trim(), password.value);
+    localStorage.setItem('pm_key', data.key);
+    await router.push('/');
   } catch (e) {
     error.value = e.message;
   } finally {
@@ -34,12 +36,16 @@ async function submit() {
           </div>
           <h4 class="mb-1 fw-bold">任务分发平台</h4>
           <div class="text-secondary small">COMMAND CENTER</div>
-          <div class="text-secondary small mt-1">Agent 协作 · 任务调度 · 报告归档</div>
+          <div class="text-secondary small mt-1">主机协作 · 任务分发 · 交付验收</div>
         </div>
-        <div v-if="error" class="alert alert-danger py-2 small"><i class="bi bi-exclamation-triangle me-1"></i>{{ error }}</div>
+        <div v-if="error" class="alert alert-danger py-2 small">
+          <i class="bi bi-exclamation-triangle me-1"></i>{{ error }}
+        </div>
         <form @submit.prevent="submit">
-          <label class="form-label">管理员密码</label>
-          <input v-model="password" type="password" class="form-control form-control-lg mb-3" autofocus required placeholder="••••••••">
+          <label class="form-label">用户名</label>
+          <input v-model="username" type="text" class="form-control form-control-lg mb-3" autocomplete="username" autofocus required>
+          <label class="form-label">密码</label>
+          <input v-model="password" type="password" class="form-control form-control-lg mb-3" autocomplete="current-password" required>
           <button class="btn btn-primary w-100 py-2" :disabled="loading">
             <i v-if="loading" class="bi bi-arrow-repeat me-1 spin"></i>
             <i v-else class="bi bi-box-arrow-in-right me-1"></i>{{ loading ? '登录中…' : '登录' }}

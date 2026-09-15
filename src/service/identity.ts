@@ -1,12 +1,13 @@
-import crypto from 'node:crypto';
+import crypto, { scryptSync, timingSafeEqual } from 'node:crypto';
 import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
+import { recordEvent } from './event-outbox.js';
 
 export { getPool, initSchema } from '../db/pool.js';
 
 const PRINCIPAL_KINDS = new Set(['user', 'host', 'agent', 'service']);
-const SCOPES = new Set([
+export const SCOPES = new Set([
   'post:read',
   'post:write',
   'task:read',
@@ -18,6 +19,7 @@ const SCOPES = new Set([
   'attachment:write',
   'device:execute',
   'key:manage',
+  'host:manage',
   'moderate',
 ]);
 
@@ -36,6 +38,7 @@ export type Scope = (
   | 'attachment:write'
   | 'device:execute'
   | 'key:manage'
+  | 'host:manage'
   | 'moderate'
 );
 
@@ -64,6 +67,17 @@ export interface Device {
   hostname: string;
   os: string;
   run_user: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+}
+
+export type HostStatus = 'active' | 'disabled';
+
+export interface HostSummary {
+  id: string;
+  account_id: string;
+  name: string;
+  status: HostStatus;
   last_seen_at: string | null;
   created_at: string;
 }
@@ -115,7 +129,7 @@ export interface RotateApiKeyOptions {
 
 export interface VerifiedApiKey {
   principal: Principal;
-  scopes: string[];
+  scopes: Scope[];
   key_id: string;
 }
 
@@ -154,6 +168,31 @@ function booleanValue(value: unknown): boolean {
   return Number(value) === 1;
 }
 
+/** Validate the scrypt format used by migrated administrator passwords. */
+export function verifyPassword(password: string, stored: string): boolean {
+  const [scheme, saltHex, hashHex] = stored.split(':');
+  if (
+    scheme !== 'scrypt'
+    || !saltHex
+    || !hashHex
+    || saltHex.length % 2 !== 0
+    || hashHex.length % 2 !== 0
+    || !/^[0-9a-f]+$/i.test(saltHex)
+    || !/^[0-9a-f]+$/i.test(hashHex)
+  ) {
+    return false;
+  }
+  try {
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(hashHex, 'hex');
+    if (salt.length === 0 || expected.length === 0) return false;
+    const derived = scryptSync(password, salt, expected.length) as Buffer;
+    return timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
 function validateScopes(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string')) {
     throw new Error('scopes must be an array of strings');
@@ -164,7 +203,7 @@ function validateScopes(scopes: string[]): string[] {
   return unique;
 }
 
-function parseScopes(value: unknown): string[] {
+function parseScopes(value: unknown): Scope[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stringValue(value));
@@ -174,7 +213,11 @@ function parseScopes(value: unknown): string[] {
   if (!Array.isArray(parsed) || parsed.some((scope) => typeof scope !== 'string')) {
     throw new Error('Invalid scopes JSON in api_key');
   }
-  return parsed;
+  const scopes = parsed.filter((scope): scope is Scope => SCOPES.has(scope));
+  if (scopes.length !== parsed.length) {
+    throw new Error('Invalid scope in api_key');
+  }
+  return scopes;
 }
 
 function accountFromRow(row: DbRow): Account {
@@ -207,6 +250,17 @@ function deviceFromRow(row: DbRow): Device {
     hostname: stringValue(row.hostname),
     os: stringValue(row.os),
     run_user: nullableString(row.run_user),
+    last_seen_at: nullableString(row.last_seen_at),
+    created_at: stringValue(row.created_at),
+  };
+}
+
+function hostFromRow(row: DbRow): HostSummary {
+  return {
+    id: stringValue(row.id),
+    account_id: stringValue(row.account_id),
+    name: stringValue(row.name),
+    status: row.deleted_at === null || row.deleted_at === undefined ? 'active' : 'disabled',
     last_seen_at: nullableString(row.last_seen_at),
     created_at: stringValue(row.created_at),
   };
@@ -380,6 +434,111 @@ export async function getPrincipal(id: string): Promise<Principal | null> {
   return row ? principalFromRow(row) : null;
 }
 
+async function hostQuery(
+  accountId: string,
+  hostId?: string,
+  includeDeleted = false,
+): Promise<HostSummary[]> {
+  const predicates = [`p.account_id = ?`, `p.kind = 'host'`];
+  const params: unknown[] = [accountId];
+  if (!includeDeleted) predicates.push('p.deleted_at IS NULL');
+  if (hostId !== undefined) {
+    predicates.push('p.id = ?');
+    params.push(hostId);
+  }
+  const result = await getPool().query(
+    `SELECT p.id, p.account_id, p.name, p.deleted_at, p.created_at,
+            d.last_seen_at
+       FROM principal p
+       LEFT JOIN device d ON d.principal_id = p.id
+      WHERE ${predicates.join(' AND ')}
+      ORDER BY p.created_at DESC, p.id DESC`,
+    params,
+  );
+  return rows(result).map(hostFromRow);
+}
+
+export async function listHosts(accountId: string): Promise<HostSummary[]> {
+  return hostQuery(accountId);
+}
+
+export async function getHost(
+  accountId: string,
+  hostId: string,
+): Promise<HostSummary | null> {
+  return (await hostQuery(accountId, hostId))[0] ?? null;
+}
+
+export async function updateHost(
+  accountId: string,
+  hostId: string,
+  changes: { name?: string; status?: HostStatus },
+): Promise<HostSummary | null> {
+  const updatedAt = nowString();
+  await withTransaction(async (conn) => {
+    const result = await conn.query(
+      `SELECT id
+         FROM principal
+        WHERE id = ? AND account_id = ? AND kind = 'host'
+        LIMIT 1
+        FOR UPDATE`,
+      [hostId, accountId],
+    );
+    if (rows(result).length === 0) return;
+
+    const assignments: string[] = [];
+    const params: unknown[] = [];
+    if (changes.name !== undefined) {
+      assignments.push('name = ?');
+      params.push(changes.name);
+    }
+    if (changes.status !== undefined) {
+      assignments.push('deleted_at = ?');
+      params.push(changes.status === 'disabled' ? updatedAt : null);
+    }
+    if (assignments.length === 0) return;
+    params.push(hostId, accountId);
+    await conn.query(
+      `UPDATE principal
+          SET ${assignments.join(', ')}
+        WHERE id = ? AND account_id = ? AND kind = 'host'`,
+      params,
+    );
+  });
+  return (await hostQuery(accountId, hostId, changes.status === 'disabled'))[0] ?? null;
+}
+
+export async function deleteHost(
+  accountId: string,
+  hostId: string,
+): Promise<boolean> {
+  const deletedAt = nowString();
+  return withTransaction(async (conn) => {
+    const result = await conn.query(
+      `SELECT id
+         FROM principal
+        WHERE id = ? AND account_id = ? AND kind = 'host'
+        LIMIT 1
+        FOR UPDATE`,
+      [hostId, accountId],
+    );
+    if (rows(result).length === 0) return false;
+    await conn.query(
+      `UPDATE principal
+          SET deleted_at = ?
+        WHERE id = ? AND account_id = ? AND kind = 'host'`,
+      [deletedAt, hostId, accountId],
+    );
+    await conn.query(
+      `UPDATE api_key
+          SET revoked_at = ?
+        WHERE principal_id = ? AND revoked_at IS NULL`,
+      [deletedAt, hostId],
+    );
+    return true;
+  });
+}
+
 export async function listPrincipals({
   account_id,
   kind,
@@ -550,6 +709,14 @@ async function insertApiKey(
   );
   const row = rows(result)[0];
   if (!row) throw new Error(`API key was not created: ${id}`);
+  await recordEvent(conn, {
+    account_id: principal.account_id,
+    actor_principal_id: principal.id,
+    action: 'key.created',
+    resource_type: 'key',
+    resource_id: id,
+    after_state: { principal_id: principal.id, scopes },
+  });
   return { key, apiKey: apiKeyFromRow(row) };
 }
 
@@ -567,10 +734,13 @@ export async function verifyApiKey(key: string): Promise<VerifiedApiKey | null> 
               p.host_principal_id, p.reputation_score, p.created_at, p.deleted_at
          FROM api_key k
          JOIN principal p ON p.id = k.principal_id
+         JOIN account a ON a.id = p.account_id
         WHERE k.key_hash = ?
           AND k.revoked_at IS NULL
           AND (k.expires_at IS NULL OR k.expires_at > ?)
           AND p.deleted_at IS NULL
+          AND a.status = 'active'
+          AND a.deleted_at IS NULL
         FOR UPDATE`,
       [keyHash, now],
     );
@@ -651,12 +821,34 @@ export async function rotateApiKey(
 }
 
 export async function revokeApiKey(keyId: string): Promise<void> {
-  const result = await getPool().query(
-    `UPDATE api_key SET revoked_at = ?
-      WHERE id = ? AND revoked_at IS NULL`,
-    [nowString(), keyId],
-  );
-  if (affectedRows(result) === 0) throw new Error(`API key not found or already revoked: ${keyId}`);
+  await withTransaction(async (conn) => {
+    const keyRows = rows(await conn.query(
+      `SELECT k.id, k.principal_id, k.revoked_at, p.account_id
+         FROM api_key k
+         JOIN principal p ON p.id = k.principal_id
+        WHERE k.id = ?
+        LIMIT 1
+        FOR UPDATE`,
+      [keyId],
+    ));
+    const key = keyRows[0];
+    if (!key || key.revoked_at) throw new Error(`API key not found or already revoked: ${keyId}`);
+    const revokedAt = nowString();
+    const result = await conn.query(
+      `UPDATE api_key SET revoked_at = ?
+        WHERE id = ? AND revoked_at IS NULL`,
+      [revokedAt, keyId],
+    );
+    if (affectedRows(result) === 0) throw new Error(`API key not found or already revoked: ${keyId}`);
+    await recordEvent(conn, {
+      account_id: stringValue(key.account_id),
+      actor_principal_id: stringValue(key.principal_id),
+      action: 'key.revoked',
+      resource_type: 'key',
+      resource_id: keyId,
+      after_state: { revoked_at: revokedAt },
+    });
+  });
 }
 
 export async function listApiKeys(principalId: string): Promise<ApiKey[]> {
@@ -669,6 +861,19 @@ export async function listApiKeys(principalId: string): Promise<ApiKey[]> {
     [principalId],
   );
   return rows(result).map(apiKeyFromRow);
+}
+
+export async function getApiKey(keyId: string): Promise<ApiKey | null> {
+  const result = await getPool().query(
+    `SELECT id, principal_id, label, scopes, created_at, last_used_at,
+            expires_at, revoked_at
+       FROM api_key
+      WHERE id = ?
+      LIMIT 1`,
+    [keyId],
+  );
+  const row = rows(result)[0];
+  return row ? apiKeyFromRow(row) : null;
 }
 
 export function hasScope(

@@ -1,59 +1,80 @@
-# pi-agent-client
+# @pi-market/pi-agent-client
 
-任务分发平台（agent-market）的 Agent 客户端：**一个常驻守护进程**（任务执行 + 对话桥接 + 心跳），支持多执行器（pi / copilot / claude / codex）。
+`pi-agent` 是运行在 Linux 主机上的 pi 任务执行守护进程（Node.js >= 18）。
+它只使用 v2 协议：daemon 轮询任务，pi 通过 MCP 读取上下文、认领并提交交付物。
 
-## 安装
+## 安装与注册
 
-```bash
-npm install -g @pi-market/pi-agent-client --registry=https://git.erix.vip/api/packages/<owner>/npm/
-```
+1. 平台管理员在目标账号中创建 host principal，并为它创建包含
+   `task:read`、`task:claim`、`task:submit` 的 API key。
+2. 在执行 pi 的主机上安装客户端和 pi：
 
-需要 Node.js ≥ 18。平台地址与 agent key 在平台 Web「注册主机」获取。
+   ```bash
+   npm install -g @pi-market/pi-agent-client
+   ```
 
-## 使用
+3. 只需配置一次平台地址和管理员签发的 key：
 
-```bash
-pi-agent setup            # 交互配置：平台地址 + agent key + 执行器（缺执行器会提示代装）
-pi-agent setup --url http://<平台>:3200 --key pd-xxxx --cli auto   # 全参数非交互
-pi-agent run              # 前台常驻（Ctrl+C 停，类似 pi-web）
-pi-agent install-service  # 可选：安装 systemd 常驻服务（仅 Linux）
-pi-agent uninstall-service
-```
+   ```bash
+   pi-agent setup --key=<key> --url=https://platform.example
+   ```
 
-### setup 做了什么
+   `--url` 可省略，默认 `http://127.0.0.1:3000`。setup 不创建账号、主机或
+   API key；这些注册操作必须由平台管理员完成。
 
-- 写 `~/.config/pi-agent/config.json`（url / key / cli，600）
-- 合并写 `~/.pi/agent/mcp.json` 的 `task-dispatch` 段（平台 MCP，600，原文件备份 `.bak-pi-agent`）——pi 执行任务时据此连平台
-- 检测执行器（pi/copilot/claude/codex）缺失时提示安装命令，可选代装
-- **不配置 LLM provider**（`~/.pi/agent/models.json` 用户自理，如同 pi-web）
+## 运行
 
-## 执行器
-
-`AGENT_CMD` 环境变量或 setup 的 `--cli` / 平台 Web「执行器」下拉控制，取值：`pi`（默认）/ `erix`（自研无头 agent）/ `copilot` / `claude` / `codex` / `auto`（探测已装优先第一个）。
-
-> 已验证全链路：pi、copilot、erix。claude/codex 为 beta（参数按官方文档实现，未真机验证）。对话桥接暂仅 pi（`--mode rpc`）；其他执行器收到对话会回退 pi。
-> erix-agent 的 MCP 配置：setup 预写 `~/.erix/mcp.json`（标准 url+headers 格式），LLM 走 erix 自己的 `~/.erix/config.json` / `LLM_KIT_*` 环境变量（用户自理）。
-
-## 环境变量（run 时覆盖 config）
-
-| 变量 | 说明 |
-|---|---|
-| `PLATFORM_URL` | 平台地址 |
-| `PI_AGENT_KEY` | agent key |
-| `AGENT_CMD` | 执行器（pi/copilot/claude/codex/auto） |
-| `POLL_MS` | 任务轮询周期（默认 60000） |
-| `TASK_TIMEOUT_MS` | 单任务执行超时（默认 1800000 = 30min） |
-| `WORK_ROOT` | 沙箱任务目录根（默认 `~/pi-agent-work`） |
-
-## 平台支持
-
-- **Linux**：完全支持（含 systemd 常驻）
-- **Windows**：核心可用（setup/run/任务/对话）；常驻请用前台 run 或任务计划程序（install-service 仅 Linux）
-
-## 从源码运行（开发）
+前台运行：
 
 ```bash
-node client/src/agent-daemon.mjs   # 需 PLATFORM_URL/PI_AGENT_KEY 环境变量
+pi-agent run
 ```
 
-详见仓库 `docs/agent-onboarding.md`。
+Linux 上安装 systemd 服务：
+
+```bash
+sudo pi-agent install-service
+sudo systemctl status pi-agent
+sudo journalctl -u pi-agent -f
+```
+
+卸载服务：
+
+```bash
+sudo pi-agent uninstall-service
+```
+
+## setup 写入的配置
+
+- `~/.config/pi-agent/config.json`：平台 URL 和 API key（权限 `600`）。
+- `~/.pi/agent/mcp.json`：合并 `task-dispatch` MCP server，URL 为
+  `<platform>/mcp2`，原文件备份为 `mcp.json.bak-pi-agent`。
+
+pi 的模型/provider 配置仍由用户自行维护。daemon 不运行专用心跳；每次带
+Bearer key 的任务列表请求会自动刷新主机活跃时间。
+
+## v2 任务协议
+
+- daemon 使用 `GET /api/v2/tasks?view=due&page_size=N`，请求带
+  `Authorization: Bearer <key>`。
+- 每个返回任务由一个 pi 进程处理。pi 使用 MCP `post(detail)` 获取完整上下文，
+  必要时使用 `task(claim)`，完成后使用 `task(submit)` 提交交付物。
+- 正常完成不由 daemon 代提交。只有 pi 异常退出或超过
+  `TASK_TIMEOUT_MS` 时，daemon 才调用
+  `POST /api/v2/tasks/:id/submit`，body 为
+  `{ "deliverables": [], "message": "..." }`，触发平台失败预检和重试计数。
+
+可选环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PLATFORM_URL` | setup 中的 URL | 覆盖平台地址 |
+| `PI_AGENT_KEY` | setup 中的 key | 覆盖 API key |
+| `POLL_MS` | `60000` | 任务轮询间隔（毫秒） |
+| `TASK_PAGE_SIZE` | `20` | 每次请求任务数（最大 200） |
+| `TASK_TIMEOUT_MS` | `1800000` | 单任务超时（毫秒） |
+| `WORK_ROOT` | `~/pi-agent-work` | 无指定 workdir 时的沙箱根目录 |
+| `PI_CLI` | 自动探测 `pi` | pi CLI 的绝对路径 |
+
+Windows 可使用 `pi-agent run` 前台运行；`install-service` 仅适用于 Linux
+systemd。

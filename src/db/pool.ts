@@ -1,36 +1,29 @@
 import 'dotenv/config';
 import { createPool, type Pool, type PoolConnection } from 'mariadb';
-import { SCHEMA_STATEMENTS } from './schema.js';
+import { config } from '../config.js';
+import { SCHEMA_STATEMENTS, SCHEMA_TABLE_NAMES } from './schema.js';
 
 let pool: Pool | null = null;
-
-/** 老模型库名（新模型禁止建表到这里） */
-const LEGACY_DB = 'task_dispatch';
-
-/**
- * 新模型库名：DB_NAME_NEW 优先；否则用 DB_NAME（当其不是老库时，兼容既有单测的 DB_NAME=erix）；
- * 最后默认 erix。**绝不回落到老库 task_dispatch**——否则新 schema 会被建进老库。
- */
-export function resolveNewDbName(): string {
-  const explicit = process.env.DB_NAME_NEW;
-  if (explicit) return explicit;
-  const fromLegacyVar = process.env.DB_NAME;
-  if (fromLegacyVar && fromLegacyVar !== LEGACY_DB) return fromLegacyVar;
-  return 'erix';
-}
+const UNSUPPORTED_DATABASE = 'task_dispatch';
 
 export function getPool(): Pool {
   if (!pool || pool.closed) {
+    if (config.db.database === UNSUPPORTED_DATABASE) {
+      throw new Error(
+        `不支持旧数据库 "${UNSUPPORTED_DATABASE}"；请通过 DB_NAME_NEW 指定新库`,
+      );
+    }
     pool = createPool({
-      host: process.env.DB_HOST ?? '127.0.0.1',
-      port: Number(process.env.DB_PORT ?? 3306),
-      user: process.env.DB_USER ?? 'root',
-      password: process.env.DB_PASSWORD ?? '',
-      database: resolveNewDbName(),
+      host: config.db.host,
+      port: config.db.port,
+      user: config.db.user,
+      password: config.db.password,
+      database: config.db.database,
       connectionLimit: 5,
       dateStrings: true,
     });
   }
+
   return pool;
 }
 
@@ -51,13 +44,17 @@ export async function withTransaction<T>(
   }
 }
 
-export async function initSchema(): Promise<void> {
-  const target = resolveNewDbName();
-  if (target === LEGACY_DB) {
-    throw new Error(
-      `拒绝把新模型 schema 建进老库 "${LEGACY_DB}"：请用 DB_NAME_NEW 指定新库（如 erix）`,
-    );
-  }
+export async function initSchema(): Promise<{ created: string[] }> {
+  const existingResult = await getPool().query(
+    `SELECT TABLE_NAME AS table_name
+       FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name IN (${SCHEMA_TABLE_NAMES.map(() => '?').join(', ')})`,
+    SCHEMA_TABLE_NAMES,
+  );
+  const existing = new Set(
+    (existingResult as Array<{ table_name?: unknown }>).map((row) => String(row.table_name)),
+  );
   for (const statement of SCHEMA_STATEMENTS) {
     const createIfMissing = statement.replace(
       /^CREATE TABLE\s+/i,
@@ -65,4 +62,16 @@ export async function initSchema(): Promise<void> {
     );
     await getPool().query(createIfMissing);
   }
+  const afterResult = await getPool().query(
+    `SELECT TABLE_NAME AS table_name
+       FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name IN (${SCHEMA_TABLE_NAMES.map(() => '?').join(', ')})`,
+    SCHEMA_TABLE_NAMES,
+  );
+  const after = new Set(
+    (afterResult as Array<{ table_name?: unknown }>).map((row) => String(row.table_name)),
+  );
+  const created = SCHEMA_TABLE_NAMES.filter((tableName) => !existing.has(tableName) && after.has(tableName));
+  return { created };
 }

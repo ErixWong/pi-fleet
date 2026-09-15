@@ -14,7 +14,6 @@ import {
 } from './posts.js';
 import {
   createDeliverable,
-  getAttachment,
   type Deliverable,
 } from './resources.js';
 import { recordEvent } from './event-outbox.js';
@@ -45,10 +44,64 @@ export interface PublishTaskInput {
   };
 }
 
+async function requirePrincipalInAccount(
+  conn: PoolConnection,
+  principalId: string,
+  accountId: string,
+  label: string,
+): Promise<void> {
+  if (!principalId) throw new Error(`${label} is required`);
+  const result = rows(await conn.query(
+    `SELECT account_id
+       FROM principal
+      WHERE id = ? AND deleted_at IS NULL
+      LIMIT 1`,
+    [principalId],
+  ));
+  if (!result[0]) throw new Error(`${label} not found: ${principalId}`);
+  if (stringValue(result[0].account_id) !== accountId) {
+    throw new Error(`${label} belongs to another account`);
+  }
+}
+
 export interface SubmitDeliverableInput {
   name: string;
   attachment_id?: string | null;
   note?: string;
+}
+
+async function precheckDeliverablesWithConnection(
+  conn: PoolConnection,
+  deliverables: SubmitDeliverableInput[],
+  accountId: string,
+): Promise<PrecheckResult> {
+  const issues: string[] = [];
+  if (!Array.isArray(deliverables) || deliverables.length === 0) {
+    return { ok: false, issues: ['at least one deliverable is required'] };
+  }
+  for (const [index, deliverable] of deliverables.entries()) {
+    const name = typeof deliverable?.name === 'string' ? deliverable.name.trim() : '';
+    if (!name) issues.push(`deliverables[${index}].name is required`);
+    const attachmentId = deliverable?.attachment_id;
+    if (!attachmentId) continue;
+    const result = await conn.query(
+      `SELECT account_id, deleted_at, scan_status
+         FROM attachment
+        WHERE id = ?
+        LIMIT 1`,
+      [attachmentId],
+    );
+    const attachment = rows(result)[0];
+    if (!attachment) issues.push(`attachment ${attachmentId} does not exist`);
+    else if (stringValue(attachment.account_id) !== accountId) {
+      issues.push(`attachment ${attachmentId} belongs to another account`);
+    } else if (attachment.deleted_at) {
+      issues.push(`attachment ${attachmentId} is deleted`);
+    } else if (attachment.scan_status === 'infected') {
+      issues.push(`attachment ${attachmentId} is infected`);
+    }
+  }
+  return { ok: issues.length === 0, issues };
 }
 
 export interface SubmitTaskInput {
@@ -393,11 +446,17 @@ export async function claimTask(
   const result = await withTransaction(async (conn) => {
     const record = await taskRecord(conn, taskId, true);
     if (!record) throw taskNotFound(taskId);
+    await requirePrincipalInAccount(
+      conn,
+      input.principal_id,
+      record.author_account_id,
+      'principal_id',
+    );
     const { task, post } = record;
     if (task.assignee_principal_id !== null) {
       throw new Error(`Task ${taskId} has already been claimed by another principal`);
     }
-    if (!['open', 'active'].includes(task.status)) {
+    if (task.status !== 'open') {
       throw new Error(`Task ${taskId} is ${task.status}; only open tasks can be claimed`);
     }
     if (!task.is_ready) {
@@ -447,135 +506,123 @@ export async function claimTask(
   return result.task;
 }
 
-async function precheckDeliverables(
-  deliverables: SubmitDeliverableInput[],
-): Promise<PrecheckResult> {
-  const issues: string[] = [];
-  if (!Array.isArray(deliverables) || deliverables.length === 0) {
-    return { ok: false, issues: ['at least one deliverable is required'] };
-  }
-  for (const [index, deliverable] of deliverables.entries()) {
-    const name = typeof deliverable?.name === 'string' ? deliverable.name.trim() : '';
-    if (!name) issues.push(`deliverables[${index}].name is required`);
-    const attachmentId = deliverable?.attachment_id;
-    if (attachmentId) {
-      const attachment = await getAttachment(attachmentId);
-      if (!attachment) issues.push(`attachment ${attachmentId} does not exist`);
-      else if (attachment.deleted_at) issues.push(`attachment ${attachmentId} is deleted`);
-      else if (attachment.scan_status === 'infected') {
-        issues.push(`attachment ${attachmentId} is infected`);
-      }
-    }
-  }
-  return { ok: issues.length === 0, issues };
-}
-
-async function updateSubmitFailure(
-  taskId: string,
-  principalId: string,
-  issues: string[],
-): Promise<PostTask> {
-  return withTransaction(async (conn) => {
-    const record = await taskRecord(conn, taskId, true);
-    if (!record) throw taskNotFound(taskId);
-    if (record.task.status !== 'claimed') {
-      throw new Error(`Task ${taskId} is ${record.task.status}; only claimed tasks can be submitted`);
-    }
-    if (record.task.assignee_principal_id !== principalId) {
-      throw new Error(`Principal ${principalId} is not the assignee of task ${taskId}`);
-    }
-    const attempts = record.task.attempts + 1;
-    const failed = attempts >= record.task.max_attempts;
-    await conn.query(
-      `UPDATE post_task
-          SET attempts = ?, status = ?, closed_at = ?
-        WHERE post_id = ?`,
-      [attempts, failed ? 'failed' : 'claimed', failed ? nowString() : null, taskId],
-    );
-    const after = await taskRecord(conn, taskId, false);
-    if (!after) throw taskNotFound(taskId);
-    await recordEvent(conn, {
-      account_id: record.author_account_id,
-      actor_principal_id: principalId,
-      action: 'task.precheck_failed',
-      resource_type: 'post',
-      resource_id: taskId,
-      before_state: taskState(record.task),
-      after_state: taskState(after.task),
-      payload: { issues, attempts, max_attempts: record.task.max_attempts },
-    });
-    return after.task;
-  });
-}
-
 export async function submitTask(
   taskId: string,
   input: SubmitTaskInput,
   options: SubmitTaskOptions = {},
 ): Promise<SubmitTaskResult> {
   await requirePrincipal(input.principal_id, 'principal_id');
-  const initial = await getTaskRecord(taskId);
-  if (!initial) throw taskNotFound(taskId);
-  if (initial.task.status !== 'claimed') {
-    throw new Error(`Task ${taskId} is ${initial.task.status}; only claimed tasks can be submitted`);
-  }
-  if (initial.task.assignee_principal_id !== input.principal_id) {
-    throw new Error(`Principal ${input.principal_id} is not the assignee of task ${taskId}`);
-  }
-
-  const precheck = await precheckDeliverables(input.deliverables);
-  if (!precheck.ok) {
-    const task = await updateSubmitFailure(taskId, input.principal_id, precheck.issues);
-    if (input.message?.trim()) {
-      await replyPost({
-        parent_id: taskId,
-        author_principal_id: input.principal_id,
-        body: input.message.trim(),
-      });
-    }
-    return { ok: false, precheck, task };
-  }
-
-  const created: Deliverable[] = [];
-  for (const deliverable of input.deliverables) {
-    created.push(await createDeliverable({
-      post_id: taskId,
-      name: deliverable.name.trim(),
-      attachment_id: deliverable.attachment_id ?? null,
-      note: deliverable.note?.trim() ?? '',
-    }));
-  }
-
-  let verifierResult: TaskVerifierResult | undefined;
-  const verifier = options.verifier ?? input.verifier;
-  if (verifier) {
-    verifierResult = await verifier({
-      task: initial.task,
-      deliverables: created,
-    });
-    if (!verifierResult.ok) {
-      const reason = verifierResult.reason?.trim() || 'verifier rejected the submission';
-      const task = await updateSubmitFailure(taskId, input.principal_id, [reason]);
-      if (input.message?.trim()) {
-        await replyPost({
-          parent_id: taskId,
-          author_principal_id: input.principal_id,
-          body: input.message.trim(),
-        });
-      }
-      return { ok: false, precheck: { ok: false, issues: [reason] }, task };
-    }
-  }
-
-  const task = await withTransaction(async (conn) => {
+  const result = await withTransaction(async (conn) => {
     const record = await taskRecord(conn, taskId, true);
     if (!record) throw taskNotFound(taskId);
+    await requirePrincipalInAccount(
+      conn,
+      input.principal_id,
+      record.author_account_id,
+      'principal_id',
+    );
     if (record.task.status !== 'claimed') {
       throw new Error(`Task ${taskId} is ${record.task.status}; only claimed tasks can be submitted`);
     }
     if (record.task.assignee_principal_id !== input.principal_id) {
       throw new Error(`Principal ${input.principal_id} is not the assignee of task ${taskId}`);
     }
+
+    const precheck = await precheckDeliverablesWithConnection(
+      conn,
+      input.deliverables,
+      record.author_account_id,
+    );
+    if (!precheck.ok) {
+      const attempts = record.task.attempts + 1;
+      const failed = attempts >= record.task.max_attempts;
+      await conn.query(
+        `UPDATE post_task
+            SET attempts = ?, status = ?, closed_at = ?
+          WHERE post_id = ?`,
+        [attempts, failed ? 'failed' : 'claimed', failed ? nowString() : null, taskId],
+      );
+      const after = await taskRecord(conn, taskId, false);
+      if (!after) throw taskNotFound(taskId);
+      await recordEvent(conn, {
+        account_id: record.author_account_id,
+        actor_principal_id: input.principal_id,
+        action: 'task.precheck_failed',
+        resource_type: 'post',
+        resource_id: taskId,
+        before_state: taskState(record.task),
+        after_state: taskState(after.task),
+        payload: { issues: precheck.issues, attempts, max_attempts: record.task.max_attempts },
+      });
+      if (input.message?.trim()) {
+        await replyPost(conn, {
+          parent_id: taskId,
+          author_principal_id: input.principal_id,
+          body: input.message.trim(),
+        });
+      }
+      return { ok: false, precheck, task: after.task };
+    }
+
+    const created: Deliverable[] = [];
+    for (const deliverable of input.deliverables) {
+      created.push(await createDeliverable(conn, {
+        post_id: taskId,
+        name: deliverable.name.trim(),
+        attachment_id: deliverable.attachment_id ?? null,
+        note: deliverable.note?.trim() ?? '',
+      }));
+    }
+
+    let verifierResult: TaskVerifierResult | undefined;
+    const verifier = options.verifier ?? input.verifier;
+    if (verifier) {
+      verifierResult = await verifier({
+        task: record.task,
+        deliverables: created,
+      });
+      if (!verifierResult.ok) {
+        const reason = verifierResult.reason?.trim() || 'verifier rejected the submission';
+        const attempts = record.task.attempts + 1;
+        const failed = attempts >= record.task.max_attempts;
+        await conn.query(
+          `UPDATE post_task
+              SET attempts = ?, status = ?, closed_at = ?
+            WHERE post_id = ?`,
+          [attempts, failed ? 'failed' : 'claimed', failed ? nowString() : null, taskId],
+        );
+        const after = await taskRecord(conn, taskId, false);
+        if (!after) throw taskNotFound(taskId);
+        await recordEvent(conn, {
+          account_id: record.author_account_id,
+          actor_principal_id: input.principal_id,
+          action: 'task.precheck_failed',
+          resource_type: 'post',
+          resource_id: taskId,
+          before_state: taskState(record.task),
+          after_state: taskState(after.task),
+          payload: {
+            issues: [reason],
+            attempts,
+            max_attempts: record.task.max_attempts,
+            verifier_source: verifierResult.source,
+          },
+        });
+        if (input.message?.trim()) {
+          await replyPost(conn, {
+            parent_id: taskId,
+            author_principal_id: input.principal_id,
+            body: input.message.trim(),
+          });
+        }
+        return {
+          ok: false,
+          precheck: { ok: false, issues: [reason] },
+          task: after.task,
+        };
+      }
+    }
+
     await conn.query(
       `UPDATE post_task
           SET status = 'submitted', submitted_at = ?
@@ -594,16 +641,16 @@ export async function submitTask(
       after_state: taskState(after.task),
       payload: verifierResult?.source ? { verifier_source: verifierResult.source } : undefined,
     });
-    return after.task;
+    if (input.message?.trim()) {
+      await replyPost(conn, {
+        parent_id: taskId,
+        author_principal_id: input.principal_id,
+        body: input.message.trim(),
+      });
+    }
+    return { ok: true, precheck, task: after.task };
   });
-  if (input.message?.trim()) {
-    await replyPost({
-      parent_id: taskId,
-      author_principal_id: input.principal_id,
-      body: input.message.trim(),
-    });
-  }
-  return { ok: true, precheck, task };
+  return result;
 }
 
 export async function verdictTask(
@@ -691,18 +738,20 @@ export async function reopenTask(
     const record = await taskRecord(conn, taskId, true);
     if (!record) throw taskNotFound(taskId);
     await requireTaskOperator(conn, input.operator_principal_id, record.author_account_id);
-    if (!['failed', 'done', 'cancelled', 'pending_confirm'].includes(record.task.status)) {
-      throw new Error(`Task ${taskId} is ${record.task.status}; only failed, done, cancelled, or pending_confirm tasks can be reopened`);
+    if (!['failed', 'done', 'cancelled', 'pending_confirm', 'claimed'].includes(record.task.status)) {
+      throw new Error(`Task ${taskId} is ${record.task.status}; only failed, done, cancelled, pending_confirm, or claimed tasks can be reopened`);
     }
+    const keepClaimed = record.task.status === 'claimed' && record.task.assignee_principal_id !== null;
     const privateAssigned = record.post.visibility !== 'public' && record.task.assignee_principal_id !== null;
-    const nextAssignee = privateAssigned ? record.task.assignee_principal_id : null;
+    const nextAssignee = keepClaimed || privateAssigned ? record.task.assignee_principal_id : null;
+    const nextStatus = keepClaimed ? 'claimed' : 'open';
     const now = nowString();
     await conn.query(
       `UPDATE post_task
-          SET status = 'open', assignee_principal_id = ?, attempts = 0,
+          SET status = ?, assignee_principal_id = ?, attempts = 0,
               claimed_at = NULL, submitted_at = NULL, closed_at = NULL
         WHERE post_id = ?`,
-      [nextAssignee, taskId],
+      [nextStatus, nextAssignee, taskId],
     );
     const after = await taskRecord(conn, taskId, false);
     if (!after) throw taskNotFound(taskId);
@@ -731,6 +780,14 @@ export async function reassignTask(
     const record = await taskRecord(conn, taskId, true);
     if (!record) throw taskNotFound(taskId);
     await requireTaskOperator(conn, input.operator_principal_id, record.author_account_id);
+    if (input.assignee_principal_id !== null) {
+      await requirePrincipalInAccount(
+        conn,
+        input.assignee_principal_id,
+        record.author_account_id,
+        'assignee_principal_id',
+      );
+    }
     const assigned = input.assignee_principal_id !== null;
     const nextStatus: TaskStatus = assigned ? 'claimed' : 'open';
     await conn.query(
@@ -807,13 +864,26 @@ export async function listTasks(
     predicates.push('t.is_ready = 1');
     predicates.push(`p.visibility = 'public'`);
     predicates.push('t.assignee_principal_id IS NULL');
+  } else if (filter.view === 'due') {
+    predicates.push(`(
+      t.assignee_principal_id = ?
+      OR (
+        t.assignee_principal_id IS NULL
+        AND EXISTS (
+          SELECT 1
+            FROM post_target due_target
+           WHERE due_target.post_id = p.id
+             AND due_target.principal_id = ?
+             AND due_target.role = 'assignee'
+        )
+      )
+    )`);
+    params.push(filter.principal_id, filter.principal_id);
+    predicates.push(`t.status IN ('open', 'claimed')`);
+    predicates.push('t.is_ready = 1');
   } else {
     predicates.push('t.assignee_principal_id = ?');
     params.push(filter.principal_id);
-    if (filter.view === 'due') {
-      predicates.push(`t.status IN ('open', 'claimed')`);
-      predicates.push('t.is_ready = 1');
-    }
   }
   if (filter.status !== undefined) {
     const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];

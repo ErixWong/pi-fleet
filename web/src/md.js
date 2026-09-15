@@ -23,7 +23,7 @@ export function renderMd(src = '') {
 
 /**
  * 解析平台附件引用：
- * 1) 显式 `attachment://att-xxxx` → `/api/attachments/att-xxxx`
+ * 1) 显式 `attachment://att-xxxx` → `/api/v2/attachments/att-xxxx`
  * 2) 同任务附件按文件名自动匹配（图文混编）：`![图](图1.png)` / `![](./img/图1.png)` → 该附件 URL
  *
  * @param src  markdown 原文
@@ -32,7 +32,7 @@ export function renderMd(src = '') {
  */
 export function resolveAttachmentRefs(src = '', attMap = {}) {
   if (!src) return '';
-  let out = src.replace(/attachment:\/\/([a-zA-Z0-9-]+)/g, '/api/attachments/$1');
+  let out = src.replace(/attachment:\/\/([a-zA-Z0-9_-]+)/g, '/api/v2/attachments/$1');
   const keys = Object.keys(attMap);
   if (keys.length === 0) return out;
   // 匹配 md 图片/链接引用的 target（不处理以协议开头的 URL）
@@ -42,7 +42,7 @@ export function resolveAttachmentRefs(src = '', attMap = {}) {
     const bare = target.split(/[?#]/, 1)[0].replace(/\\/g, '/').split('/').pop() || '';
     const hit = attMap[bare.toLowerCase()];
     if (!hit) return whole;
-    return `${prefix}(/api/attachments/${hit})`;
+    return `${prefix}(/api/v2/attachments/${hit})`;
   });
   return out;
 }

@@ -373,6 +373,21 @@ function validateExtension(input: CreatePostInput): {
     if (!task || typeof task.deliverable_spec !== 'string' || task.deliverable_spec.trim() === '') {
       throw new Error('task deliverable_spec is required');
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(task.deliverable_spec);
+    } catch {
+      parsed = undefined;
+    }
+    if (
+      parsed !== undefined
+      && parsed !== null
+      && typeof parsed === 'object'
+      && ((Array.isArray(parsed) && parsed.length === 0)
+        || (!Array.isArray(parsed) && Object.keys(parsed).length === 0))
+    ) {
+      throw new Error('task deliverable_spec cannot be empty');
+    }
   }
   if (input.kind === 'channel' && (!channel || !channel.host_principal_id)) {
     throw new Error('channel host_principal_id is required');
@@ -401,6 +416,36 @@ async function createPostWithConnection(
 ): Promise<Post> {
   validateCreateInput(input);
   const extension = validateExtension(input);
+  const authorRows = rows(await conn.query(
+    `SELECT account_id, kind
+       FROM principal
+      WHERE id = ? AND deleted_at IS NULL
+      LIMIT 1`,
+    [input.author_principal_id],
+  ));
+  const author = authorRows[0];
+  if (!author) throw new Error(`author principal not found: ${input.author_principal_id}`);
+  if (stringValue(author.account_id) !== input.account_id) {
+    throw new Error('author principal belongs to another account');
+  }
+
+  const targetIds = [...new Set((input.targets ?? []).map((target) => target.principal_id))];
+  if (targetIds.length > 0) {
+    const targetRows = rows(await conn.query(
+      `SELECT id
+         FROM principal
+        WHERE account_id = ?
+          AND deleted_at IS NULL
+          AND id IN (${targetIds.map(() => '?').join(', ')})`,
+      [input.account_id, ...targetIds],
+    ));
+    const validTargetIds = new Set(targetRows.map((row) => stringValue(row.id)));
+    const invalidTarget = targetIds.find((principalId) => !validTargetIds.has(principalId));
+    if (invalidTarget) {
+      throw new Error(`target principal belongs to another account or does not exist: ${invalidTarget}`);
+    }
+  }
+
   const id = newId('pst');
   const createdAt = nowString();
   let rootId = id;
@@ -465,6 +510,17 @@ async function createPostWithConnection(
     );
   } else if (input.kind === 'channel') {
     const channel = extension.channel!;
+    const hostRows = rows(await conn.query(
+      `SELECT account_id
+         FROM principal
+        WHERE id = ? AND deleted_at IS NULL
+        LIMIT 1`,
+      [channel.host_principal_id],
+    ));
+    if (!hostRows[0]) throw new Error(`channel host principal not found: ${channel.host_principal_id}`);
+    if (stringValue(hostRows[0].account_id) !== input.account_id) {
+      throw new Error('channel host principal belongs to another account');
+    }
     await conn.query(
       `INSERT INTO post_channel
          (post_id, host_principal_id, workdir, run_user, name, status)
@@ -480,6 +536,20 @@ async function createPostWithConnection(
     );
   } else if (input.kind === 'verdict') {
     const verdict = extension.verdict!;
+    const targetTaskRows = rows(await conn.query(
+      `SELECT p.account_id, p.kind
+         FROM post p
+        WHERE p.id = ? AND p.deleted_at IS NULL
+        LIMIT 1`,
+      [verdict.target_task_id],
+    ));
+    const targetTask = targetTaskRows[0];
+    if (!targetTask || targetTask.kind !== 'task') {
+      throw new Error(`verdict target task not found: ${verdict.target_task_id}`);
+    }
+    if (stringValue(targetTask.account_id) !== input.account_id) {
+      throw new Error('verdict target task belongs to another account');
+    }
     await conn.query(
       `INSERT INTO post_verdict
          (post_id, decision, opinion, target_task_id, attempt_no, source)
@@ -559,7 +629,7 @@ export async function createPost(
 }
 
 export async function getPostDetail(id: string): Promise<PostDetail | null> {
-  const post = await getPostById(id);
+  const post = await getVisiblePostById(id);
   if (!post) return null;
   const pool = getPool();
   const [targetResult, taskResult, channelResult, verdictResult, deliverableResult, recentResult, countResult] =
@@ -577,10 +647,13 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
       pool.query(`SELECT * FROM post_task WHERE post_id = ? LIMIT 1`, [id]),
       pool.query(`SELECT * FROM post_channel WHERE post_id = ? LIMIT 1`, [id]),
       pool.query(
-        `SELECT post_id, decision, opinion, target_task_id, attempt_no, source
-           FROM post_verdict
-          WHERE target_task_id = ?
-          ORDER BY post_id`,
+        `SELECT v.post_id, v.decision, v.opinion, v.target_task_id, v.attempt_no, v.source
+           FROM post_verdict v
+           JOIN post verdict_post
+             ON verdict_post.id = v.post_id
+            AND verdict_post.deleted_at IS NULL
+          WHERE v.target_task_id = ?
+          ORDER BY v.post_id`,
         [id],
       ),
       pool.query(
@@ -593,13 +666,13 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
                 a.relative_path AS att_relative_path, a.scan_status AS att_scan_status,
                 a.created_at AS att_created_at, a.deleted_at AS att_deleted_at
            FROM deliverable d
-           LEFT JOIN attachment a ON a.id = d.attachment_id
+           LEFT JOIN attachment a ON a.id = d.attachment_id AND a.deleted_at IS NULL
           WHERE d.post_id = ?
           ORDER BY d.name, d.version`,
         [id],
       ),
-      pool.query(`${postSelect()} WHERE p.root_id = ? ORDER BY p.id DESC LIMIT 5`, [post.root_id]),
-      pool.query(`SELECT COUNT(*) AS total FROM post WHERE root_id = ?`, [post.root_id]),
+      pool.query(`${postSelect()} WHERE p.root_id = ? AND p.deleted_at IS NULL ORDER BY p.id DESC LIMIT 5`, [post.root_id]),
+      pool.query(`SELECT COUNT(*) AS total FROM post WHERE root_id = ? AND deleted_at IS NULL`, [post.root_id]),
     ]);
   const recent = rows(recentResult).map(postFromRow).reverse();
   const total = numberValue(rows(countResult)[0]?.total);
@@ -653,6 +726,15 @@ function deliverableFromRow(row: DbRow): Record<string, unknown> {
 
 async function getPostById(id: string): Promise<Post | null> {
   const result = await getPool().query(`${postSelect()} WHERE p.id = ? LIMIT 1`, [id]);
+  const row = rows(result)[0];
+  return row ? postFromRow(row) : null;
+}
+
+async function getVisiblePostById(id: string): Promise<Post | null> {
+  const result = await getPool().query(
+    `${postSelect()} WHERE p.id = ? AND p.deleted_at IS NULL LIMIT 1`,
+    [id],
+  );
   const row = rows(result)[0];
   return row ? postFromRow(row) : null;
 }
@@ -725,15 +807,17 @@ export async function listPosts(filter: ListPostsFilter): Promise<ListPostsResul
 }
 
 export async function getThread(rootId: string): Promise<Post[]> {
-  return queryPosts(`${postSelect()} WHERE p.root_id = ? ORDER BY p.id`, [rootId]);
+  return queryPosts(`${postSelect()} WHERE p.root_id = ? AND p.deleted_at IS NULL ORDER BY p.id`, [rootId]);
 }
 
 export async function getDirectReplies(postId: string): Promise<Post[]> {
-  return queryPosts(`${postSelect()} WHERE p.parent_id = ? ORDER BY p.id`, [postId]);
+  return queryPosts(`${postSelect()} WHERE p.parent_id = ? AND p.deleted_at IS NULL ORDER BY p.id`, [postId]);
 }
 
-export async function replyPost(input: ReplyPostInput): Promise<Post> {
-  return withTransaction(async (conn) => {
+async function replyPostWithConnection(
+  conn: PoolConnection,
+  input: ReplyPostInput,
+): Promise<Post> {
     const parentRows = rows(await conn.query(
       `SELECT id, account_id, root_id
          FROM post
@@ -767,7 +851,18 @@ export async function replyPost(input: ReplyPostInput): Promise<Post> {
       payload: { parent_id: input.parent_id },
     });
     return post;
-  });
+}
+
+export function replyPost(input: ReplyPostInput): Promise<Post>;
+export function replyPost(conn: PoolConnection, input: ReplyPostInput): Promise<Post>;
+export async function replyPost(
+  connOrInput: PoolConnection | ReplyPostInput,
+  maybeInput?: ReplyPostInput,
+): Promise<Post> {
+  if (maybeInput) {
+    return replyPostWithConnection(connOrInput as PoolConnection, maybeInput);
+  }
+  return withTransaction((conn) => replyPostWithConnection(conn, connOrInput as ReplyPostInput));
 }
 
 export async function editPost(
@@ -812,6 +907,14 @@ export async function deletePost(id: string): Promise<void> {
     if (!before.deleted_at) {
       const deletedAt = nowString();
       await conn.query(`UPDATE post SET deleted_at = ? WHERE id = ?`, [deletedAt, id]);
+      if (before.parent_id) {
+        await conn.query(
+          `UPDATE post
+              SET reply_count = GREATEST(reply_count - 1, 0)
+            WHERE id = ?`,
+          [before.parent_id],
+        );
+      }
       await recordEvent(conn, {
         account_id: before.account_id,
         actor_principal_id: before.author_principal_id,
@@ -841,6 +944,24 @@ async function targetPostContext(
   };
 }
 
+async function requireTargetAccount(
+  conn: PoolConnection,
+  principalId: string,
+  accountId: string,
+): Promise<void> {
+  const result = rows(await conn.query(
+    `SELECT account_id
+       FROM principal
+      WHERE id = ? AND deleted_at IS NULL
+      LIMIT 1`,
+    [principalId],
+  ));
+  if (!result[0]) throw new Error(`target principal not found: ${principalId}`);
+  if (stringValue(result[0].account_id) !== accountId) {
+    throw new Error('target principal belongs to another account');
+  }
+}
+
 export async function addTarget(
   postId: string,
   principalId: string,
@@ -849,6 +970,7 @@ export async function addTarget(
   if (!['assignee', 'mention', 'watcher'].includes(role)) throw new Error(`Unknown target role: ${role}`);
   await withTransaction(async (conn) => {
     const context = await targetPostContext(conn, postId);
+    await requireTargetAccount(conn, principalId, context.account_id);
     await conn.query(
       `INSERT INTO post_target (post_id, principal_id, role, created_at)
        VALUES (?, ?, ?, ?)
@@ -874,6 +996,7 @@ export async function removeTarget(
   if (!['assignee', 'mention', 'watcher'].includes(role)) throw new Error(`Unknown target role: ${role}`);
   await withTransaction(async (conn) => {
     const context = await targetPostContext(conn, postId);
+    await requireTargetAccount(conn, principalId, context.account_id);
     await conn.query(
       `DELETE FROM post_target WHERE post_id = ? AND principal_id = ? AND role = ?`,
       [postId, principalId, role],
@@ -927,7 +1050,7 @@ export async function getSummary(rootId: string): Promise<SummaryView | null> {
   const pendingResult = await getPool().query(
     `SELECT COUNT(*) AS pending
        FROM post
-      WHERE root_id = ? AND id > ?`,
+      WHERE root_id = ? AND id > ? AND deleted_at IS NULL`,
     [rootId, latest.up_to_post_id],
   );
   const pending = numberValue(rows(pendingResult)[0]?.pending);

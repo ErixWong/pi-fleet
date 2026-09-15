@@ -16,7 +16,7 @@ function usageError(message) {
 }
 
 function parseArgs() {
-  let database = process.env.DB_NAME;
+  let database = process.env.DB_NAME_NEW ?? process.env.DB_NAME ?? 'erix';
   let force = false;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i += 1) {
@@ -30,12 +30,11 @@ function parseArgs() {
       usageError(`未知参数: ${args[i]}`);
     }
   }
-  if (!database) usageError('缺少 DB_NAME 或 --database');
   if (!/^[A-Za-z0-9_$]+$/.test(database)) {
     usageError('数据库名只允许字母、数字、下划线和美元符号');
   }
-  if (database === 'task_dispatch' && !force) {
-    usageError('默认拒绝重建 task_dispatch；如确需操作必须显式传入 --force');
+  if (database === 'task_dispatch') {
+    usageError('不支持操作旧数据库，请使用 DB_NAME_NEW 或 --database 指定新库');
   }
   return { database, force };
 }

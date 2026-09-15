@@ -44,7 +44,6 @@ User=${user}
 WorkingDirectory=${systemdQuote(home)}
 Environment=PLATFORM_URL=${systemdQuote(config.url)}
 Environment=PI_AGENT_KEY=${systemdQuote(config.key)}
-Environment=AGENT_CMD=${systemdQuote(config.cli || 'auto')}
 ExecStart=/usr/bin/env node ${systemdQuote(BIN_PATH)} run
 Restart=always
 RestartSec=5
