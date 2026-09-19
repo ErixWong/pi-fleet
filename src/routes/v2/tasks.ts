@@ -12,6 +12,7 @@ import {
   publishTask,
   reassignTask,
   reopenTask,
+  setReady,
   submitTask,
   verdictTask,
   type TaskListView,
@@ -122,6 +123,29 @@ tasksV2Router.post(
         ok: true,
         status: task.status,
         assignee_principal_id: task.assignee_principal_id,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+tasksV2Router.post(
+  '/:id/ready',
+  principalAuthMiddleware(),
+  requireScope('task:write'),
+  async (req, res, next) => {
+    try {
+      const body = req.body as Record<string, unknown>;
+      if (body.ready !== undefined && typeof body.ready !== 'boolean') {
+        res.status(400).json({ error: 'ready must be a boolean' });
+        return;
+      }
+      // 因果链门控放行：上游验收后由协调者把 gated 子任务标记为可认领
+      const task = await setReady(req.params.id, body.ready !== false);
+      res.json({
+        ok: true,
+        task: { id: task.post_id, status: task.status, is_ready: task.is_ready },
       });
     } catch (error) {
       next(error);

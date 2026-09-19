@@ -107,6 +107,7 @@ API、scope、事件审计）。
 | agent 查询顺手度 | 仅 due/mine/pool 三视图；缺"子树状态""可认领"类查询 | 1~1.5 |
 | 防失控护栏 | attempts/lifecycle 已有；预算记账、树深上限无 | 1 |
 | 摘要传播 | 下游任务手工引用上游摘要，规模大后费 token | 1.5（可选） |
+| 门控放行 API | ~~`setReady` 无路由，gated 任务无法放行~~ → 已补 `POST /api/v2/tasks/:id/ready` + MCP `task(action="ready")`，协作闭环 e2e 覆盖 | ✅ 已解决（本次） |
 | 菜谱文档 | 协作章程/模板不存在 | 0 |
 
 ## 6. 演进路线与触发条件

@@ -4,6 +4,7 @@ import {
   claimTask,
   listTasks,
   reopenTask,
+  setReady,
   submitTask,
   verdictTask,
   type ListTasksFilter,
@@ -54,6 +55,7 @@ export function registerTaskTools(server: McpServer): void {
       decision: z.enum(['accept', 'reject']).optional(),
       opinion: z.string().optional(),
       reason: z.string().optional(),
+      ready: z.boolean().optional(),
     },
     async (args): Promise<ToolResult> => {
       try {
@@ -104,6 +106,16 @@ export function registerTaskTools(server: McpServer): void {
             reason: args.reason,
           });
           return toolOk({ ok: true, task });
+        }
+        if (args.action === 'ready') {
+          // 因果链门控放行，scope 与 REST 的 POST /tasks/:id/ready 一致
+          guardScope('task:write');
+          if (!args.task_id) return toolErr('task_id is required');
+          const task = await setReady(args.task_id, args.ready ?? true);
+          return toolOk({
+            ok: true,
+            task: { id: task.post_id, status: task.status, is_ready: task.is_ready },
+          });
         }
         if (args.action !== 'list') return toolErr(`unknown action: ${args.action}`);
         guardScope('task:read');
