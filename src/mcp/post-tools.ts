@@ -160,7 +160,7 @@ function publicRecent(post: Post): Record<string, unknown> {
     kind: post.kind,
     subtype: post.subtype,
     author: post.author
-      ? { id: post.author.id, name: post.author.name }
+      ? { id: post.author.id, kind: post.author.kind, name: post.author.name }
       : null,
     created_at: post.created_at,
     body: truncateBody(post.body),

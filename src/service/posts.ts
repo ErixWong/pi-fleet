@@ -785,9 +785,10 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
   });
   let parent: TaskParentSummary | null = null;
   if (task?.parent_task_id) {
+    // 父任务必须与本任务同账户，避免跨租户通过 parent_task_id 探测标题
     const parentResult = await pool.query(
-      `SELECT id, title FROM post WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
-      [task.parent_task_id],
+      `SELECT id, title FROM post WHERE id = ? AND account_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [task.parent_task_id, post.account_id],
     );
     const parentRow = rows(parentResult)[0];
     if (parentRow) {

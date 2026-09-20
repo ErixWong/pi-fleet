@@ -30,7 +30,7 @@ const workLoading = ref(false);
 const workError = ref('');
 
 const selectedHost = computed(() => hosts.value.find((host) => String(host.id) === String(selectedId.value)) || null);
-const activeTasks = computed(() => hostTasks.value.filter((item) => ['open', 'claimed', 'submitted', 'pending_confirm'].includes(item.task?.status)));
+const activeTasks = computed(() => hostTasks.value.filter((item) => ['claimed', 'submitted'].includes(item.task?.status)));
 
 function hostTitle(host) {
   return host.name || host.id;
@@ -78,10 +78,11 @@ async function loadHostWork() {
   try {
     const [taskData, eventData] = await Promise.all([
       api.tasks({ view: 'mine', assignee: selectedHost.value.id, page_size: 50 }),
-      api.events({ actor_principal_id: selectedHost.value.id, limit: 20 }),
+      // 倒序取最新 20 条，再 reverse 成时间正序展示
+      api.events({ actor_principal_id: selectedHost.value.id, limit: 20, order: 'desc' }),
     ]);
     hostTasks.value = taskData.items ?? [];
-    hostEvents.value = (eventData.items ?? []).slice(-20).reverse();
+    hostEvents.value = (eventData.items ?? []).reverse();
   } catch (e) {
     workError.value = e.message;
   } finally {

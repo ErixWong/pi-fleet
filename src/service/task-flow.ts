@@ -415,6 +415,21 @@ export async function publishTask(
   if (author.account_id !== input.account_id) {
     throw notFound('author principal belongs to another account');
   }
+  const parentTaskId = input.task?.parent_task_id;
+  if (parentTaskId) {
+    // 父任务必须属于同账户，拒绝跨租户把任务挂到别人的树上
+    const parentRows = rows(await getPool().query(
+      `SELECT p.account_id
+         FROM post_task t
+         JOIN post p ON p.id = t.post_id
+        WHERE t.post_id = ? AND p.deleted_at IS NULL
+        LIMIT 1`,
+      [parentTaskId],
+    ));
+    if (!parentRows[0] || stringValue(parentRows[0].account_id) !== input.account_id) {
+      throw notFound(`parent task not found: ${parentTaskId}`);
+    }
+  }
 
   const post = await withTransaction((conn) =>
     createPost(conn, {
@@ -954,10 +969,13 @@ export async function listTasks(
       item.targets = targetsByPost.get(item.post.id) ?? [];
     }
     const rollupResult = await pool.query(
-      `SELECT parent_task_id, status, COUNT(*) AS count
-         FROM post_task
-        WHERE parent_task_id IN (${taskIds.map(() => '?').join(', ')})
-        GROUP BY parent_task_id, status`,
+      `SELECT t.parent_task_id, t.status, COUNT(*) AS count
+         FROM post_task t
+         JOIN post child ON child.id = t.post_id
+         JOIN post parent ON parent.id = t.parent_task_id
+        WHERE t.parent_task_id IN (${taskIds.map(() => '?').join(', ')})
+          AND child.account_id = parent.account_id
+        GROUP BY t.parent_task_id, status`,
       taskIds,
     );
     const rollupByParent = new Map<string, { total: number; done: number; failed: number; active: number }>();
@@ -975,9 +993,11 @@ export async function listTasks(
     const parentResult = await pool.query(
       `SELECT t.post_id, t.parent_task_id, p.title
          FROM post_task t
+         JOIN post child ON child.id = t.post_id
          JOIN post p ON p.id = t.parent_task_id AND p.deleted_at IS NULL
         WHERE t.post_id IN (${taskIds.map(() => '?').join(', ')})
-          AND t.parent_task_id IS NOT NULL`,
+          AND t.parent_task_id IS NOT NULL
+          AND p.account_id = child.account_id`,
       taskIds,
     );
     const parentByPost = new Map<string, { id: string; title: string }>();

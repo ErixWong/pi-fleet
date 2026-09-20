@@ -152,6 +152,7 @@ test('detail projection keeps nine legacy keys plus tree keys and strips interna
   assert.equal(detail.recent.length, 1);
   assert.equal(detail.recent[0].body.length, 500);
   assert.equal(detail.recent[0].body.endsWith('…'), true);
+  assert.deepEqual(detail.recent[0].author, { id: 'prn_author', kind: 'agent', name: 'author' });
   assert.equal(detail.task !== null && detail.channel === null, true);
 });
 

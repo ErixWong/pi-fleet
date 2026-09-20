@@ -7,6 +7,7 @@ process.env.DB_NAME = 'erix';
 const events = await tsImport('./event-outbox.ts', import.meta.url);
 const { recordEvent, publishPending, markPublished, markFailed, pruneNotified } = events;
 const { getPool, initSchema, withTransaction } = events;
+const { listEventLog, getPool: getEventLogPool } = await tsImport('./event-log.ts', import.meta.url);
 
 await initSchema();
 
@@ -185,6 +186,40 @@ test('markPublished 可确认事件，pruneNotified 不删除 audit', { concurre
   assert.equal((await getPool().query('SELECT id FROM event WHERE id = ?', [auditId])).length, 1);
 });
 
+test('listEventLog：order=desc 返回最新 N 条且 after 分页语义一致', { concurrency: false }, async () => {
+  const descAction = `${actionPrefix}.desc-order`;
+  const first = await createEvent({ action: descAction });
+  const second = await createEvent({ action: descAction });
+  const third = await createEvent({ action: descAction });
+
+  // 缺省 asc 保持事件日志管理面语义（id 升序）
+  const asc = await listEventLog({
+    action: descAction,
+    limit: 100,
+  });
+  const ascIds = asc.items.map((item) => item.id);
+  assert.equal(ascIds.indexOf(first) < ascIds.indexOf(second), true);
+  assert.equal(ascIds.indexOf(second) < ascIds.indexOf(third), true);
+
+  // desc 取最新 2 条（Hosts「最近活动」场景：事件多于 limit 时不能返回最早的）
+  const desc = await listEventLog({
+    action: descAction,
+    limit: 2,
+    order: 'desc',
+  });
+  assert.deepEqual(desc.items.map((item) => item.id), [third, second]);
+  assert.equal(desc.next_after, second);
+
+  // desc + after 继续向更早翻页（e.id < after）
+  const page2 = await listEventLog({
+    action: descAction,
+    limit: 2,
+    order: 'desc',
+    after: desc.next_after ?? undefined,
+  });
+  assert.equal(page2.items[0]?.id, first);
+});
+
 test.after(async () => {
   if (eventIds.length > 0) {
     await getPool().query(
@@ -195,4 +230,6 @@ test.after(async () => {
   await getPool().query('DELETE FROM principal WHERE id = ?', [actorPrincipalId]);
   await getPool().query('DELETE FROM account WHERE id = ?', [actorAccountId]);
   await getPool().end();
+  // event-log 是独立 tsImport 图，池子也要单独关闭，否则进程无法退出
+  await getEventLogPool().end();
 });

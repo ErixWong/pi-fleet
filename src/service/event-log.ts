@@ -1,4 +1,6 @@
-import { getPool } from './event-outbox.js';
+import { getPool } from '../db/pool.js';
+
+export { getPool };
 
 export interface EventView {
   id: string;
@@ -120,8 +122,11 @@ export async function listEventLog(filter: {
   actor_principal_id?: string;
   after?: string;
   limit?: number;
+  order?: 'asc' | 'desc';
 } = {}): Promise<{ items: EventView[]; total: number; next_after: string | null }> {
   const limit = Math.min(200, Math.max(1, Math.floor(filter.limit ?? 50) || 50));
+  // 缺省 asc 保持事件日志管理面的 keyset 分页语义；desc 供“最近活动”类视图取最新 N 条
+  const order = filter.order === 'desc' ? 'DESC' : 'ASC';
   const predicates: string[] = [];
   const params: unknown[] = [];
   if (filter.account_id) {
@@ -145,7 +150,7 @@ export async function listEventLog(filter: {
     params.push(filter.actor_principal_id);
   }
   if (filter.after) {
-    predicates.push('e.id > ?');
+    predicates.push(order === 'DESC' ? 'e.id < ?' : 'e.id > ?');
     params.push(filter.after);
   }
   const where = predicates.length > 0 ? `WHERE ${predicates.join(' AND ')}` : '';
@@ -167,7 +172,7 @@ export async function listEventLog(filter: {
        LEFT JOIN principal pr ON pr.id = e.actor_principal_id
        LEFT JOIN post p ON e.resource_type = 'post' AND p.id = e.resource_id
       ${where}
-      ORDER BY e.id ASC
+      ORDER BY e.id ${order}
       LIMIT ?`,
     [...params, limit],
   );
