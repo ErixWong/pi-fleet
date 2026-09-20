@@ -81,6 +81,71 @@ sudo pi-agent uninstall-service
 `Restart=always` 保持 daemon 运行。也可以直接使用 `pi-agent run`，由外部进程
 管理器负责重启。
 
+## 沙箱隔离（推荐）
+
+### 威胁模型
+
+daemon 拉起的 pi 进程默认继承操作者的全局 MCP 配置
+（`~/.config/mcp/mcp.json`）。如果其中包含数据库直写等高权限工具，agent 在任务
+通道不可用（或任务工具不可见）时，可能绕过平台协议直接改库：伪造 task submit、
+跳过状态机、事件和交付物校验。这类协议绕过事故已在真实环境发生（伪造提交的
+时间戳使用数据库 NOW() 的 UTC 时间，与应用本地时间约定不一致而暴露）。
+
+### 缓解措施：`PI_CODING_AGENT_DIR` 隔离 agent 目录
+
+`PI_CODING_AGENT_DIR` 让 daemon 拉起的 pi 使用独立的 agent 目录，不再读取操作者
+的全局 `~/.pi/agent` 配置：
+
+```bash
+mkdir -p ~/.pi-agent-sandbox/agent
+cp ~/.pi/agent/models.json ~/.pi/agent/auth.json ~/.pi/agent/settings.json ~/.pi-agent-sandbox/agent/
+ln -s ~/.pi/agent/npm ~/.pi-agent-sandbox/agent/npm        # 扩展复用
+```
+
+在 `~/.pi-agent-sandbox/agent/mcp.json` 中手写最小配置：只保留 `task-dispatch`
+（自客户端本次修复起默认 `lifecycle: "eager"`，agent 启动即连接、任务工具
+立即可见），其余继承自全局的 server 一律显式屏蔽：
+
+```json
+{
+  "mcpServers": {
+    "task-dispatch": {
+      "type": "http",
+      "url": "<platform>/mcp2",
+      "auth": "bearer",
+      "bearerToken": "<key>",
+      "lifecycle": "eager"
+    },
+    "mysql": { "disabled": true }
+  }
+}
+```
+
+agent 目录的 `mcp.json` 中对全局 server 写 `"disabled": true` 会在配置合并时
+覆盖屏蔽它们。
+
+```bash
+PI_CODING_AGENT_DIR=~/.pi-agent-sandbox/agent pi-agent run
+```
+
+### systemd
+
+`install-service` 生成的 unit 通过 override 追加环境变量：
+
+```bash
+sudo systemctl edit pi-agent
+```
+
+```ini
+[Service]
+Environment=PI_CODING_AGENT_DIR=/home/<user>/.pi-agent-sandbox/agent
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart pi-agent
+```
+
 ## 工作目录与环境变量
 
 有 `workdir` 的任务在该目录运行；没有指定目录的任务使用

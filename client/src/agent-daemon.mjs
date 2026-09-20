@@ -116,7 +116,7 @@ function syncPiMcpConfig() {
     url: `${BASE}/mcp2`,
     auth: 'bearer',
     bearerToken: AGENT_KEY,
-    lifecycle: 'lazy',
+    lifecycle: 'eager',
   };
 
   const tempPath = `${PI_MCP_CONFIG_PATH}.tmp-${process.pid}`;

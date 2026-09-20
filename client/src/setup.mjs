@@ -141,7 +141,7 @@ export async function runSetup(options = {}) {
     url: `${url}/mcp2`,
     auth: 'bearer',
     bearerToken: key,
-    lifecycle: 'lazy',
+    lifecycle: 'eager',
   };
   writeJsonAtomic(PI_MCP_PATH, mcp);
   console.log(`已写入 ${PI_MCP_PATH}`);
