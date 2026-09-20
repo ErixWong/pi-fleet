@@ -1,8 +1,35 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { tsImport } from 'tsx/esm/api';
+import { mock } from 'node:test';
 
-const { applyRecentOptions, presentPostDetail } = await tsImport('./post-tools.ts', import.meta.url);
+const publishTaskCalls = [];
+mock.module('../service/task-flow.ts', {
+  namedExports: {
+    publishTask: async (input) => {
+      publishTaskCalls.push(input);
+      return { post: { id: 'pst_mock_task' }, task: { status: 'open' } };
+    },
+  },
+});
+
+const { applyRecentOptions, presentPostDetail, registerPostTools } = await import('./post-tools.ts');
+const { principalContext } = await import('../auth-principal.ts');
+
+const handlers = {};
+registerPostTools({
+  tool: (name, _description, _schema, handler) => {
+    handlers[name] = handler;
+  },
+});
+
+function callPost(args) {
+  return principalContext.run({
+    principal: { id: 'prn_coord', kind: 'agent', name: 'coordinator' },
+    scopes: ['task:write', 'post:write', 'post:read'],
+    key_id: 'key_mock',
+    account_id: 'acc_mock',
+  }, () => handlers.post(args));
+}
 
 const author = {
   id: 'prn_author',
@@ -163,4 +190,37 @@ test('recent limit is bounded by the requested limit and kind controls extension
   assert.equal(detail.recent.length <= 5, true);
   assert.equal(detail.task, null);
   assert.notEqual(detail.channel, null);
+});
+
+test('create(kind=task) 把 parent_task_id 透传给 publishTask（含 parent_id 回退）', async () => {
+  publishTaskCalls.length = 0;
+
+  const withParent = await callPost({
+    action: 'create',
+    kind: 'task',
+    body: 'do the sub work',
+    visibility: 'private',
+    parent_task_id: 'pst_parent',
+  });
+  assert.equal(JSON.parse(withParent.content[0].text).ok, true);
+  assert.equal(publishTaskCalls.length, 1);
+  assert.equal(publishTaskCalls[0].task.parent_task_id, 'pst_parent');
+  assert.equal(publishTaskCalls[0].account_id, 'acc_mock');
+
+  await callPost({
+    action: 'create',
+    kind: 'task',
+    body: 'fallback to parent_id',
+    visibility: 'private',
+    parent_id: 'pst_parent_fallback',
+  });
+  assert.equal(publishTaskCalls[1].task.parent_task_id, 'pst_parent_fallback');
+
+  await callPost({
+    action: 'create',
+    kind: 'task',
+    body: 'no parent',
+    visibility: 'private',
+  });
+  assert.equal(publishTaskCalls[2].task.parent_task_id, null);
 });

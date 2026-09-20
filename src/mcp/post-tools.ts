@@ -288,6 +288,7 @@ export function registerPostTools(server: McpServer): void {
       id: z.string().optional(),
       root_id: z.string().optional(),
       parent_id: z.string().nullable().optional(),
+      parent_task_id: z.string().nullable().optional(),
       body: z.string().optional(),
       title: z.string().optional(),
       subtype: z.string().optional(),
@@ -350,6 +351,7 @@ export function registerPostTools(server: McpServer): void {
                 workdir: args.workdir,
                 executor: args.executor,
                 max_attempts: args.max_attempts,
+                parent_task_id: args.parent_task_id ?? args.parent_id ?? null,
               },
             });
             return toolOk({ ok: true, post_id: published.post.id, status: published.task.status });
