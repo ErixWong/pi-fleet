@@ -146,6 +146,26 @@ export interface PostVerdict {
   source: VerdictSource;
 }
 
+export interface TaskParentSummary {
+  id: string;
+  title: string;
+}
+
+export interface TaskChildSummary {
+  post_id: string;
+  title: string;
+  status: TaskStatus;
+  attempts: number;
+  max_attempts: number;
+  assignee: { id: string; kind: string; name: string } | null;
+  latest_verdict: {
+    post_id: string;
+    decision: VerdictDecision;
+    opinion: string;
+    attempt_no: number;
+  } | null;
+}
+
 export interface SummaryView {
   summary: string;
   up_to_post_id: string;
@@ -158,6 +178,8 @@ export interface PostDetail {
   post: Post;
   targets: PostTarget[];
   task: PostTask | null;
+  parent: TaskParentSummary | null;
+  children: TaskChildSummary[];
   channel: PostChannel | null;
   verdicts: PostVerdict[];
   deliverables: Array<Record<string, unknown>>;
@@ -660,7 +682,7 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
   const post = await getVisiblePostById(id);
   if (!post) return null;
   const pool = getPool();
-  const [targetResult, taskResult, channelResult, verdictResult, deliverableResult, recentResult, countResult] =
+  const [targetResult, taskResult, channelResult, verdictResult, deliverableResult, recentResult, countResult, childResult] =
     await Promise.all([
       pool.query(
         `SELECT t.post_id, t.principal_id, t.role, t.read_at, t.created_at,
@@ -701,14 +723,84 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
       ),
       pool.query(`${postSelect()} WHERE p.root_id = ? AND p.deleted_at IS NULL ORDER BY p.id DESC LIMIT 5`, [post.root_id]),
       pool.query(`SELECT COUNT(*) AS total FROM post WHERE root_id = ? AND deleted_at IS NULL`, [post.root_id]),
+      pool.query(
+        `SELECT p.id, p.title, t.status, t.attempts, t.max_attempts,
+                pr.id AS assignee_id, pr.kind AS assignee_kind, pr.name AS assignee_name
+           FROM post_task t
+           JOIN post p ON p.id = t.post_id AND p.deleted_at IS NULL
+           LEFT JOIN principal pr ON pr.id = t.assignee_principal_id
+          WHERE t.parent_task_id = ? AND p.account_id = ?
+          ORDER BY p.id`,
+        [id, post.account_id],
+      ),
     ]);
   const recent = rows(recentResult).map(postFromRow).reverse();
   const total = numberValue(rows(countResult)[0]?.total);
+  const task = rows(taskResult)[0] ? taskFromRow(rows(taskResult)[0]) : null;
+  const childRows = rows(childResult);
+  const latestVerdictByTask = new Map<string, {
+    post_id: string;
+    decision: VerdictDecision;
+    opinion: string;
+    attempt_no: number;
+  }>();
+  if (childRows.length > 0) {
+    const childIds = childRows.map((row) => stringValue(row.id));
+    const childVerdictResult = await pool.query(
+      `SELECT v.target_task_id, v.post_id, v.decision, v.opinion, v.attempt_no
+         FROM post_verdict v
+         JOIN post verdict_post
+           ON verdict_post.id = v.post_id
+          AND verdict_post.deleted_at IS NULL
+        WHERE v.target_task_id IN (${childIds.map(() => '?').join(', ')})
+        ORDER BY v.post_id`,
+      childIds,
+    );
+    for (const row of rows(childVerdictResult)) {
+      latestVerdictByTask.set(stringValue(row.target_task_id), {
+        post_id: stringValue(row.post_id),
+        decision: stringValue(row.decision) as VerdictDecision,
+        opinion: stringValue(row.opinion),
+        attempt_no: numberValue(row.attempt_no),
+      });
+    }
+  }
+  const children: TaskChildSummary[] = childRows.map((row) => {
+    const childId = stringValue(row.id);
+    return {
+      post_id: childId,
+      title: stringValue(row.title),
+      status: stringValue(row.status) as TaskStatus,
+      attempts: numberValue(row.attempts),
+      max_attempts: numberValue(row.max_attempts),
+      assignee: row.assignee_id === null || row.assignee_id === undefined
+        ? null
+        : {
+            id: stringValue(row.assignee_id),
+            kind: stringValue(row.assignee_kind),
+            name: stringValue(row.assignee_name),
+          },
+      latest_verdict: latestVerdictByTask.get(childId) ?? null,
+    };
+  });
+  let parent: TaskParentSummary | null = null;
+  if (task?.parent_task_id) {
+    const parentResult = await pool.query(
+      `SELECT id, title FROM post WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      [task.parent_task_id],
+    );
+    const parentRow = rows(parentResult)[0];
+    if (parentRow) {
+      parent = { id: stringValue(parentRow.id), title: stringValue(parentRow.title) };
+    }
+  }
   const [summary] = await Promise.all([getSummary(post.root_id)]);
   return {
     post,
     targets: rows(targetResult).map(targetFromRow),
-    task: rows(taskResult)[0] ? taskFromRow(rows(taskResult)[0]) : null,
+    task,
+    parent,
+    children,
     channel: rows(channelResult)[0] ? channelFromRow(rows(channelResult)[0]) : null,
     verdicts: rows(verdictResult).map(verdictFromRow),
     deliverables: rows(deliverableResult).map(deliverableFromRow),

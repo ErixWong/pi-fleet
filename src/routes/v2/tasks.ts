@@ -23,7 +23,7 @@ import { presentTaskListItem } from '../../mcp/post-tools.js';
 
 export const tasksV2Router = Router();
 
-const TASK_VIEWS = new Set<TaskListView>(['due', 'mine', 'pool']);
+const TASK_VIEWS = new Set<TaskListView>(['due', 'mine', 'pool', 'authored']);
 const TASK_STATUSES = new Set<TaskStatus>([
   'pending_audit',
   'rejected',
@@ -273,7 +273,7 @@ tasksV2Router.get(
       const context = requirePrincipal();
       const viewValue = queryValue(req.query.view) ?? 'due';
       if (!TASK_VIEWS.has(viewValue as TaskListView)) {
-        res.status(400).json({ error: 'view must be due, mine, or pool' });
+        res.status(400).json({ error: 'view must be due, mine, authored, or pool' });
         return;
       }
       const page = queryInteger(req.query.page, 'page', 1);
@@ -292,6 +292,7 @@ tasksV2Router.get(
         principal_id: context.principal.id,
         account_id: context.account_id,
         status: statusValue as TaskStatus | undefined,
+        assignee: queryValue(req.query.assignee),
         page: page.value,
         page_size: pageSize.value,
       });

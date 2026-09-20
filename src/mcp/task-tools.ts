@@ -22,7 +22,7 @@ import { presentTaskListItem } from './post-tools.js';
 
 export { presentTaskListItem };
 
-const TASK_VIEWS = ['due', 'mine', 'pool'] as const;
+const TASK_VIEWS = ['due', 'mine', 'pool', 'authored'] as const;
 const TASK_STATUSES = [
   'pending_audit',
   'rejected',
@@ -43,6 +43,7 @@ export function registerTaskTools(server: McpServer): void {
       action: z.string(),
       view: z.enum(TASK_VIEWS).optional(),
       status: z.enum(TASK_STATUSES).optional(),
+      assignee: z.string().optional(),
       page: z.number().int().min(1).optional(),
       page_size: z.number().int().min(1).max(200).optional(),
       task_id: z.string().optional(),
@@ -125,6 +126,7 @@ export function registerTaskTools(server: McpServer): void {
           principal_id: context.principal.id,
           account_id: context.account_id,
           status: args.status as TaskStatus | undefined,
+          assignee: args.assignee,
           page: args.page,
           page_size: args.page_size,
         };

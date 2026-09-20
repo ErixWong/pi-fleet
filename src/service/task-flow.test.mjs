@@ -251,6 +251,60 @@ test('due 视图返回 post_target 指派但尚未认领的任务', { concurrenc
   assert.equal(due.items.some((item) => item.post_id === published.post.id), true);
 });
 
+test('authored 视图返回我派发的任务并带 children_rollup 与 parent 标题', { concurrency: false }, async () => {
+  const root = await publishAssigned({ title: `root-${Date.now()}` });
+  const childA = await publishAssigned({
+    title: `child-a-${Date.now()}`,
+    task: { parent_task_id: root.post.id, is_ready: true },
+    targets: [{ principal_id: assignee.id, role: 'assignee' }],
+  });
+  const childB = await publishAssigned({
+    title: `child-b-${Date.now()}`,
+    task: { parent_task_id: root.post.id, is_ready: true },
+    targets: [{ principal_id: otherAssignee.id, role: 'assignee' }],
+  });
+
+  await claimTask(childA.post.id, { principal_id: assignee.id });
+  await submitTask(childA.post.id, {
+    principal_id: assignee.id,
+    deliverables: [{ name: 'result' }],
+  });
+  await verdictTask(childA.post.id, {
+    operator_principal_id: author.id,
+    decision: 'accept',
+  });
+  await claimTask(childB.post.id, { principal_id: otherAssignee.id });
+
+  const authored = await listTasks({
+    view: 'authored',
+    principal_id: author.id,
+    account_id: account.id,
+  });
+  const rootItem = authored.items.find((item) => item.post.id === root.post.id);
+  assert.notEqual(rootItem, undefined);
+  assert.deepEqual(rootItem.children_rollup, { total: 2, done: 1, failed: 0, active: 1 });
+
+  const childItem = authored.items.find((item) => item.post.id === childB.post.id);
+  assert.notEqual(childItem, undefined);
+  assert.deepEqual(childItem.parent, { id: root.post.id, title: root.post.title });
+
+  const otherAuthored = await listTasks({
+    view: 'authored',
+    principal_id: otherAssignee.id,
+    account_id: account.id,
+  });
+  assert.equal(otherAuthored.items.some((item) => item.post.id === root.post.id), false);
+
+  const hostWork = await listTasks({
+    view: 'mine',
+    principal_id: author.id,
+    account_id: account.id,
+    assignee: otherAssignee.id,
+  });
+  assert.equal(hostWork.items.some((item) => item.post.id === childB.post.id), true);
+  assert.equal(hostWork.items.some((item) => item.post.id === childA.post.id), false);
+});
+
 test('唯一入口和 verdict 前置状态：导出集合无旧的直接完成入口', { concurrency: false }, async () => {
   const exports = Object.keys(taskFlow);
   assert.equal(exports.includes('submitTask'), true);

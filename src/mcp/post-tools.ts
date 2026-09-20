@@ -65,6 +65,7 @@ export interface PublicTask {
   executor: string | null;
   workdir: string | null;
   assignee_principal_id: string | null;
+  parent_task_id: string | null;
   claimed_at: string | null;
   closed_at: string | null;
 }
@@ -111,6 +112,7 @@ export function publicTask(task: PostTask): PublicTask {
     executor: task.executor,
     workdir: task.workdir,
     assignee_principal_id: task.assignee_principal_id,
+    parent_task_id: task.parent_task_id,
     claimed_at: task.claimed_at,
     closed_at: task.closed_at,
   };
@@ -155,12 +157,32 @@ function publicRecent(post: Post): Record<string, unknown> {
   return {
     id: post.id,
     parent_id: post.parent_id,
+    kind: post.kind,
     subtype: post.subtype,
     author: post.author
       ? { id: post.author.id, name: post.author.name }
       : null,
     created_at: post.created_at,
     body: truncateBody(post.body),
+  };
+}
+
+function publicTaskChild(child: PostDetail['children'][number]): Record<string, unknown> {
+  return {
+    post_id: child.post_id,
+    title: child.title,
+    status: child.status,
+    attempts: child.attempts,
+    max_attempts: child.max_attempts,
+    assignee: publicPrincipal(child.assignee),
+    latest_verdict: child.latest_verdict
+      ? {
+          post_id: child.latest_verdict.post_id,
+          decision: child.latest_verdict.decision,
+          opinion: child.latest_verdict.opinion,
+          attempt_no: child.latest_verdict.attempt_no,
+        }
+      : null,
   };
 }
 
@@ -181,6 +203,8 @@ export function presentPostDetail(detail: PostDetail): Record<string, unknown> {
     post: publicPost(detail.post),
     targets: detail.targets.map(publicTarget),
     task,
+    parent: detail.parent ? { id: detail.parent.id, title: detail.parent.title } : null,
+    children: detail.children.map(publicTaskChild),
     channel,
     deliverables: detail.deliverables.map(publicDeliverable),
     verdicts: detail.verdicts.map((verdict) => ({
@@ -271,11 +295,15 @@ export function presentTaskListItem(item: {
   post: Post;
   task: PostTask;
   targets?: PostDetail['targets'];
+  children_rollup?: { total: number; done: number; failed: number; active: number } | null;
+  parent?: { id: string; title: string } | null;
 }): Record<string, unknown> {
   return {
     ...publicPost(item.post),
     task: publicTask(item.task),
     targets: (item.targets ?? []).map(publicTarget),
+    children_rollup: item.children_rollup ?? null,
+    parent: item.parent ?? null,
   };
 }
 
