@@ -4,6 +4,9 @@ import { useRoute } from 'vue-router';
 import { api } from '../api';
 import { renderMd } from '../md';
 import StatusBadge from '../components/StatusBadge.vue';
+import PrincipalChip from '../components/PrincipalChip.vue';
+import TaskTreePanel from '../components/TaskTreePanel.vue';
+import TaskTimeline from '../components/TaskTimeline.vue';
 
 const route = useRoute();
 const detail = ref(null);
@@ -18,6 +21,28 @@ const submitNote = ref('');
 
 const task = computed(() => detail.value?.task);
 const post = computed(() => detail.value?.post);
+const assigneePrincipal = computed(() => {
+  const assigneeId = task.value?.assignee_principal_id;
+  if (!assigneeId) return null;
+  const target = (detail.value?.targets ?? []).find(
+    (item) => item.role === 'assignee' && item.principal?.id === assigneeId,
+  );
+  return target?.principal ?? { id: assigneeId, kind: '', name: '' };
+});
+const verdictByPostId = computed(() => {
+  const map = new Map();
+  for (const verdict of detail.value?.verdicts ?? []) map.set(verdict.post_id, verdict);
+  return map;
+});
+
+function messageVerdict(message) {
+  const structured = verdictByPostId.value.get(message.id);
+  if (structured) return structured;
+  if (message.kind === 'verdict') {
+    return { decision: message.body?.startsWith('reject') ? 'reject' : 'accept', opinion: message.body, attempt_no: 0 };
+  }
+  return null;
+}
 const thread = computed(() => {
   const source = [...olderRecent.value, ...(detail.value?.recent ?? [])];
   const unique = new Map(source.map((item) => [item.id, item]));
@@ -180,20 +205,24 @@ watch(() => route.params.taskId, load);
             <span class="badge text-bg-secondary">{{ post.visibility }}</span>
             <code class="small">{{ post.id }}</code>
           </div>
-          <div class="text-secondary small mb-3">
-            <span><i class="bi bi-person me-1"></i>{{ post.author?.name || post.author_principal_id }}</span>
-            <span class="ms-3"><i class="bi bi-clock me-1"></i>{{ post.created_at }}</span>
-            <span v-if="task.assignee_principal_id" class="ms-3"><i class="bi bi-person-check me-1"></i>{{ task.assignee_principal_id }}</span>
+          <div class="d-flex align-items-center gap-2 flex-wrap small mb-1">
+            <PrincipalChip v-if="post.author" :principal="post.author" role="发起人" />
+            <PrincipalChip v-if="assigneePrincipal" :principal="assigneePrincipal" role="认领" />
+            <span class="text-secondary"><i class="bi bi-clock me-1"></i>{{ post.created_at }}</span>
           </div>
+          <TaskTimeline :status="task.status" :attempts="task.attempts" :max-attempts="task.max_attempts" />
           <div class="md-content" v-html="renderMd(post.body)"></div>
           <div v-if="detail.targets?.length" class="border-top pt-2 mt-3 small">
             <span class="text-secondary me-2">目标：</span>
-            <span v-for="target in detail.targets" :key="`${target.principal?.id || target.role}-${target.role}`" class="badge text-bg-light me-1">
-              {{ targetName(target) }} · {{ target.role }}
+            <span v-for="target in detail.targets" :key="`${target.principal?.id || target.role}-${target.role}`" class="d-inline-block me-1">
+              <PrincipalChip v-if="target.principal" :principal="target.principal" :role="target.role" />
+              <span v-else class="badge text-bg-light me-1">{{ targetName(target) }} · {{ target.role }}</span>
             </span>
           </div>
         </div>
       </div>
+
+      <TaskTreePanel v-if="(detail.children?.length || detail.parent) && post.kind === 'task'" :parent="detail.parent" :children="detail.children ?? []" />
 
       <div v-if="error" class="alert alert-danger py-2">{{ error }}</div>
 
@@ -208,9 +237,15 @@ watch(() => route.params.taskId, load);
             </div>
             <div class="card-body">
               <div v-if="!thread.length" class="text-secondary small">暂无回复。</div>
-              <article v-for="message in thread" :key="message.id" class="border-bottom pb-3 mb-3">
+              <article v-for="message in thread" :key="message.id" class="border-bottom pb-3 mb-3"
+                :class="messageVerdict(message) ? `border-start border-4 ps-2 ${messageVerdict(message).decision === 'accept' ? 'border-success' : 'border-danger'}` : ''">
                 <div class="d-flex align-items-center gap-2 small mb-1">
-                  <strong>{{ message.author?.name || message.author?.id || '未知主体' }}</strong>
+                  <PrincipalChip v-if="message.author" :principal="message.author" />
+                  <span v-else class="small text-secondary">未知主体</span>
+                  <span v-if="messageVerdict(message)" class="badge"
+                    :class="messageVerdict(message).decision === 'accept' ? 'text-bg-success' : 'text-bg-danger'">
+                    验收·{{ messageVerdict(message).decision === 'accept' ? '通过' : '打回' }}
+                  </span>
                   <span class="text-secondary">{{ message.created_at }}</span>
                 </div>
                 <div class="md-content" v-html="renderMd(message.body)"></div>
@@ -275,7 +310,12 @@ watch(() => route.params.taskId, load);
             <div class="card-header"><strong><i class="bi bi-clipboard-check me-2"></i>验收记录</strong></div>
             <div class="list-group list-group-flush">
               <div v-for="verdict in detail.verdicts" :key="verdict.post_id" class="list-group-item bg-transparent">
-                <div class="d-flex justify-content-between"><strong>{{ verdict.decision === 'accept' ? '通过' : '打回' }}</strong><span class="small text-secondary">第 {{ verdict.attempt_no }} 次</span></div>
+                <div class="d-flex justify-content-between align-items-center">
+                  <span class="badge" :class="verdict.decision === 'accept' ? 'text-bg-success' : 'text-bg-danger'">
+                    {{ verdict.decision === 'accept' ? '通过' : '打回' }}
+                  </span>
+                  <span class="small text-secondary">第 {{ verdict.attempt_no }} 次</span>
+                </div>
                 <div class="small text-secondary mt-1">{{ verdict.opinion || '无意见' }}</div>
               </div>
             </div>

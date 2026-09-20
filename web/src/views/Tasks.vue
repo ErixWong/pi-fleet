@@ -4,10 +4,11 @@ import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import Pagination from '../components/Pagination.vue';
 import StatusBadge from '../components/StatusBadge.vue';
+import PrincipalChip from '../components/PrincipalChip.vue';
 
 const route = useRoute();
 const router = useRouter();
-const view = ref(['due', 'mine', 'pool'].includes(route.query.view) ? route.query.view : 'due');
+const view = ref(['due', 'mine', 'pool', 'authored'].includes(route.query.view) ? route.query.view : 'due');
 const status = ref(typeof route.query.status === 'string' ? route.query.status : '');
 const items = ref([]);
 const total = ref(0);
@@ -179,7 +180,7 @@ watch(hasTargets, (selected) => {
     <div class="card mb-3">
       <div class="card-body d-flex flex-wrap align-items-center gap-2">
         <div class="btn-group" role="tablist" aria-label="任务视图">
-          <button v-for="item in [['due', '待办'], ['mine', '我的任务'], ['pool', '公共池']]" :key="item[0]" class="btn btn-sm"
+          <button v-for="item in [['due', '待办'], ['mine', '我的任务'], ['authored', '我派发的'], ['pool', '公共池']]" :key="item[0]" class="btn btn-sm"
             :class="view === item[0] ? 'btn-primary' : 'btn-outline-secondary'" @click="changeView(item[0])">
             {{ item[1] }}
           </button>
@@ -204,14 +205,27 @@ watch(hasTargets, (selected) => {
               <td>
                 <router-link :to="`/tasks/${item.id}`" class="fw-semibold text-decoration-none">{{ item.title || '未命名任务' }}</router-link>
                 <div class="text-secondary small text-truncate" style="max-width: 520px">{{ item.body }}</div>
+                <div v-if="item.children_rollup?.total || item.task?.parent_task_id || (view === 'authored' && item.author)" class="small d-flex align-items-center gap-2 flex-wrap">
+                  <template v-if="item.children_rollup?.total">
+                    <span class="text-secondary">子任务 {{ item.children_rollup.total }}</span>
+                    <span class="text-success"><i class="bi bi-check2-circle me-1"></i>{{ item.children_rollup.done }}</span>
+                    <span class="text-primary"><i class="bi bi-circle-fill me-1" style="font-size: 0.5em"></i>{{ item.children_rollup.active }}</span>
+                    <span class="text-danger"><i class="bi bi-x-circle me-1"></i>{{ item.children_rollup.failed }}</span>
+                  </template>
+                  <span v-if="item.task?.parent_task_id" class="badge text-bg-light">
+                    <i class="bi bi-diagram-3 me-1"></i>子任务<template v-if="item.parent"> · {{ item.parent.title }}</template>
+                  </span>
+                  <PrincipalChip v-if="view === 'authored' && item.author" :principal="item.author" role="发起人" />
+                </div>
                 <code class="small">{{ item.id }}</code>
               </td>
               <td><StatusBadge :status="item.task?.status" /></td>
               <td><span class="badge text-bg-secondary">{{ item.visibility }}</span></td>
               <td class="small">
                 <template v-if="item.targets?.length">
-                  <span v-for="target in item.targets" :key="`${target.principal?.id || target.principal_id}-${target.role}`" class="badge text-bg-light me-1">
-                    {{ targetLabel(target) }} · {{ target.role }}
+                  <span v-for="target in item.targets" :key="`${target.principal?.id || target.principal_id}-${target.role}`" class="d-inline-block me-1">
+                    <PrincipalChip v-if="target.principal" :principal="target.principal" :role="target.role" />
+                    <span v-else class="badge text-bg-light">{{ targetLabel(target) }} · {{ target.role }}</span>
                   </span>
                 </template>
                 <span v-else class="text-secondary">公共池</span>

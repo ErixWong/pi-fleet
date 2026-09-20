@@ -405,8 +405,8 @@ try {
   const detailId = String(detailRows[0].id);
   const rootId = String(candidates[0].root_id);
   const detailed = await call(client, 'post', { action: 'detail', id: detailId });
-  const expectedKeys = ['post', 'targets', 'task', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
-  check('2. post(detail) has exactly the nine contract keys',
+  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
+  check('2. post(detail) has exactly the eleven contract keys (legacy nine + tree parent/children)',
     JSON.stringify(Object.keys(detailed.payload).sort()) === JSON.stringify([...expectedKeys].sort()),
     JSON.stringify(Object.keys(detailed.payload)));
   check('3. recent is bounded and bodies are <= 500',

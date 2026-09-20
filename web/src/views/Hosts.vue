@@ -4,6 +4,7 @@ import { Modal } from 'bootstrap';
 import { useRouter } from 'vue-router';
 import { api } from '../api';
 import StatusBadge from '../components/StatusBadge.vue';
+import PrincipalChip from '../components/PrincipalChip.vue';
 
 const hosts = ref([]);
 const selectedId = ref('');
@@ -22,8 +23,14 @@ const editError = ref('');
 const registerModalEl = ref(null);
 let registerModal = null;
 const router = useRouter();
+const activeTab = ref('overview');
+const hostTasks = ref([]);
+const hostEvents = ref([]);
+const workLoading = ref(false);
+const workError = ref('');
 
 const selectedHost = computed(() => hosts.value.find((host) => String(host.id) === String(selectedId.value)) || null);
+const activeTasks = computed(() => hostTasks.value.filter((item) => ['claimed', 'submitted'].includes(item.task?.status)));
 
 function hostTitle(host) {
   return host.name || host.id;
@@ -53,6 +60,62 @@ function selectHost(host) {
   editName.value = host.name;
   editStatus.value = host.status;
   editError.value = '';
+  hostTasks.value = [];
+  hostEvents.value = [];
+  workError.value = '';
+  if (activeTab.value !== 'overview') void loadHostWork();
+}
+
+function setTab(tab) {
+  activeTab.value = tab;
+  if (tab !== 'overview') void loadHostWork();
+}
+
+async function loadHostWork() {
+  if (!selectedHost.value || workLoading.value) return;
+  workLoading.value = true;
+  workError.value = '';
+  try {
+    const [taskData, eventData] = await Promise.all([
+      api.tasks({ view: 'mine', assignee: selectedHost.value.id, page_size: 50 }),
+      // 倒序取最新 20 条，再 reverse 成时间正序展示
+      api.events({ actor_principal_id: selectedHost.value.id, limit: 20, order: 'desc' }),
+    ]);
+    hostTasks.value = taskData.items ?? [];
+    hostEvents.value = (eventData.items ?? []).reverse();
+  } catch (e) {
+    workError.value = e.message;
+  } finally {
+    workLoading.value = false;
+  }
+}
+
+function eventIcon(action) {
+  if (action.includes('create')) return 'bi-plus-circle';
+  if (action.includes('claim')) return 'bi-hand-index-thumb';
+  if (action.includes('submit')) return 'bi-upload';
+  if (action.includes('accept') || action.includes('approve')) return 'bi-check2-circle';
+  if (action.includes('reject') || action.includes('fail')) return 'bi-exclamation-octagon';
+  if (action.includes('reopen')) return 'bi-arrow-repeat';
+  if (action.includes('reply')) return 'bi-chat-left-text';
+  return 'bi-activity';
+}
+
+function eventClass(action) {
+  if (action.includes('reject') || action.includes('fail')) return 'text-bg-danger';
+  if (action.includes('accept') || action.includes('approve')) return 'text-bg-success';
+  if (action.includes('claim') || action.includes('submit')) return 'text-bg-info';
+  return 'text-bg-primary';
+}
+
+function relativeTime(value) {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return value || '—';
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return '刚刚';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  return new Date(time).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
 
 async function openChannel(host) {
@@ -154,6 +217,7 @@ function fmtTime(value) {
 
 onMounted(async () => {
   await load();
+  void loadHostWork();
 });
 </script>
 
@@ -219,7 +283,21 @@ onMounted(async () => {
             <strong><i class="bi bi-pc-display me-2"></i>{{ hostTitle(selectedHost) }}</strong>
             <code class="small">{{ selectedHost.id }}</code>
           </div>
-          <div class="card-body">
+          <ul class="nav nav-tabs px-3 pt-2" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" :class="{ active: activeTab === 'overview' }" role="tab" @click="setTab('overview')">概览</button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" :class="{ active: activeTab === 'work' }" role="tab" @click="setTab('work')">
+                正在执行<span v-if="activeTasks.length" class="badge text-bg-primary ms-1">{{ activeTasks.length }}</span>
+              </button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" :class="{ active: activeTab === 'activity' }" role="tab" @click="setTab('activity')">最近活动</button>
+            </li>
+          </ul>
+          <div v-if="workError" class="alert alert-danger py-2 mx-3 mb-0 mt-3">{{ workError }}</div>
+          <div v-show="activeTab === 'overview'" class="card-body">
             <div v-if="editError" class="alert alert-danger py-2">{{ editError }}</div>
             <div class="row g-3 mb-3">
               <div class="col-sm-6">
@@ -245,6 +323,42 @@ onMounted(async () => {
               <button class="btn btn-outline-warning" @click="rotateKey"><i class="bi bi-arrow-repeat me-1"></i>轮换 key</button>
               <button class="btn btn-outline-danger ms-auto" @click="deleteHost"><i class="bi bi-trash me-1"></i>删除主机</button>
             </div>
+          </div>
+
+          <div v-show="activeTab === 'work'" class="card-body">
+            <div v-if="workLoading" class="text-secondary small py-3 text-center">加载中…</div>
+            <div v-else-if="!activeTasks.length" class="text-secondary small py-3 text-center">
+              <i class="bi bi-cup-hot me-1"></i>该主机当前没有正在执行的任务。
+            </div>
+            <div v-else class="list-group list-group-flush">
+              <router-link v-for="item in activeTasks" :key="item.id" :to="`/tasks/${item.id}`"
+                class="list-group-item list-group-item-action bg-transparent px-0 d-flex align-items-center gap-2">
+                <StatusBadge :status="item.task?.status" />
+                <span class="text-truncate">{{ item.title || item.id }}</span>
+                <PrincipalChip v-if="item.author" :principal="item.author" role="发起人" />
+                <span class="text-secondary small ms-auto flex-shrink-0">{{ item.created_at }}</span>
+                <i class="bi bi-chevron-right text-secondary"></i>
+              </router-link>
+            </div>
+          </div>
+
+          <div v-show="activeTab === 'activity'" class="card-body">
+            <div v-if="workLoading" class="text-secondary small py-3 text-center">加载中…</div>
+            <div v-else-if="!hostEvents.length" class="text-secondary small py-3 text-center">
+              <i class="bi bi-stars me-1"></i>暂无该主机触发的事件。
+            </div>
+            <ol v-else class="list-unstyled mb-0">
+              <li v-for="event in hostEvents" :key="event.id" class="d-flex align-items-start gap-2 py-2 border-bottom">
+                <span class="badge" :class="eventClass(event.action)"><i class="bi" :class="eventIcon(event.action)"></i></span>
+                <div class="flex-grow-1">
+                  <div class="small">{{ event.summary || event.action }}</div>
+                  <div class="small text-secondary">
+                    <router-link v-if="event.resource_type === 'post' && event.resource_id" :to="`/tasks/${event.resource_id}`">{{ event.resource_id }}</router-link>
+                    <time class="ms-2" :datetime="event.occurred_at">{{ relativeTime(event.occurred_at) }}</time>
+                  </div>
+                </div>
+              </li>
+            </ol>
           </div>
         </div>
       </section>

@@ -155,13 +155,14 @@ export interface CancelTaskInput {
   reason?: string;
 }
 
-export type TaskListView = 'pool' | 'mine' | 'due';
+export type TaskListView = 'pool' | 'mine' | 'due' | 'authored';
 
 export interface ListTasksFilter {
   view: TaskListView;
   principal_id?: string;
   account_id?: string;
   status?: TaskStatus | TaskStatus[];
+  assignee?: string;
   page?: number;
   page_size?: number;
 }
@@ -413,6 +414,21 @@ export async function publishTask(
   if (!author) throw notFound(`author principal not found: ${input.author_principal_id}`);
   if (author.account_id !== input.account_id) {
     throw notFound('author principal belongs to another account');
+  }
+  const parentTaskId = input.task?.parent_task_id;
+  if (parentTaskId) {
+    // 父任务必须属于同账户，拒绝跨租户把任务挂到别人的树上
+    const parentRows = rows(await getPool().query(
+      `SELECT p.account_id
+         FROM post_task t
+         JOIN post p ON p.id = t.post_id
+        WHERE t.post_id = ? AND p.deleted_at IS NULL
+        LIMIT 1`,
+      [parentTaskId],
+    ));
+    if (!parentRows[0] || stringValue(parentRows[0].account_id) !== input.account_id) {
+      throw notFound(`parent task not found: ${parentTaskId}`);
+    }
   }
 
   const post = await withTransaction((conn) =>
@@ -864,7 +880,7 @@ export async function cancelTask(
 export async function listTasks(
   filter: ListTasksFilter,
 ): Promise<{ items: TaskListItem[]; total: number }> {
-  if (!['pool', 'mine', 'due'].includes(filter.view)) {
+  if (!['pool', 'mine', 'due', 'authored'].includes(filter.view)) {
     throw badRequest(`Unknown task list view: ${filter.view}`);
   }
   if (filter.view !== 'pool' && !filter.principal_id) {
@@ -898,9 +914,13 @@ export async function listTasks(
     params.push(filter.principal_id, filter.principal_id);
     predicates.push(`t.status IN ('open', 'claimed')`);
     predicates.push('t.is_ready = 1');
-  } else {
-    predicates.push('t.assignee_principal_id = ?');
+  } else if (filter.view === 'authored') {
+    predicates.push('p.author_principal_id = ?');
     params.push(filter.principal_id);
+  } else {
+    // mine 视图：assignee 参数可指定其他主体（如主机工作视角），缺省为当前主体
+    predicates.push('t.assignee_principal_id = ?');
+    params.push(filter.assignee ?? filter.principal_id);
   }
   if (filter.status !== undefined) {
     const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
@@ -947,6 +967,51 @@ export async function listTasks(
     }
     for (const item of items) {
       item.targets = targetsByPost.get(item.post.id) ?? [];
+    }
+    const rollupResult = await pool.query(
+      `SELECT t.parent_task_id, t.status, COUNT(*) AS count
+         FROM post_task t
+         JOIN post child ON child.id = t.post_id
+         JOIN post parent ON parent.id = t.parent_task_id
+        WHERE t.parent_task_id IN (${taskIds.map(() => '?').join(', ')})
+          AND child.account_id = parent.account_id
+        GROUP BY t.parent_task_id, status`,
+      taskIds,
+    );
+    const rollupByParent = new Map<string, { total: number; done: number; failed: number; active: number }>();
+    for (const row of rows(rollupResult)) {
+      const parentId = stringValue(row.parent_task_id);
+      const current = rollupByParent.get(parentId) ?? { total: 0, done: 0, failed: 0, active: 0 };
+      const count = numberValue(row.count);
+      const status = stringValue(row.status);
+      current.total += count;
+      if (status === 'done') current.done += count;
+      else if (status === 'failed' || status === 'cancelled') current.failed += count;
+      else current.active += count;
+      rollupByParent.set(parentId, current);
+    }
+    const parentResult = await pool.query(
+      `SELECT t.post_id, t.parent_task_id, p.title
+         FROM post_task t
+         JOIN post child ON child.id = t.post_id
+         JOIN post p ON p.id = t.parent_task_id AND p.deleted_at IS NULL
+        WHERE t.post_id IN (${taskIds.map(() => '?').join(', ')})
+          AND t.parent_task_id IS NOT NULL
+          AND p.account_id = child.account_id`,
+      taskIds,
+    );
+    const parentByPost = new Map<string, { id: string; title: string }>();
+    for (const row of rows(parentResult)) {
+      parentByPost.set(stringValue(row.post_id), {
+        id: stringValue(row.parent_task_id),
+        title: stringValue(row.title),
+      });
+    }
+    for (const item of items) {
+      const rollup = rollupByParent.get(item.post.id);
+      if (rollup) item.children_rollup = rollup;
+      const parent = parentByPost.get(item.post.id);
+      if (parent) item.parent = parent;
     }
   }
   return { items, total };

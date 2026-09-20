@@ -33,6 +33,11 @@ eventsV2Router.get(
         res.status(400).json({ error: 'limit must be an integer between 1 and 200' });
         return;
       }
+      const order = queryValue(req.query.order);
+      if (order !== undefined && order !== 'asc' && order !== 'desc') {
+        res.status(400).json({ error: 'order must be asc or desc' });
+        return;
+      }
       res.json(await listEventLog({
         account_id: context.account_id,
         action: queryValue(req.query.action),
@@ -41,6 +46,7 @@ eventsV2Router.get(
         actor_principal_id: queryValue(req.query.actor_principal_id),
         after: queryValue(req.query.after),
         limit,
+        order,
       }));
     } catch (error) {
       next(error);

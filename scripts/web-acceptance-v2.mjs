@@ -116,16 +116,16 @@ try {
   await page.waitForTimeout(300);
   check('任务列表可翻到第二页', await page.locator('.pagination .active').innerText() === '2');
 
-  console.log('== 3. 任务详情九键契约 ==');
+  console.log('== 3. 任务详情契约（九键 + 树 parent/children） ==');
   const detailId = createdPostIds[0];
   const detailResponse = page.waitForResponse((response) =>
     response.request().method() === 'GET'
       && response.url().includes(`/api/v2/posts/${encodeURIComponent(detailId)}`));
   await page.goto(`${base}/tasks/${encodeURIComponent(detailId)}`, { waitUntil: 'networkidle' });
   const detailPayload = await (await detailResponse).json();
-  const expectedKeys = ['post', 'targets', 'task', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
+  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
   check('任务详情页面渲染', await page.locator('.task-detail-page').count() === 1);
-  check('任务详情九键契约完整',
+  check('任务详情契约完整（旧九键 + parent/children）',
     JSON.stringify(Object.keys(detailPayload).sort()) === JSON.stringify(expectedKeys.sort()),
     JSON.stringify(Object.keys(detailPayload)));
   check('任务详情显示任务内容', await page.locator('h1').filter({ hasText: `Web v2 验收 ${runId}-1` }).count() === 1);

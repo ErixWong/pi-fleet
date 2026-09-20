@@ -61,7 +61,7 @@ function post(overrides = {}) {
   };
 }
 
-test('detail projection has exactly nine keys and strips internal fields', () => {
+test('detail projection keeps nine legacy keys plus tree keys and strips internal fields', () => {
   const detail = presentPostDetail({
     post: post(),
     targets: [{
@@ -83,11 +83,26 @@ test('detail projection has exactly nine keys and strips internal fields', () =>
       attempts: 0,
       max_attempts: 3,
       pipeline_step_id: null,
-      parent_task_id: null,
+      parent_task_id: 'pst_parent',
       claimed_at: null,
       submitted_at: null,
       closed_at: null,
     },
+    parent: { id: 'pst_parent', title: 'parent task' },
+    children: [{
+      post_id: 'pst_child',
+      title: 'child task',
+      status: 'done',
+      attempts: 1,
+      max_attempts: 3,
+      assignee: { id: 'prn_host', kind: 'host', name: 'worker' },
+      latest_verdict: {
+        post_id: 'pst_verdict',
+        decision: 'accept',
+        opinion: 'ok',
+        attempt_no: 1,
+      },
+    }],
     channel: {
       post_id: 'pst_root',
       host_principal_id: 'prn_host',
@@ -122,8 +137,14 @@ test('detail projection has exactly nine keys and strips internal fields', () =>
 
   assert.deepEqual(
     Object.keys(detail).sort(),
-    ['channel', 'deliverables', 'more', 'post', 'recent', 'summary', 'targets', 'task', 'verdicts'].sort(),
+    ['channel', 'children', 'deliverables', 'more', 'parent', 'post', 'recent', 'summary', 'targets', 'task', 'verdicts'].sort(),
   );
+  assert.equal(detail.task.parent_task_id, 'pst_parent');
+  assert.equal(detail.parent.id, 'pst_parent');
+  assert.equal(detail.children.length, 1);
+  assert.equal(detail.children[0].assignee.name, 'worker');
+  assert.equal(detail.children[0].latest_verdict.decision, 'accept');
+  assert.equal('account_id' in detail.children[0].assignee, false);
   const serialized = JSON.stringify(detail);
   for (const key of ['deleted_at', 'account_id', 'streaming', 'relative_path', 'owner_principal_id']) {
     assert.equal(serialized.includes(`"${key}"`), false, `unexpected key: ${key}`);
@@ -131,6 +152,7 @@ test('detail projection has exactly nine keys and strips internal fields', () =>
   assert.equal(detail.recent.length, 1);
   assert.equal(detail.recent[0].body.length, 500);
   assert.equal(detail.recent[0].body.endsWith('…'), true);
+  assert.deepEqual(detail.recent[0].author, { id: 'prn_author', kind: 'agent', name: 'author' });
   assert.equal(detail.task !== null && detail.channel === null, true);
 });
 
@@ -185,6 +207,8 @@ test('recent limit is bounded by the requested limit and kind controls extension
     summary: null,
     recent: Array.from({ length: 5 }, (_, index) => post({ id: `pst_${index}`, kind: 'message' })),
     more: { count: 0, hint: '' },
+    parent: null,
+    children: [],
   });
 
   assert.equal(detail.recent.length <= 5, true);

@@ -251,6 +251,133 @@ test('due 视图返回 post_target 指派但尚未认领的任务', { concurrenc
   assert.equal(due.items.some((item) => item.post_id === published.post.id), true);
 });
 
+test('authored 视图返回我派发的任务并带 children_rollup 与 parent 标题', { concurrency: false }, async () => {
+  const root = await publishAssigned({ title: `root-${Date.now()}` });
+  const childA = await publishAssigned({
+    title: `child-a-${Date.now()}`,
+    task: { parent_task_id: root.post.id, is_ready: true },
+    targets: [{ principal_id: assignee.id, role: 'assignee' }],
+  });
+  const childB = await publishAssigned({
+    title: `child-b-${Date.now()}`,
+    task: { parent_task_id: root.post.id, is_ready: true },
+    targets: [{ principal_id: otherAssignee.id, role: 'assignee' }],
+  });
+
+  await claimTask(childA.post.id, { principal_id: assignee.id });
+  await submitTask(childA.post.id, {
+    principal_id: assignee.id,
+    deliverables: [{ name: 'result' }],
+  });
+  await verdictTask(childA.post.id, {
+    operator_principal_id: author.id,
+    decision: 'accept',
+  });
+  await claimTask(childB.post.id, { principal_id: otherAssignee.id });
+
+  const authored = await listTasks({
+    view: 'authored',
+    principal_id: author.id,
+    account_id: account.id,
+  });
+  const rootItem = authored.items.find((item) => item.post.id === root.post.id);
+  assert.notEqual(rootItem, undefined);
+  assert.deepEqual(rootItem.children_rollup, { total: 2, done: 1, failed: 0, active: 1 });
+
+  const childItem = authored.items.find((item) => item.post.id === childB.post.id);
+  assert.notEqual(childItem, undefined);
+  assert.deepEqual(childItem.parent, { id: root.post.id, title: root.post.title });
+
+  const otherAuthored = await listTasks({
+    view: 'authored',
+    principal_id: otherAssignee.id,
+    account_id: account.id,
+  });
+  assert.equal(otherAuthored.items.some((item) => item.post.id === root.post.id), false);
+
+  const hostWork = await listTasks({
+    view: 'mine',
+    principal_id: author.id,
+    account_id: account.id,
+    assignee: otherAssignee.id,
+  });
+  assert.equal(hostWork.items.some((item) => item.post.id === childB.post.id), true);
+  assert.equal(hostWork.items.some((item) => item.post.id === childA.post.id), false);
+});
+
+test('跨租户防护：publishTask 拒绝跨账户 parent，读取侧 parent/rollup 不跨账户', { concurrency: false }, async () => {
+  const accountB = await createAccount({ name: `task-flow-test-b-${Date.now()}` });
+  const authorB = await createPrincipal({
+    account_id: accountB.id,
+    kind: 'user',
+    name: `task-flow-author-b-${Date.now()}`,
+  });
+  const rootA = await publishAssigned({ title: `xroot-${Date.now()}` });
+  const rootB = await publishTask({
+    account_id: accountB.id,
+    author_principal_id: authorB.id,
+    title: `root-b-${Date.now()}`,
+    body: 'account B task',
+    visibility: 'private',
+    deliverable_spec: '{"items":["result"]}',
+    targets: [{ principal_id: authorB.id, role: 'assignee' }],
+  });
+  let rogueId = null;
+  try {
+    // 写入侧：A 账户不能把任务挂到 B 账户的父任务上
+    await assert.rejects(
+      publishTask({
+        account_id: account.id,
+        author_principal_id: author.id,
+        body: 'cross-account child',
+        visibility: 'private',
+        deliverable_spec: '{"items":["result"]}',
+        targets: [{ principal_id: assignee.id, role: 'assignee' }],
+        task: { parent_task_id: rootB.post.id },
+      }),
+      /parent task not found/,
+    );
+
+    // 模拟历史/手工造成的跨账户 parent_task_id（绕过 publishTask 直写）
+    const rogue = await posts.createPost({
+      account_id: accountB.id,
+      author_principal_id: authorB.id,
+      kind: 'task',
+      body: 'rogue cross-account child',
+      visibility: 'private',
+      targets: [{ principal_id: authorB.id, role: 'assignee' }],
+      task: { status: 'open', deliverable_spec: '{"items":["x"]}', parent_task_id: rootA.post.id },
+    });
+    rogueId = rogue.id;
+
+    // 读取侧：子任务详情不返回跨账户父任务标题
+    const rogueDetail = await posts.getPostDetail(rogue.id);
+    assert.notEqual(rogueDetail, null);
+    assert.equal(rogueDetail.parent, null);
+
+    // 读取侧：authored 列表的 children_rollup 不把跨账户子任务计入
+    const authored = await listTasks({
+      view: 'authored',
+      principal_id: author.id,
+      account_id: account.id,
+    });
+    const rootItem = authored.items.find((item) => item.post.id === rootA.post.id);
+    assert.notEqual(rootItem, undefined);
+    assert.equal(rootItem.children_rollup, undefined);
+  } finally {
+    const pool = getPool();
+    const created = [rogueId, rootB.post.id].filter(Boolean);
+    for (const postId of created) {
+      await pool.query('DELETE FROM post_task WHERE post_id = ?', [postId]);
+      await pool.query('DELETE FROM post_target WHERE post_id = ?', [postId]);
+      await pool.query('DELETE FROM post WHERE id = ?', [postId]);
+    }
+    await pool.query('DELETE FROM event WHERE account_id = ?', [accountB.id]);
+    await pool.query('DELETE FROM principal WHERE id = ?', [authorB.id]);
+    await pool.query('DELETE FROM account WHERE id = ?', [accountB.id]);
+  }
+});
+
 test('唯一入口和 verdict 前置状态：导出集合无旧的直接完成入口', { concurrency: false }, async () => {
   const exports = Object.keys(taskFlow);
   assert.equal(exports.includes('submitTask'), true);
