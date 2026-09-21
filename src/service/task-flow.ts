@@ -417,16 +417,23 @@ export async function publishTask(
   }
   const parentTaskId = input.task?.parent_task_id;
   if (parentTaskId) {
-    // 父任务必须属于同账户，拒绝跨租户把任务挂到别人的树上
+    // 分配权属于父任务作者或当前 assignee；没有独立跨 leader 创建入口。
     const parentRows = rows(await getPool().query(
-      `SELECT p.account_id
+      `SELECT p.account_id, p.author_principal_id, t.assignee_principal_id
          FROM post_task t
          JOIN post p ON p.id = t.post_id
         WHERE t.post_id = ? AND p.deleted_at IS NULL
         LIMIT 1`,
       [parentTaskId],
     ));
-    if (!parentRows[0] || stringValue(parentRows[0].account_id) !== input.account_id) {
+    if (
+      !parentRows[0]
+      || stringValue(parentRows[0].account_id) !== input.account_id
+      || (
+        stringValue(parentRows[0].author_principal_id) !== input.author_principal_id
+        && stringValue(parentRows[0].assignee_principal_id) !== input.author_principal_id
+      )
+    ) {
       throw notFound(`parent task not found: ${parentTaskId}`);
     }
   }
@@ -586,6 +593,7 @@ export async function submitTask(
           parent_id: taskId,
           author_principal_id: input.principal_id,
           body: input.message.trim(),
+          subtype: 'submit',
         });
       }
       return { ok: false, precheck, task: after.task };
@@ -640,6 +648,7 @@ export async function submitTask(
             parent_id: taskId,
             author_principal_id: input.principal_id,
             body: input.message.trim(),
+            subtype: 'submit',
           });
         }
         return {
@@ -673,6 +682,7 @@ export async function submitTask(
         parent_id: taskId,
         author_principal_id: input.principal_id,
         body: input.message.trim(),
+        subtype: 'submit',
       });
     }
     return { ok: true, precheck, task: after.task };

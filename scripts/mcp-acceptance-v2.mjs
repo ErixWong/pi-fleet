@@ -397,7 +397,12 @@ try {
       LIMIT 1`,
   );
   const detailRows = await newDb.query(
-    `SELECT id, kind, root_id FROM post WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
+    `SELECT id, kind, root_id
+       FROM post
+      WHERE deleted_at IS NULL
+        AND kind IN ('note', 'message')
+      ORDER BY id DESC
+      LIMIT 1`,
   );
   if (candidates.length === 0 || detailRows.length === 0) {
     throw new Error('erix needs at least one post and one two-item thread for read acceptance');
@@ -405,8 +410,8 @@ try {
   const detailId = String(detailRows[0].id);
   const rootId = String(candidates[0].root_id);
   const detailed = await call(client, 'post', { action: 'detail', id: detailId });
-  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
-  check('2. post(detail) has exactly the eleven contract keys (legacy nine + tree parent/children)',
+  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'ancestry', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
+  check('2. post(detail) has exactly the twelve contract keys (legacy nine + tree parent/children/ancestry)',
     JSON.stringify(Object.keys(detailed.payload).sort()) === JSON.stringify([...expectedKeys].sort()),
     JSON.stringify(Object.keys(detailed.payload)));
   check('3. recent is bounded and bodies are <= 500',

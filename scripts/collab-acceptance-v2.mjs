@@ -200,8 +200,11 @@ try {
     JSON.stringify(subB.data));
 
   const subBDetail = await request('GET', `/api/v2/posts/${subBId}`, coordinator.bearer);
-  check('3c. 门控任务 B 详情标记 is_ready=false',
-    subBDetail.response.status === 200 && subBDetail.data.task?.is_ready === false,
+  check('3c. 门控任务 B 详情标记 is_ready=false 且 ancestry 指向根任务',
+    subBDetail.response.status === 200
+      && subBDetail.data.task?.is_ready === false
+      && subBDetail.data.ancestry?.length === 1
+      && subBDetail.data.ancestry[0]?.id === rootId,
     JSON.stringify(subBDetail.data?.task));
   const subBRow = await db.query(
     `SELECT parent_task_id FROM post_task WHERE post_id = ? LIMIT 1`,
@@ -225,6 +228,34 @@ try {
     submitA.response.status === 200 && submitA.data.ok === true
       && submitA.data.task?.status === 'submitted',
     JSON.stringify(submitA.data));
+
+  const rootDetail = await request('GET', `/api/v2/posts/${rootId}`, coordinator.bearer);
+  const childASummary = (rootDetail.data.children ?? []).find((item) => item.post_id === subAId);
+  check('4c. 根任务 children 带执行者 A 的 submit 摘要和作者',
+    rootDetail.response.status === 200
+      && childASummary?.latest_submit_summary?.body?.startsWith('结论')
+      && childASummary.latest_submit_summary.author?.id === executorA.principalId,
+    JSON.stringify(childASummary));
+  const submitRows = await db.query(
+    `SELECT subtype FROM post
+      WHERE parent_id = ? AND kind = 'message'
+      ORDER BY id DESC
+      LIMIT 1`,
+    [subAId],
+  );
+  check('4d. REST submit 摘要 message 带 subtype=submit',
+    submitRows[0]?.subtype === 'submit',
+    JSON.stringify(submitRows[0]));
+  const subtree = await request('GET', `/api/v2/tasks/${rootId}/subtree?depth=1`, coordinator.bearer);
+  check('4e. 子树 API 返回一层嵌套树和摘要行',
+    subtree.response.status === 200
+      && subtree.data.depth === 1
+      && subtree.data.root?.children?.some((item) => item.id === subAId && item.summary.startsWith('结论')),
+    JSON.stringify(subtree.data));
+  const invalidDepth = await request('GET', `/api/v2/tasks/${rootId}/subtree?depth=5`, coordinator.bearer);
+  check('4f. 子树深度上限为 4',
+    invalidDepth.response.status === 400,
+    JSON.stringify(invalidDepth.data));
 
   const dueBefore = await request('GET', '/api/v2/tasks?view=due', executorB.bearer);
   const dueBeforeIds = (dueBefore.data.items ?? []).map((item) => item.id ?? item.post_id);

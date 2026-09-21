@@ -19,7 +19,7 @@ const {
   initSchema,
 } = identity;
 const { withTransaction } = poolModule;
-const { getThread } = posts;
+const { getPostDetail, getTaskSubtree, getThread } = posts;
 const {
   createAttachment,
   markScanStatus,
@@ -96,7 +96,10 @@ test('全链通：publish → claim → submit → verdict accept → done', { c
   assert.equal(verifierCalled, true);
   assert.deepEqual(submitted.precheck, { ok: true, issues: [] });
   assert.equal(submitted.task.status, 'submitted');
-  assert.equal((await getThread(published.post.id)).some((post) => post.body === 'The result is ready.'), true);
+  const submitMessage = (await getThread(published.post.id))
+    .find((post) => post.body === 'The result is ready.');
+  assert.notEqual(submitMessage, undefined);
+  assert.equal(submitMessage.subtype, 'submit');
 
   const verdict = await verdictTask(published.post.id, {
     operator_principal_id: author.id,
@@ -305,6 +308,90 @@ test('authored 视图返回我派发的任务并带 children_rollup 与 parent �
   assert.equal(hostWork.items.some((item) => item.post.id === childA.post.id), false);
 });
 
+test('树数据基线：submit 摘要、children 摘要、ancestry 和有界子树', { concurrency: false }, async () => {
+  const root = await publishAssigned({ title: `tree-root-${Date.now()}` });
+  const child = await publishAssigned({
+    title: `tree-child-${Date.now()}`,
+    task: { parent_task_id: root.post.id },
+  });
+  const grandchild = await publishAssigned({
+    title: `tree-grandchild-${Date.now()}`,
+    task: { parent_task_id: child.post.id },
+  });
+  const leaf = await publishAssigned({
+    title: `tree-leaf-${Date.now()}`,
+    task: { parent_task_id: grandchild.post.id },
+  });
+  await claimTask(child.post.id, { principal_id: assignee.id });
+  await submitTask(child.post.id, {
+    principal_id: assignee.id,
+    deliverables: [{ name: 'result' }],
+    message: '第一行摘要\n补充说明',
+  });
+
+  const rootDetail = await getPostDetail(root.post.id);
+  assert.ok(rootDetail);
+  const childSummary = rootDetail.children.find((item) => item.post_id === child.post.id);
+  assert.ok(childSummary);
+  assert.equal(childSummary.latest_submit_summary.body, '第一行摘要\n补充说明');
+  assert.equal(childSummary.latest_submit_summary.author.id, assignee.id);
+
+  const childDetail = await getPostDetail(child.post.id);
+  assert.ok(childDetail);
+  assert.deepEqual(childDetail.ancestry.map((item) => item.id), [root.post.id]);
+  assert.equal(childDetail.ancestry[0].latest_submit_summary, null);
+
+  const shallow = await getTaskSubtree(root.post.id, account.id, 1);
+  assert.ok(shallow);
+  assert.equal(shallow.children.length, 1);
+  assert.equal(shallow.children[0].children.length, 0);
+  assert.equal(shallow.children[0].summary, '第一行摘要');
+
+  const bounded = await getTaskSubtree(root.post.id, account.id, 4);
+  assert.ok(bounded);
+  let current = bounded;
+  for (const expectedId of [child.post.id, grandchild.post.id, leaf.post.id]) {
+    assert.equal(current.children.length, 1);
+    current = current.children[0];
+    assert.equal(current.id, expectedId);
+  }
+  assert.equal(current.children.length, 0);
+  await assert.rejects(
+    getTaskSubtree(root.post.id, account.id, 5),
+    /depth must be an integer between 0 and 4/,
+  );
+});
+
+test('parent 权限：非父任务作者或 assignee 的同账户主体按 not found 拒绝', { concurrency: false }, async () => {
+  const root = await publishAssigned({ title: `permission-root-${Date.now()}` });
+  await claimTask(root.post.id, { principal_id: assignee.id });
+  const childByAssignee = await publishTask({
+    account_id: account.id,
+    author_principal_id: assignee.id,
+    title: `permission-child-by-assignee-${Date.now()}`,
+    body: 'parent assignee may delegate',
+    visibility: 'private',
+    deliverable_spec: '{"items":["result"]}',
+    targets: [{ principal_id: otherAssignee.id, role: 'assignee' }],
+    task: { parent_task_id: root.post.id },
+  });
+  postIds.push(childByAssignee.post.id);
+  assert.equal(childByAssignee.task.parent_task_id, root.post.id);
+  await assert.rejects(
+    publishTask({
+      account_id: account.id,
+      author_principal_id: otherAssignee.id,
+      title: `permission-child-${Date.now()}`,
+      body: 'should be rejected',
+      visibility: 'private',
+      deliverable_spec: '{"items":["result"]}',
+      targets: [{ principal_id: assignee.id, role: 'assignee' }],
+      task: { parent_task_id: root.post.id },
+    }),
+    /parent task not found/,
+  );
+});
+
 test('跨租户防护：publishTask 拒绝跨账户 parent，读取侧 parent/rollup 不跨账户', { concurrency: false }, async () => {
   const accountB = await createAccount({ name: `task-flow-test-b-${Date.now()}` });
   const authorB = await createPrincipal({
@@ -338,7 +425,7 @@ test('跨租户防护：publishTask 拒绝跨账户 parent，读取侧 parent/ro
       /parent task not found/,
     );
 
-    // 模拟历史/手工造成的跨账户 parent_task_id（绕过 publishTask 直写）
+    // 模拟历史/手工造成的跨账户 parent_task_id（绕过 service 直写）
     const rogue = await posts.createPost({
       account_id: accountB.id,
       author_principal_id: authorB.id,
@@ -346,14 +433,17 @@ test('跨租户防护：publishTask 拒绝跨账户 parent，读取侧 parent/ro
       body: 'rogue cross-account child',
       visibility: 'private',
       targets: [{ principal_id: authorB.id, role: 'assignee' }],
-      task: { status: 'open', deliverable_spec: '{"items":["x"]}', parent_task_id: rootA.post.id },
+      task: { status: 'open', deliverable_spec: '{"items":["x"]}' },
     });
     rogueId = rogue.id;
+    await getPool().query(
+      'UPDATE post_task SET parent_task_id = ? WHERE post_id = ?',
+      [rootA.post.id, rogue.id],
+    );
 
-    // 读取侧：子任务详情不返回跨账户父任务标题
+    // 读取侧：跨账户祖先链按资源不存在处理
     const rogueDetail = await posts.getPostDetail(rogue.id);
-    assert.notEqual(rogueDetail, null);
-    assert.equal(rogueDetail.parent, null);
+    assert.equal(rogueDetail, null);
 
     // 读取侧：authored 列表的 children_rollup 不把跨账户子任务计入
     const authored = await listTasks({

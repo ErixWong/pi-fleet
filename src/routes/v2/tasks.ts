@@ -19,7 +19,7 @@ import {
   type TaskTargetInput,
 } from '../../service/task-flow.js';
 import type { TaskStatus } from '../../service/posts.js';
-import { presentTaskListItem } from '../../mcp/post-tools.js';
+import { presentTaskListItem, readTaskSubtree } from '../../mcp/post-tools.js';
 
 export const tasksV2Router = Router();
 
@@ -105,6 +105,30 @@ tasksV2Router.post(
           : undefined,
       });
       res.status(201).json({ ok: true, post_id: published.post.id, status: published.task.status });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+tasksV2Router.get(
+  '/:id/subtree',
+  principalAuthMiddleware(),
+  requireScope('task:read'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      const depth = queryInteger(req.query.depth, 'depth', 0, 4);
+      if (depth.error) {
+        res.status(400).json({ error: depth.error });
+        return;
+      }
+      const subtree = await readTaskSubtree(req.params.id, context.account_id, depth.value ?? 4);
+      if (!subtree) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      res.json(subtree);
     } catch (error) {
       next(error);
     }
