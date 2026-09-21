@@ -57,3 +57,26 @@ lease、成功确认和退避重试。它不是另一套事件表，也不会访
 `tag`、`post_tag`、`reputation_event`、`pipeline`、`pipeline_step`、`trigger`、
 `llm_provider`、`llm_model`、`llm_call` 等表仍由 schema 定义。它们当前没有服务层
 消费者，是后续能力的预留，不代表对应旧功能仍存在。
+
+## 主机控制链路
+
+平台↔主机通讯模型从单向拉升级为双向请求/应答：daemon 仍是任务认领、结果提交、
+心跳和目录上报的主动方，平台也可经 `host_control_request` 表下发控制
+命令，daemon 应答后结果 upsert 进 `host_folder`，与心跳深扫底图同表。首个命令
+type 为 `list_dir`（按目录树按需钻目录），后续的主机停止/任务打断走同一链路。
+
+实现是捎带式短轮询，不是 SSE/WS：
+
+- 平台侧：`POST /api/v2/hosts/:id/browse` 写入 `host_control_request`
+  （同 host+path pending 去重、每 host pending 上限 5、pending 超 30s 惰性 expire）。
+- daemon 侧：在现有 channel-poll（5s）节拍里顺带
+  `GET /api/v2/hosts/controls` 取走 pending 命令，执行后
+  `POST /api/v2/hosts/controls/:id/results` 回传；失败也回传 error。
+- Web 侧：Channels 目录树展开未缓存节点时发 browse，轮询请求状态，answered 后
+  结果随主机目录刷新渲染，expired 报「主机未响应」可重试。
+
+取舍：百台主机规模下捎带轮询零新增请求（命令随已有 5s 节拍分发，总 QPS 数十级，
+余量充足），且不需要长连接状态管理；SSE 留给下期「Web 消息实时推送 + 实时打断」
+统一上。滚动升级兼容：新 daemon 遇到旧平台返回 404 时静默降级（每进程只告警一次，
+之后不重试该端点、不刷日志、不阻断任务/对话主流程）；旧 daemon 对平台下发的请求
+不响应，30s 后 expire，UI 按「主机未响应」处理。

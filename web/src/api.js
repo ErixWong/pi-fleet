@@ -77,6 +77,8 @@ export const api = {
   updateHost: (id, payload) => req('PATCH', `/hosts/${encodeURIComponent(id)}`, payload),
   deleteHost: (id) => req('DELETE', `/hosts/${encodeURIComponent(id)}`),
   rotateHostKey: (id) => req('POST', `/hosts/${encodeURIComponent(id)}/keys/rotate`),
+  browseHost: (id, payload) => req('POST', `/hosts/${encodeURIComponent(id)}/browse`, payload),
+  hostControlRequest: (id) => req('GET', `/hosts/controls/${encodeURIComponent(id)}`),
 
   channels: () => req('GET', '/channels'),
   createChannel: (payload) => req('POST', '/channels', payload),

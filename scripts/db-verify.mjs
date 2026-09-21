@@ -9,6 +9,7 @@ const EXPECTED_TABLES = [
   'account',
   'principal',
   'host_folder',
+  'host_control_request',
   'device',
   'device_executor',
   'api_key',
@@ -37,6 +38,7 @@ const EXPECTED_TABLES = [
 const EXPECTED_INDEXES = [
   ['principal', 'idx_principal_acct'],
   ['api_key', 'idx_key_prn'],
+  ['host_control_request', 'idx_hcr_host_status'],
   ['post', 'idx_post_root'],
   ['post', 'idx_post_parent'],
   ['post', 'idx_post_kind'],
@@ -142,11 +144,11 @@ async function main() {
     const actualTables = tables.map((row) => row.table_name);
     const missingTables = EXPECTED_TABLES.filter((name) => !actualTables.includes(name));
     const extraTables = actualTables.filter((name) => !EXPECTED_TABLES.includes(name));
-    if (missingTables.length === 0 && extraTables.length === 0 && actualTables.length === 26) {
-      pass('表清单 = 26 张');
+    if (missingTables.length === 0 && extraTables.length === 0 && actualTables.length === EXPECTED_TABLES.length) {
+      pass(`表清单 = ${EXPECTED_TABLES.length} 张`);
     } else {
       fail(
-        '表清单 = 26 张',
+        `表清单 = ${EXPECTED_TABLES.length} 张`,
         `缺少 [${missingTables.join(', ')}]，多出 [${extraTables.join(', ')}]，实际 ${actualTables.length} 张`,
       );
     }

@@ -4,9 +4,19 @@ import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
 import { badRequest, notFound } from '../util/errors.js';
 import { normalizeReportedHomeFolder } from '../util/workdir.js';
+import {
+  invalidateAuthCacheKeyHash,
+  invalidateAuthCachePrincipal,
+  verifyApiKeyCached,
+} from './auth-cache.js';
 import { recordEvent } from './event-outbox.js';
 
 export { getPool, initSchema } from '../db/pool.js';
+export {
+  authCacheSize,
+  clearAuthCache,
+  invalidateAuthCachePrincipal,
+} from './auth-cache.js';
 
 const PRINCIPAL_KINDS = new Set(['user', 'host', 'agent', 'service']);
 export const SCOPES = new Set([
@@ -619,6 +629,7 @@ export async function deleteHost(
         WHERE principal_id = ? AND revoked_at IS NULL`,
       [deletedAt, hostId],
     );
+    invalidateAuthCachePrincipal(hostId);
     return true;
   });
 }
@@ -809,43 +820,23 @@ export async function createApiKey(input: CreateApiKeyInput): Promise<ApiKeyCrea
 }
 
 export async function verifyApiKey(key: string): Promise<VerifiedApiKey | null> {
-  const keyHash = hashSecret(key);
-  const now = nowString();
-  return withTransaction(async (conn) => {
-    const result = await conn.query(
-      `SELECT k.id AS key_id, k.principal_id, k.scopes,
-              p.id, p.account_id, p.kind, p.name, p.password_hash,
-              p.host_principal_id, p.reputation_score, p.created_at, p.deleted_at
-         FROM api_key k
-         JOIN principal p ON p.id = k.principal_id
-         JOIN account a ON a.id = p.account_id
-        WHERE k.key_hash = ?
-          AND k.revoked_at IS NULL
-          AND (k.expires_at IS NULL OR k.expires_at > ?)
-          AND p.deleted_at IS NULL
-          AND a.status = 'active'
-          AND a.deleted_at IS NULL
-        FOR UPDATE`,
-      [keyHash, now],
-    );
-    const row = rows(result)[0];
-    if (!row) return null;
-    const keyId = stringValue(row.key_id);
-    const scopes = parseScopes(row.scopes);
-    const update = await conn.query(
-      `UPDATE api_key
-          SET last_used_at = ?
-        WHERE id = ? AND revoked_at IS NULL
-          AND (expires_at IS NULL OR expires_at > ?)`,
-      [now, keyId, now],
-    );
-    if (affectedRows(update) === 0) return null;
-    return {
-      principal: principalFromRow(row),
-      scopes,
-      key_id: keyId,
-    };
-  });
+  const verified = await verifyApiKeyCached(key);
+  if (!verified) return null;
+  return {
+    principal: {
+      id: verified.principal.id,
+      account_id: verified.principal.account_id,
+      kind: verified.principal.kind,
+      name: verified.principal.name,
+      password_hash: null,
+      host_principal_id: verified.principal.host_principal_id,
+      reputation_score: verified.principal.reputation_score,
+      created_at: verified.principal.created_at,
+      deleted_at: null,
+    },
+    scopes: verified.scopes as Scope[],
+    key_id: verified.key_id,
+  };
 }
 
 export async function rotateApiKey(
@@ -899,6 +890,8 @@ export async function rotateApiKey(
             AND (expires_at IS NULL OR expires_at > ?)`,
         [expiresAt, target.id, principalId, issuedAt],
       );
+      // 旧 key 进入 grace 期后随时可能过期，主动失效该主体全部缓存。
+      invalidateAuthCachePrincipal(principalId);
     }
     return creation;
   });
@@ -907,7 +900,7 @@ export async function rotateApiKey(
 export async function revokeApiKey(keyId: string): Promise<void> {
   await withTransaction(async (conn) => {
     const keyRows = rows(await conn.query(
-      `SELECT k.id, k.principal_id, k.revoked_at, p.account_id
+      `SELECT k.id, k.principal_id, k.key_hash, k.revoked_at, p.account_id
          FROM api_key k
          JOIN principal p ON p.id = k.principal_id
         WHERE k.id = ?
@@ -924,6 +917,7 @@ export async function revokeApiKey(keyId: string): Promise<void> {
       [revokedAt, keyId],
     );
     if (affectedRows(result) === 0) throw notFound(`API key not found or already revoked: ${keyId}`);
+    invalidateAuthCacheKeyHash(stringValue(key.key_hash));
     await recordEvent(conn, {
       account_id: stringValue(key.account_id),
       actor_principal_id: stringValue(key.principal_id),

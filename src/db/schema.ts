@@ -30,6 +30,19 @@ export const SCHEMA_STATEMENTS: string[] = [
   CONSTRAINT fk_host_folder_prn FOREIGN KEY (host_principal_id) REFERENCES principal(id)
 ) ENGINE=InnoDB`,
 
+  `CREATE TABLE host_control_request (
+  id                VARCHAR(32)  NOT NULL PRIMARY KEY,
+  host_principal_id VARCHAR(32)  NOT NULL,
+  type              ENUM('list_dir') NOT NULL,
+  payload           TEXT         NOT NULL,
+  status            ENUM('pending','answered','expired') NOT NULL DEFAULT 'pending',
+  result            TEXT         NULL,
+  requested_at      DATETIME     NOT NULL,
+  answered_at       DATETIME     NULL,
+  KEY idx_hcr_host_status (host_principal_id, status, id),
+  CONSTRAINT fk_hcr_prn FOREIGN KEY (host_principal_id) REFERENCES principal(id)
+) ENGINE=InnoDB`,
+
   `CREATE TABLE device (
   principal_id  VARCHAR(32) PRIMARY KEY,
   hostname      VARCHAR(255) NOT NULL DEFAULT '',
