@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { scanHomeFolders } from './host-folders.mjs';
 
 const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'config.json');
 const PI_MCP_CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json');
@@ -247,6 +248,23 @@ async function api(method, pathname, body) {
     throw error;
   }
   return data;
+}
+
+let reportingHostFolders = false;
+async function reportHostFolders() {
+  if (reportingHostFolders) return;
+  reportingHostFolders = true;
+  try {
+    const folders = scanHomeFolders({
+      warn: (message) => console.log(message),
+    });
+    await api('POST', '/api/v2/hosts/folders', { folders });
+    console.log(`[daemon] 已上报主机 home 一级目录：${folders.length} 个`);
+  } catch (error) {
+    console.log(`[daemon] 主机目录上报失败：${error.message}`);
+  } finally {
+    reportingHostFolders = false;
+  }
 }
 
 const channelState = readJsonFile(CHANNEL_STATE_PATH);
@@ -1027,12 +1045,14 @@ async function startTaskPolling() {
   if (taskPolling) return;
   taskPolling = true;
   while (true) {
+    void reportHostFolders();
     await pollTasks();
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
 }
 
 syncPiMcpConfig();
+void reportHostFolders();
 void startTaskPolling();
 let channelPolling = false;
 async function startChannelPolling() {

@@ -16,6 +16,7 @@ const {
   revokeApiKey,
   rotateApiKey,
   touchDevice,
+  upsertHostFolders,
   verifyApiKey,
   hasScope,
 } = identity;
@@ -72,6 +73,35 @@ test('创建主体时 host 自动创建 device，并支持心跳和执行器上�
     ],
   );
   assert.equal((await getPrincipal(agent.id))?.host_principal_id, host.id);
+});
+
+test('主机目录上报去重、更新时间、拒绝越界路径并截断到 200 条', async () => {
+  const root = `/home/identity-test-${Date.now()}`;
+  const first = await upsertHostFolders(host.id, [
+    `${root}/one`,
+    `${root}/one/../one`,
+    `${root}/two`,
+  ]);
+  assert.deepEqual(first.map((folder) => folder.path), [`${root}/one`, `${root}/two`]);
+
+  await getPool().query(
+    'UPDATE host_folder SET last_seen_at = ? WHERE host_principal_id = ? AND path = ?',
+    ['2000-01-01 00:00:00', host.id, `${root}/one`],
+  );
+  const refreshed = await upsertHostFolders(host.id, [`${root}/one`]);
+  assert.ok(refreshed.find((folder) => folder.path === `${root}/one`)?.last_seen_at > '2000-01-01 00:00:00');
+
+  await assert.rejects(
+    upsertHostFolders(host.id, ['/tmp/not-under-home']),
+    /必须是 \/home\/ 下/,
+  );
+
+  await getPool().query('DELETE FROM host_folder WHERE host_principal_id = ?', [host.id]);
+  const capped = await upsertHostFolders(
+    host.id,
+    Array.from({ length: 205 }, (_, index) => `${root}/folder-${index}`),
+  );
+  assert.equal(capped.length, 200);
 });
 
 test('api_key 命中、未命中、撤销和过期校验，并更新 last_used_at', async () => {
@@ -176,6 +206,7 @@ test.after(async () => {
       createdApiKeyIds,
     );
   }
+  await getPool().query('DELETE FROM host_folder WHERE host_principal_id IN (?, ?)', [host.id, agent.id]);
   await getPool().query(
     `DELETE FROM device_executor WHERE principal_id IN (${createdPrincipalIds.map(() => '?').join(',')})`,
     createdPrincipalIds,

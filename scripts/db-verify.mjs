@@ -8,6 +8,7 @@ dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const EXPECTED_TABLES = [
   'account',
   'principal',
+  'host_folder',
   'device',
   'device_executor',
   'api_key',
@@ -141,11 +142,11 @@ async function main() {
     const actualTables = tables.map((row) => row.table_name);
     const missingTables = EXPECTED_TABLES.filter((name) => !actualTables.includes(name));
     const extraTables = actualTables.filter((name) => !EXPECTED_TABLES.includes(name));
-    if (missingTables.length === 0 && extraTables.length === 0 && actualTables.length === 25) {
-      pass('表清单 = 25 张');
+    if (missingTables.length === 0 && extraTables.length === 0 && actualTables.length === 26) {
+      pass('表清单 = 26 张');
     } else {
       fail(
-        '表清单 = 25 张',
+        '表清单 = 26 张',
         `缺少 [${missingTables.join(', ')}]，多出 [${extraTables.join(', ')}]，实际 ${actualTables.length} 张`,
       );
     }
@@ -174,6 +175,16 @@ async function main() {
       const index = indexMap.get(`${tableName}.${indexName}`);
       if (index) pass(`索引 ${tableName}.${indexName}`);
       else fail(`索引 ${tableName}.${indexName}`, '不存在');
+    }
+
+    const hostFolderPrimary = indexMap.get('host_folder.PRIMARY');
+    if (
+      hostFolderPrimary
+      && hostFolderPrimary.columns.join(',') === 'host_principal_id,path'
+    ) {
+      pass('host_folder 复合主键');
+    } else {
+      fail('host_folder 复合主键', '应为 (host_principal_id, path)');
     }
 
     const currentKeyIndex = indexMap.get('deliverable.uq_dlv_current');

@@ -39,30 +39,77 @@ const selectedHost = computed(() =>
 const hostChannels = computed(() =>
   channels.value.filter((channel) => String(channel.host?.id) === String(selectedHostId.value)));
 
-function folderKey(channel) {
-  return channel.workdir?.trim() || '__default__';
+function hostHomePrefix(host) {
+  const reportedPath = (host?.folders || [])
+    .map((folder) => String(folder?.path || '').trim())
+    .find((folder) => folder.startsWith('/home/'));
+  const match = reportedPath?.match(/^\/home\/[^/]+/);
+  return match?.[0] || '';
+}
+
+function folderKey(channel, host = selectedHost.value) {
+  const workdir = channel.workdir?.trim();
+  if (!workdir) return '__default__';
+  const homePrefix = hostHomePrefix(host);
+  if (homePrefix && workdir === '~') return homePrefix;
+  if (homePrefix && workdir.startsWith('~/')) {
+    return `${homePrefix}${workdir.slice(1)}`;
+  }
+  return workdir;
+}
+
+function folderCreateWorkdir(folder, host = selectedHost.value) {
+  const workdir = folder?.workdir?.trim() || '~/tmp';
+  const homePrefix = hostHomePrefix(host)
+    || workdir.match(/^\/home\/[^/]+/)?.[0]
+    || '';
+  if (homePrefix && workdir === homePrefix) return '~';
+  if (homePrefix && workdir.startsWith(`${homePrefix}/`)) {
+    return `~${workdir.slice(homePrefix.length)}`;
+  }
+  return workdir;
 }
 
 const folders = computed(() => {
   const grouped = new Map();
+  for (const reported of selectedHost.value?.folders || []) {
+    const workdir = String(reported?.path || '').trim();
+    if (!workdir) continue;
+    grouped.set(workdir, {
+      key: workdir,
+      workdir,
+      channels: [],
+      lastActivity: '',
+      lastReportedAt: String(reported?.last_seen_at || ''),
+      reported: true,
+    });
+  }
   for (const channel of hostChannels.value) {
-    const key = folderKey(channel);
+    const key = folderKey(channel, selectedHost.value);
     if (!grouped.has(key)) {
       grouped.set(key, {
         key,
         workdir: channel.workdir?.trim() || null,
         channels: [],
         lastActivity: '',
+        lastReportedAt: '',
+        reported: false,
       });
     }
     const folder = grouped.get(key);
+    if (folder.channels.length === 0 && folder.reported) {
+      folder.workdir = channel.workdir?.trim() || folder.workdir;
+    }
     folder.channels.push(channel);
     if (String(channel.last_activity_at || '') > String(folder.lastActivity || '')) {
       folder.lastActivity = channel.last_activity_at || '';
     }
   }
-  return [...grouped.values()].sort((left, right) =>
-    String(right.lastActivity).localeCompare(String(left.lastActivity)));
+  return [...grouped.values()].sort((left, right) => {
+    const leftRecent = left.lastActivity || left.lastReportedAt;
+    const rightRecent = right.lastActivity || right.lastReportedAt;
+    return String(rightRecent).localeCompare(String(leftRecent));
+  });
 });
 
 const selectedFolder = computed(() =>
@@ -147,7 +194,7 @@ function syncSelection() {
   if (routeChannel) {
     selectedId.value = routeId;
     selectedHostId.value = routeChannel.host.id;
-    selectedFolderKey.value = folderKey(routeChannel);
+    selectedFolderKey.value = folderKey(routeChannel, selectedHost.value);
     return;
   }
 
@@ -218,7 +265,7 @@ async function selectFolder(folder) {
 async function selectChannel(channel) {
   selectedId.value = channel.id;
   selectedHostId.value = channel.host.id;
-  selectedFolderKey.value = folderKey(channel);
+  selectedFolderKey.value = folderKey(channel, selectedHost.value);
   sidebarOpen.value = false;
   sendError.value = '';
   await router.push(`/channels/${encodeURIComponent(channel.id)}`);
@@ -227,7 +274,7 @@ async function selectChannel(channel) {
 
 function openCreateForm() {
   if (!selectedHost.value) return;
-  newWorkdir.value = selectedFolder.value?.workdir || '~/tmp';
+  newWorkdir.value = folderCreateWorkdir(selectedFolder.value, selectedHost.value);
   newTitle.value = '';
   error.value = '';
   showCreate.value = true;
@@ -333,7 +380,7 @@ watch(() => route.params.channelId, async (value) => {
   if (channel) {
     selectedId.value = id;
     selectedHostId.value = channel.host.id;
-    selectedFolderKey.value = folderKey(channel);
+    selectedFolderKey.value = folderKey(channel, selectedHost.value);
     await refreshSelectedMessages();
   } else if (!id) {
     syncSelection();
@@ -395,18 +442,23 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="!selectedHost" class="empty-state py-4">选择主机查看文件夹</div>
         <div v-else-if="!folders.length" class="empty-state py-4">
-          <i class="bi bi-folder2-open"></i><strong>暂无对话文件夹</strong><span>新建对话后会自动出现。</span>
+          <i class="bi bi-folder2-open"></i><strong>暂无文件夹</strong><span>主机上报目录或新建对话后会自动出现。</span>
         </div>
         <div v-else class="list-group list-group-flush channel-folder-list">
           <button v-for="folder in folders" :key="folder.key" type="button"
             class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
-            :class="{ active: selectedFolderKey === folder.key }" @click="selectFolder(folder)">
+            :class="{ active: selectedFolderKey === folder.key }"
+            :title="folder.channels.length ? '' : '点击后可在此文件夹发起新对话'"
+            @click="selectFolder(folder)">
             <div class="d-flex align-items-center gap-2">
               <i class="bi bi-folder2"></i>
               <strong class="text-truncate">{{ folderTitle(folder) }}</strong>
               <span class="badge text-bg-secondary ms-auto">{{ folder.channels.length }}</span>
             </div>
-            <div class="small opacity-75 mt-1">最近：{{ fmtTime(folder.lastActivity) }}</div>
+            <div class="small opacity-75 mt-1">
+              <template v-if="folder.channels.length">最近：{{ fmtTime(folder.lastActivity) }}</template>
+              <template v-else>最近上报：{{ fmtTime(folder.lastReportedAt) }}</template>
+            </div>
           </button>
         </div>
       </section>
@@ -444,7 +496,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="col-md-5">
                   <label class="form-label small">对话标题</label>
-                  <input v-model="newTitle" class="form-control form-control-sm" placeholder="可选">
+                  <input v-model="newTitle" class="form-control form-control-sm" aria-label="对话标题" placeholder="可选">
                 </div>
                 <div class="col-md-2 d-flex gap-2">
                   <button class="btn btn-sm btn-primary flex-grow-1" :disabled="creating">

@@ -3,6 +3,7 @@ import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
 import { badRequest, notFound } from '../util/errors.js';
+import { normalizeReportedHomeFolder } from '../util/workdir.js';
 import { recordEvent } from './event-outbox.js';
 
 export { getPool, initSchema } from '../db/pool.js';
@@ -81,6 +82,12 @@ export interface HostSummary {
   status: HostStatus;
   last_seen_at: string | null;
   created_at: string;
+  folders: HostFolder[];
+}
+
+export interface HostFolder {
+  path: string;
+  last_seen_at: string;
 }
 
 export interface DeviceExecutor {
@@ -264,6 +271,14 @@ function hostFromRow(row: DbRow): HostSummary {
     status: row.deleted_at === null || row.deleted_at === undefined ? 'active' : 'disabled',
     last_seen_at: nullableString(row.last_seen_at),
     created_at: stringValue(row.created_at),
+    folders: [],
+  };
+}
+
+function hostFolderFromRow(row: DbRow): HostFolder {
+  return {
+    path: stringValue(row.path),
+    last_seen_at: stringValue(row.last_seen_at),
   };
 }
 
@@ -456,7 +471,35 @@ async function hostQuery(
       ORDER BY p.created_at DESC, p.id DESC`,
     params,
   );
-  return rows(result).map(hostFromRow);
+  const hosts = rows(result).map(hostFromRow);
+  if (hosts.length === 0) return hosts;
+
+  const folderPredicates = ['p.account_id = ?', `p.kind = 'host'`];
+  const folderParams: unknown[] = [accountId];
+  if (!includeDeleted) folderPredicates.push('p.deleted_at IS NULL');
+  if (hostId !== undefined) {
+    folderPredicates.push('p.id = ?');
+    folderParams.push(hostId);
+  }
+  const folderResult = await getPool().query(
+    `SELECT hf.host_principal_id, hf.path, hf.last_seen_at
+       FROM host_folder hf
+       JOIN principal p ON p.id = hf.host_principal_id
+      WHERE ${folderPredicates.join(' AND ')}
+      ORDER BY hf.host_principal_id, hf.path`,
+    folderParams,
+  );
+  const foldersByHost = new Map<string, HostFolder[]>();
+  for (const row of rows(folderResult)) {
+    const principalId = stringValue(row.host_principal_id);
+    const folders = foldersByHost.get(principalId) ?? [];
+    folders.push(hostFolderFromRow(row));
+    foldersByHost.set(principalId, folders);
+  }
+  return hosts.map((host) => ({
+    ...host,
+    folders: foldersByHost.get(host.id) ?? [],
+  }));
 }
 
 export async function listHosts(accountId: string): Promise<HostSummary[]> {
@@ -468,6 +511,46 @@ export async function getHost(
   hostId: string,
 ): Promise<HostSummary | null> {
   return (await hostQuery(accountId, hostId))[0] ?? null;
+}
+
+export async function upsertHostFolders(
+  principalId: string,
+  paths: readonly unknown[],
+): Promise<HostFolder[]> {
+  const normalized = [];
+  const seen = new Set<string>();
+  for (const value of paths) {
+    const folder = normalizeReportedHomeFolder(value);
+    if (!folder) {
+      throw badRequest('每个主机目录都必须是 /home/ 下且规范化后不能逃逸');
+    }
+    if (!seen.has(folder)) {
+      seen.add(folder);
+      normalized.push(folder);
+    }
+  }
+  const limited = normalized.slice(0, 200);
+  const reportedAt = nowString();
+  await withTransaction(async (conn) => {
+    await requireHostPrincipal(conn, principalId);
+    for (const folder of limited) {
+      await conn.query(
+        `INSERT INTO host_folder (host_principal_id, path, last_seen_at)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE last_seen_at = VALUES(last_seen_at)`,
+        [principalId, folder, reportedAt],
+      );
+    }
+  });
+
+  const result = await getPool().query(
+    `SELECT path, last_seen_at
+       FROM host_folder
+      WHERE host_principal_id = ?
+      ORDER BY path`,
+    [principalId],
+  );
+  return rows(result).map(hostFolderFromRow);
 }
 
 export async function updateHost(

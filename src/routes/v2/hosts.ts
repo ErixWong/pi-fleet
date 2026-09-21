@@ -11,6 +11,7 @@ import {
   getHost,
   listHosts,
   rotateApiKey,
+  upsertHostFolders,
   updateHost,
   type HostStatus,
   type Scope,
@@ -48,6 +49,7 @@ function presentHost(host: {
   status: HostStatus;
   last_seen_at: string | null;
   created_at: string;
+  folders: { path: string; last_seen_at: string }[];
 }, offlineAfterMin: number): Record<string, unknown> {
   return {
     id: host.id,
@@ -56,8 +58,43 @@ function presentHost(host: {
     last_seen: host.last_seen_at,
     created_at: host.created_at,
     offline: offline(host.last_seen_at, offlineAfterMin),
+    folders: host.folders.map((folder) => ({
+      path: folder.path,
+      last_seen_at: folder.last_seen_at,
+    })),
   };
 }
+
+hostsV2Router.post(
+  '/folders',
+  principalAuthMiddleware(),
+  requireScope('device:execute'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      const body = bodyRecord(req.body);
+      if (context.principal.kind !== 'host') {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      if (
+        body.host_principal_id !== undefined
+        && body.host_principal_id !== context.principal.id
+      ) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      if (!Array.isArray(body.folders)) {
+        res.status(400).json({ error: 'folders must be an array' });
+        return;
+      }
+      const folders = await upsertHostFolders(context.principal.id, body.folders);
+      res.json({ ok: true, folders });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 hostsV2Router.post(
   '/',
