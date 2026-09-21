@@ -4,28 +4,70 @@ import StatusBadge from './StatusBadge.vue';
 import PrincipalChip from './PrincipalChip.vue';
 
 const props = defineProps({
-  parent: { type: Object, default: null }, // { id, title }
+  parent: { type: Object, default: null },
   children: { type: Array, default: () => [] },
+  tree: { type: Object, default: null },
+  loading: { type: Boolean, default: false },
+  error: { type: String, default: '' },
+});
+
+const emit = defineEmits(['select']);
+
+function flattenTree(node, depth = 0, output = []) {
+  if (!node) return output;
+  output.push({ ...node, depth });
+  for (const child of node.children ?? []) flattenTree(child, depth + 1, output);
+  return output;
+}
+
+function fallbackSummary(child) {
+  const submitLine = child.latest_submit_summary?.body?.split(/\r?\n/, 1)[0]?.trim();
+  if (submitLine) return submitLine;
+  return `${child.title || child.post_id} · ${child.status || '未知'} · ${child.assignee?.name || '未分配'}`;
+}
+
+const nodes = computed(() => {
+  if (props.tree) return flattenTree(props.tree);
+  return props.children.map((child) => ({
+    id: child.post_id,
+    title: child.title,
+    status: child.status,
+    summary: fallbackSummary(child),
+    executor: null,
+    assignee: child.assignee,
+    children: [],
+    depth: 0,
+  }));
 });
 
 const rollup = computed(() => {
-  const total = props.children.length;
-  const done = props.children.filter((child) => child.status === 'done').length;
-  const failed = props.children.filter((child) => ['failed', 'cancelled'].includes(child.status)).length;
-  return { total, done, failed, active: total - done - failed };
+  const descendants = nodes.value.slice(props.tree ? 1 : 0);
+  const done = descendants.filter((node) => node.status === 'done').length;
+  const failed = descendants.filter((node) => ['failed', 'cancelled'].includes(node.status)).length;
+  return {
+    total: descendants.length,
+    done,
+    failed,
+    active: descendants.length - done - failed,
+  };
 });
 
-const percent = computed(() => (rollup.value.total ? Math.round((rollup.value.done / rollup.value.total) * 100) : 0));
+function selectNode(node) {
+  emit('select', node.id);
+}
 </script>
 
 <template>
-  <section class="card mb-3">
+  <section class="card mb-3 task-tree-panel">
     <div class="card-header d-flex align-items-center gap-2">
-      <strong><i class="bi bi-diagram-3 me-2"></i>子任务 ({{ rollup.total }})</strong>
+      <strong><i class="bi bi-diagram-3 me-2"></i>任务全景</strong>
       <span class="text-secondary small ms-auto">
-        <i class="bi bi-check2-circle text-success me-1"></i>{{ rollup.done }}
-        <i class="bi bi-circle-fill text-primary ms-2 me-1"></i>{{ rollup.active }}
-        <i class="bi bi-x-circle text-danger ms-2 me-1"></i>{{ rollup.failed }}
+        {{ rollup.total }} 个下级节点
+        <span v-if="rollup.total">
+          · <span class="text-success">{{ rollup.done }} 完成</span>
+          · <span class="text-primary">{{ rollup.active }} 进行中</span>
+          · <span class="text-danger">{{ rollup.failed }} 失败</span>
+        </span>
       </span>
     </div>
     <div class="card-body">
@@ -34,28 +76,42 @@ const percent = computed(() => (rollup.value.total ? Math.round((rollup.value.do
           <i class="bi bi-arrow-up-circle me-1"></i>父任务：{{ parent.title || parent.id }}
         </router-link>
       </nav>
-      <div v-if="rollup.total" class="progress mb-3" style="height: 6px" role="progressbar" :aria-valuenow="percent" aria-valuemin="0" aria-valuemax="100">
-        <div class="progress-bar bg-success" :style="{ width: `${percent}%` }"></div>
+
+      <div v-if="loading" class="text-secondary small py-3">
+        <i class="bi bi-arrow-repeat me-1 spin-once"></i>正在加载完整任务树…
       </div>
-      <div v-if="rollup.total" class="list-group list-group-flush border rounded">
-        <router-link v-for="child in children" :key="child.post_id" :to="`/tasks/${child.post_id}`"
-          class="list-group-item list-group-item-action bg-transparent d-flex align-items-center gap-2">
-          <StatusBadge :status="child.status" />
-          <span class="text-truncate">{{ child.title || child.post_id }}</span>
-          <PrincipalChip v-if="child.assignee" :principal="child.assignee" />
-          <span v-if="child.latest_verdict" class="badge"
-            :class="child.latest_verdict.decision === 'accept' ? 'text-bg-success' : 'text-bg-danger'">
-            {{ child.latest_verdict.decision === 'accept' ? '验收通过' : '已打回' }}
+      <div v-else-if="error" class="alert alert-warning small py-2 mb-0">
+        <i class="bi bi-exclamation-triangle me-1"></i>{{ error }}；已回退显示当前层级。
+      </div>
+      <div v-if="!loading && nodes.length" class="task-tree" role="tree" aria-label="任务全景树">
+        <button
+          v-for="node in nodes"
+          :key="node.id"
+          type="button"
+          class="task-tree-node"
+          :data-depth="node.depth"
+          :style="{ '--tree-depth': node.depth }"
+          role="treeitem"
+          @click="selectNode(node)"
+        >
+          <span class="task-tree-branch" aria-hidden="true"><i class="bi bi-chevron-right"></i></span>
+          <span class="task-tree-main">
+            <span class="task-tree-title text-truncate">{{ node.title || node.id }}</span>
+            <span class="task-tree-summary text-truncate">{{ node.summary }}</span>
           </span>
-          <span class="text-secondary small ms-auto flex-shrink-0">尝试 {{ child.attempts }}/{{ child.max_attempts }}</span>
-          <i class="bi bi-chevron-right text-secondary"></i>
-        </router-link>
+          <StatusBadge :status="node.status" />
+          <PrincipalChip v-if="node.assignee" :principal="node.assignee" role="执行者" />
+          <span v-if="node.executor" class="small text-secondary text-truncate task-tree-executor">
+            <i class="bi bi-cpu me-1"></i>{{ node.executor }}
+          </span>
+          <span v-if="!node.assignee && !node.executor" class="small text-secondary">未分配</span>
+        </button>
       </div>
-      <div v-if="rollup.total" class="alert alert-info small py-2 mb-0 mt-3">
-        <i class="bi bi-info-circle me-1"></i>执行者的提交摘要发布在各自子任务线程，点击子任务查看。
+      <div v-else-if="!loading" class="text-secondary small mb-0">
+        <i class="bi bi-info-circle me-1"></i>当前任务还没有下级节点。
       </div>
-      <div v-if="!rollup.total" class="text-secondary small mb-0">
-        <i class="bi bi-info-circle me-1"></i>本任务暂无子任务；如有父任务，可从上方链接返回父任务线程。
+      <div v-if="nodes.length" class="text-secondary small mt-2">
+        <i class="bi bi-info-circle me-1"></i>点击任意节点，在弹窗中查看该任务的完整详情。
       </div>
     </div>
   </section>

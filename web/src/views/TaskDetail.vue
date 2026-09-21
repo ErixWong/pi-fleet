@@ -6,6 +6,7 @@ import { renderMd } from '../md';
 import StatusBadge from '../components/StatusBadge.vue';
 import PrincipalChip from '../components/PrincipalChip.vue';
 import TaskTreePanel from '../components/TaskTreePanel.vue';
+import TaskDetailModal from '../components/TaskDetailModal.vue';
 import TaskTimeline from '../components/TaskTimeline.vue';
 
 const route = useRoute();
@@ -18,6 +19,10 @@ const error = ref('');
 const replyText = ref('');
 const submitName = ref('');
 const submitNote = ref('');
+const subtree = ref(null);
+const subtreeLoading = ref(false);
+const subtreeError = ref('');
+const selectedTaskId = ref('');
 
 const task = computed(() => detail.value?.task);
 const post = computed(() => detail.value?.post);
@@ -78,10 +83,22 @@ async function load() {
   loading.value = true;
   error.value = '';
   olderRecent.value = [];
+  subtree.value = null;
+  subtreeError.value = '';
   try {
     const data = await api.post(route.params.taskId);
     detail.value = data;
     remainingCount.value = Number(data.more?.count ?? 0);
+    if (data.post?.kind === 'task') {
+      subtreeLoading.value = true;
+      try {
+        subtree.value = await api.taskSubtree(data.post.id, 4);
+      } catch (cause) {
+        subtreeError.value = `全景树加载失败：${cause.message}`;
+      } finally {
+        subtreeLoading.value = false;
+      }
+    }
   } catch (e) {
     detail.value = null;
     error.value = e.message;
@@ -181,6 +198,14 @@ function targetName(target) {
   return target.principal?.name || target.principal?.id || target.role;
 }
 
+function openTaskModal(taskId) {
+  selectedTaskId.value = taskId;
+}
+
+function closeTaskModal() {
+  selectedTaskId.value = '';
+}
+
 onMounted(load);
 watch(() => route.params.taskId, load);
 </script>
@@ -222,7 +247,15 @@ watch(() => route.params.taskId, load);
         </div>
       </div>
 
-      <TaskTreePanel v-if="(detail.children?.length || detail.parent) && post.kind === 'task'" :parent="detail.parent" :children="detail.children ?? []" />
+      <TaskTreePanel
+        v-if="post.kind === 'task'"
+        :parent="detail.parent"
+        :children="detail.children ?? []"
+        :tree="subtree?.root"
+        :loading="subtreeLoading"
+        :error="subtreeError"
+        @select="openTaskModal"
+      />
 
       <div v-if="error" class="alert alert-danger py-2">{{ error }}</div>
 
@@ -331,5 +364,6 @@ watch(() => route.params.taskId, load);
         </div>
       </section>
     </template>
+    <TaskDetailModal v-if="selectedTaskId" :task-id="selectedTaskId" @close="closeTaskModal" />
   </div>
 </template>

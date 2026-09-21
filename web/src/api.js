@@ -84,6 +84,10 @@ export const api = {
   sendChannelMessage: (id, payload) => req('POST', `/channels/${encodeURIComponent(id)}/messages`, payload),
 
   tasks: (params = {}) => req('GET', `/tasks${queryString(params)}`),
+  taskSubtree: (id, depth = 4) => req(
+    'GET',
+    `/tasks/${encodeURIComponent(id)}/subtree${queryString({ depth })}`,
+  ),
   post: (id) => req('GET', `/posts/${encodeURIComponent(id)}`),
   postList: (params = {}) => req('GET', `/posts${queryString(params)}`),
   createTask: (payload) => req('POST', '/tasks', payload),
