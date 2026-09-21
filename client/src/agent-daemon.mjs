@@ -6,6 +6,7 @@
 // 异常退出或超时则提交失败预检。
 
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -32,6 +33,8 @@ const CHANNEL_TIMEOUT_MS = Number(process.env.CHANNEL_TIMEOUT_MS ?? 300_000);
 const CHANNEL_MAX_CONCURRENCY = Math.max(1, Number(process.env.CHANNEL_MAX_CONCURRENCY ?? 2));
 const CHANNEL_STATE_PATH = process.env.CHANNEL_STATE_PATH
   ?? path.join(os.homedir(), '.config', 'pi-agent', 'channels-state.json');
+const CHANNEL_SESSION_DIR = process.env.CHANNEL_SESSION_DIR
+  ?? path.join(WORK_ROOT, 'channel-sessions');
 const PAGE_SIZE = Number(process.env.TASK_PAGE_SIZE ?? 20);
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS ?? 1_800_000);
 const RECENT_DONE_TTL_MS = Number(process.env.RECENT_DONE_TTL_MS ?? 600_000);
@@ -209,6 +212,23 @@ function buildAgentInvocation(prompt) {
   };
 }
 
+function buildChannelInvocation(prompt, sessionId) {
+  const invocation = piInvocation();
+  return {
+    ...invocation,
+    args: [
+      ...invocation.args,
+      '--session-id',
+      sessionId,
+      '--session-dir',
+      CHANNEL_SESSION_DIR,
+      '-p',
+      prompt,
+    ],
+    env: invocationEnv(),
+  };
+}
+
 async function api(method, pathname, body) {
   const response = await fetch(BASE + pathname, {
     method,
@@ -230,8 +250,24 @@ async function api(method, pathname, body) {
 }
 
 const channelState = readJsonFile(CHANNEL_STATE_PATH);
+const persistedCursors = channelState.cursors
+  && typeof channelState.cursors === 'object'
+  && !Array.isArray(channelState.cursors)
+  ? channelState.cursors
+  : channelState;
 const channelCursors = new Map(
-  Object.entries(channelState).filter(([, value]) => typeof value === 'string'),
+  Object.entries(persistedCursors).filter(([, value]) => typeof value === 'string'),
+);
+const channelSessionIds = new Map(
+  Object.entries(channelState.sessions ?? {}).filter(([, value]) => typeof value === 'string'),
+);
+const channelSessionInitialized = new Map(
+  Object.entries(channelState.initialized ?? {}).filter(([, value]) => typeof value === 'boolean'),
+);
+const channelResetRevisions = new Map(
+  Object.entries(channelState.reset_revisions ?? {})
+    .filter(([, value]) => Number.isInteger(Number(value)))
+    .map(([key, value]) => [key, Number(value)]),
 );
 const channelSessions = new Map();
 let channelActive = 0;
@@ -239,7 +275,12 @@ const channelWaiters = [];
 let daemonPrincipalId = '';
 
 function saveChannelState() {
-  const state = Object.fromEntries(channelCursors);
+  const state = {
+    cursors: Object.fromEntries(channelCursors),
+    sessions: Object.fromEntries(channelSessionIds),
+    initialized: Object.fromEntries(channelSessionInitialized),
+    reset_revisions: Object.fromEntries(channelResetRevisions),
+  };
   const tempPath = `${CHANNEL_STATE_PATH}.tmp-${process.pid}`;
   try {
     mkdirSync(path.dirname(CHANNEL_STATE_PATH), { recursive: true, mode: 0o700 });
@@ -258,6 +299,61 @@ function setChannelCursor(channelId, cursor) {
   if (channelCursors.get(channelId) === cursor) return;
   channelCursors.set(channelId, cursor);
   saveChannelState();
+}
+
+function hasPiSession(sessionId) {
+  if (!existsSync(CHANNEL_SESSION_DIR)) return false;
+  return readdirSync(CHANNEL_SESSION_DIR).some((entry) =>
+    entry === sessionId
+      || entry.startsWith(`${sessionId}.`)
+      || entry.startsWith(`${sessionId}-`));
+}
+
+function newChannelSessionId(channelId) {
+  return `${channelId}-${randomBytes(4).toString('hex')}`;
+}
+
+function syncChannelRevision(channel) {
+  const channelId = String(channel?.id ?? '');
+  if (!channelId) return;
+  const revision = Number(channel?.revision ?? 0);
+  const previous = channelResetRevisions.get(channelId);
+  if (previous !== undefined && revision > previous) {
+    const replacementId = restartChannelSession(channelId);
+    console.log(
+      `[daemon][channel-${channelId}] 检测到会话重置标记 revision ${previous} -> ${revision} `
+      + `，下一条消息使用 session=${replacementId}`,
+    );
+  }
+  if (previous !== revision) {
+    channelResetRevisions.set(channelId, revision);
+    saveChannelState();
+  }
+}
+
+function channelSession(channelId) {
+  let sessionId = channelSessionIds.get(channelId);
+  if (!sessionId) {
+    sessionId = channelId;
+    channelSessionIds.set(channelId, sessionId);
+  }
+  const initialized = channelSessionInitialized.get(channelId) === true || hasPiSession(sessionId);
+  if (initialized) channelSessionInitialized.set(channelId, true);
+  saveChannelState();
+  return { sessionId, initialized };
+}
+
+function markChannelSessionInitialized(channelId) {
+  channelSessionInitialized.set(channelId, true);
+  saveChannelState();
+}
+
+function restartChannelSession(channelId) {
+  const sessionId = newChannelSessionId(channelId);
+  channelSessionIds.set(channelId, sessionId);
+  channelSessionInitialized.set(channelId, false);
+  saveChannelState();
+  return sessionId;
 }
 
 async function acquireChannelSlot() {
@@ -322,66 +418,11 @@ async function nextChannelMessage(channel, principalId) {
   }
 }
 
-async function loadChannelHistory(channelId, currentId) {
-  const result = await api('GET', channelMessageUrl(channelId, { limit: 20 }));
-  const items = Array.isArray(result?.items) ? result.items : [];
-  return items
-    .filter((item) => String(item?.id ?? '').localeCompare(String(currentId)) <= 0)
-    .slice(-20);
-}
-
-function stripChannelDirectoryDirective(body) {
-  const text = String(body ?? '');
-  if (!text.startsWith('@dir=')) return text;
-  const match = text.match(/^@dir=\S+(?:\s+([\s\S]*))?$/);
-  return match ? (match[1] ?? '') : text;
-}
-
-function parseChannelMessage(message) {
-  const body = String(message?.body ?? '');
-  if (!body.startsWith('@dir=')) {
-    return {
-      body,
-      cwd: path.join(os.homedir(), 'tmp'),
-    };
-  }
-
-  const match = body.match(/^@dir=([^\s]*)(?:\s+([\s\S]*))?$/);
-  const requestedPath = match?.[1] ?? '';
-  const home = path.resolve(os.homedir());
-  const resolved = requestedPath && path.isAbsolute(requestedPath)
-    ? path.resolve(requestedPath)
-    : null;
-  if (!resolved || (resolved !== home && !resolved.startsWith(home + path.sep))) {
-    return {
-      invalidPath: requestedPath,
-      body: match?.[2] ?? '',
-    };
-  }
-  return {
-    body: match?.[2] ?? '',
-    cwd: resolved,
-  };
-}
-
-function channelPrompt(channel, message, history, cwd) {
+function channelSystemPrompt(channel, cwd) {
   const lines = [
     '你正在参与人与主机的一对一实时对话，不是任务执行。',
     `对话通道 ID：${channel.id}`,
     `对方主机名称：${String(channel.host?.name ?? '')}`,
-    `当前新消息：${threadPostLabel({
-      ...message,
-      body: stripChannelDirectoryDirective(message?.body),
-    })}`,
-    '',
-    '最近对话历史（含双方，最多 20 条）：',
-    ...(history.length > 0
-      ? history.map((post) => threadPostLabel({
-        ...post,
-        body: stripChannelDirectoryDirective(post?.body),
-      }))
-      : ['暂无历史']),
-    '',
     `工作目录：${cwd}`,
     '允许在 ~ 下自由 cd 与执行命令。',
     '回答规则：简短、直接回答用户；这是对话，不要调用任何 task 相关工具，也不要认领、提交或处理任务。',
@@ -391,9 +432,32 @@ function channelPrompt(channel, message, history, cwd) {
   return lines.join('\n');
 }
 
-function runPiForChannel(channelId, prompt, cwd) {
+function channelPrompt(channel, messageBody, cwd, initialized) {
+  const body = String(messageBody ?? '');
+  if (initialized) return body;
+  return `${channelSystemPrompt(channel, cwd)}\n\n当前新消息：${body}`;
+}
+
+function resolveChannelWorkdir(channel) {
+  const raw = typeof channel?.workdir === 'string' ? channel.workdir.trim() : '';
+  if (!raw) {
+    const fallback = path.join(os.homedir(), 'tmp');
+    console.log(`[daemon][channel-${channel?.id}] workdir 为空，回退 ${fallback}`);
+    return fallback;
+  }
+  const resolved = resolveTaskWorkdir(raw);
+  if (!resolved) {
+    const fallback = path.join(os.homedir(), 'tmp');
+    console.log(`[daemon][channel-${channel?.id}] workdir 不在 home 下，回退 ${fallback}`);
+    return fallback;
+  }
+  return resolved;
+}
+
+function runPiForChannel(channelId, prompt, cwd, sessionId) {
   return new Promise((resolve, reject) => {
-    const invocation = buildAgentInvocation(prompt);
+    mkdirSync(CHANNEL_SESSION_DIR, { recursive: true, mode: 0o700 });
+    const invocation = buildChannelInvocation(prompt, sessionId);
     const child = spawnCli(invocation.cmd, invocation.args, {
       cwd,
       env: invocation.env,
@@ -439,37 +503,44 @@ async function reportChannelFailure(channelId, error) {
   }
 }
 
-async function reportChannelDirectoryRejected(channelId, requestedPath) {
-  console.log(`[daemon][channel-${channelId}] 拒绝工作目录：${requestedPath}`);
+async function reportChannelRestarted(channelId) {
   try {
     await api('POST', `/api/v2/channels/${encodeURIComponent(channelId)}/messages`, {
-      body: `工作目录必须在 ~ 下：${requestedPath}`,
+      body: '会话已重开，已继续处理当前消息。',
     });
   } catch (replyError) {
-    console.log(`[daemon][channel-${channelId}] 发送工作目录错误说明也失败：${replyError.message}`);
+    console.log(`[daemon][channel-${channelId}] 发送会话重开说明也失败：${replyError.message}`);
   }
 }
 
 async function runChannelMessage(channel, message) {
-  const parsed = parseChannelMessage(message);
   let slotAcquired = false;
   try {
-    if (parsed.invalidPath !== undefined) {
-      await reportChannelDirectoryRejected(channel.id, parsed.invalidPath);
-      return;
-    }
     await acquireChannelSlot();
     slotAcquired = true;
-    const cwd = parsed.cwd;
+    const cwd = resolveChannelWorkdir(channel);
     mkdirSync(cwd, { recursive: true });
-    const history = await loadChannelHistory(channel.id, message.id);
-    console.log(`[daemon][channel-${channel.id}] 收到 ${message.id}，纳入历史 ${history.length} 条`);
-    await runPiForChannel(
-      channel.id,
-      channelPrompt(channel, { ...message, body: parsed.body }, history, cwd),
-      cwd,
+    let session = channelSession(String(channel.id));
+    const prompt = channelPrompt(channel, message.body, cwd, session.initialized);
+    console.log(
+      `[daemon][channel-${channel.id}] 收到 ${message.id}，session=${session.sessionId} `
+      + `模式=${session.initialized ? '续接' : '首次'} prompt=仅当前消息（无历史拼接）`,
     );
-    console.log(`[daemon][channel-${channel.id}] pi 完成 ${message.id}`);
+    try {
+      await runPiForChannel(channel.id, prompt, cwd, session.sessionId);
+    } catch (error) {
+      if (!session.initialized) throw error;
+      const replacementId = restartChannelSession(String(channel.id));
+      session = { sessionId: replacementId, initialized: false };
+      const restartPrompt = channelPrompt(channel, message.body, cwd, false);
+      console.log(
+        `[daemon][channel-${channel.id}] 续接失败，换新 session=${replacementId} 重开`,
+      );
+      await runPiForChannel(channel.id, restartPrompt, cwd, replacementId);
+      await reportChannelRestarted(channel.id);
+    }
+    markChannelSessionInitialized(String(channel.id));
+    console.log(`[daemon][channel-${channel.id}] pi 完成 ${message.id} session=${session.sessionId}`);
   } catch (error) {
     await reportChannelFailure(channel.id, error);
   } finally {
@@ -498,6 +569,7 @@ async function pollChannels() {
   for (const channel of channels) {
     const channelId = String(channel?.id ?? '');
     if (!channelId || channelSessions.has(channelId)) continue;
+    syncChannelRevision(channel);
     let message;
     try {
       message = await nextChannelMessage(channel, principalId);

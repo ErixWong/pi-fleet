@@ -2,6 +2,7 @@ import type { PoolConnection } from 'mariadb';
 import { getPool, withTransaction } from '../db/pool.js';
 import { newId } from '../id.js';
 import { badRequest, notFound } from '../util/errors.js';
+import { normalizeHomeWorkdir } from '../util/workdir.js';
 import { recordEvent } from './event-outbox.js';
 
 export type PostKind = 'note' | 'task' | 'message' | 'verdict' | 'channel';
@@ -445,6 +446,9 @@ function validateExtension(input: CreatePostInput): {
   if (input.kind === 'channel' && (!channel || !channel.host_principal_id)) {
     throw badRequest('channel host_principal_id is required');
   }
+  if (input.kind === 'channel' && !normalizeHomeWorkdir(channel?.workdir)) {
+    throw badRequest('channel workdir is required and must be under ~');
+  }
   if (input.kind === 'verdict') {
     if (!verdict || !verdict.target_task_id) throw badRequest('verdict target_task_id is required');
     if (!['accept', 'reject'].includes(verdict.decision)) {
@@ -621,6 +625,8 @@ async function createPostWithConnection(
     );
   } else if (input.kind === 'channel') {
     const channel = extension.channel!;
+    const workdir = normalizeHomeWorkdir(channel.workdir);
+    if (!workdir) throw badRequest('channel workdir is required and must be under ~');
     const hostRows = rows(await conn.query(
       `SELECT account_id
          FROM principal
@@ -639,7 +645,7 @@ async function createPostWithConnection(
       [
         id,
         channel.host_principal_id,
-        channel.workdir ?? null,
+        workdir,
         channel.run_user ?? null,
         channel.name ?? '',
         channel.status ?? 'open',

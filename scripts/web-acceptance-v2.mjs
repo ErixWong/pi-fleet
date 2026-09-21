@@ -181,7 +181,74 @@ try {
   check('主机注册成功并显示一次性 key', keyText.length >= 20 && hostNameShown.includes(`web-v2-host-${runId}`));
   check('主机列表包含新主机', Boolean(createdHostId));
 
-  console.log('== 6. 已删前端路由不白屏 ==');
+  console.log('== 6. 主机→文件夹→对话导航与 workdir 校验 ==');
+  const channelCreate = await request('POST', '/api/v2/channels', {
+    host_principal_id: createdHostId,
+    workdir: `~/web-v2-${runId}`,
+    title: `Web 对话 ${runId}`,
+  });
+  const channelId = channelCreate.data.channel?.id;
+  if (channelId) createdPostIds.push(channelId);
+  check('创建带 workdir 的对话', channelCreate.response.status === 201 && typeof channelId === 'string');
+  const emptyWorkdir = await request('POST', '/api/v2/channels', {
+    host_principal_id: createdHostId,
+    workdir: '',
+  });
+  check('空 workdir 被服务端拒绝', emptyWorkdir.response.status === 400);
+
+  await page.goto(`${base}/channels`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.channels-page');
+  check('对话页显示左侧主机和文件夹两级 panel',
+    await page.locator('.channel-host-panel').count() === 1
+      && await page.locator('.channel-folder-panel').count() === 1);
+  const channelViewport = await page.locator('.channel-sidebar').evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      bottom: rect.bottom,
+      height: rect.height,
+      viewportHeight: window.innerHeight,
+      pageScroll: document.documentElement.scrollHeight > window.innerHeight
+        || document.body.scrollHeight > window.innerHeight,
+    };
+  });
+  check('Channels 左侧 rail 贴边并铺满视口',
+    channelViewport.left <= 1
+      && channelViewport.top <= 1
+      && channelViewport.height >= channelViewport.viewportHeight - 1
+      && channelViewport.bottom >= channelViewport.viewportHeight - 1
+      && !channelViewport.pageScroll,
+    JSON.stringify(channelViewport));
+  const hostNav = page.locator('.channel-host-list .channel-nav-item').filter({ hasText: `web-v2-host-${runId}` });
+  await hostNav.click();
+  check('点击主机后显示文件夹', await page.locator('.channel-folder-list .channel-nav-item').count() >= 1);
+  await page.locator('.channel-folder-list .channel-nav-item').first().click();
+  check('点击文件夹后显示对话列表',
+    await page.locator('.channel-dialog-list .channel-dialog-item').count() >= 1);
+  await page.locator('.channel-dialog-list .channel-dialog-item').first().click();
+  await page.waitForSelector('.channel-conversation');
+  check('选中对话后显示消息流和 workdir',
+    await page.locator('.channel-conversation').getByText(`~/web-v2-${runId}`, { exact: false }).count() >= 1);
+  const messageViewport = await page.locator('.channel-messages').evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { height: rect.height, overflowY: style.overflowY };
+  });
+  check('消息流使用独立滚动区域',
+    messageViewport.height > 0 && ['auto', 'scroll'].includes(messageViewport.overflowY),
+    JSON.stringify(messageViewport));
+  await page.getByRole('button', { name: '发起新对话' }).click();
+  check('新建对话表单要求 workdir',
+    await page.locator('input[aria-label="工作目录"][required]').count() === 1);
+
+  console.log('== 7. 旧路由与已删前端路由不白屏 ==');
+  if (channelId) {
+    await page.goto(`${base}/channels/${encodeURIComponent(channelId)}`, { waitUntil: 'networkidle' });
+    check('旧 /channels/:id 路由可回落并选中对话',
+      await page.locator('.channels-page').count() === 1
+        && await page.locator('.channel-conversation').count() === 1);
+  }
   for (const legacyPath of ['/plans', '/settings', '/chat', '/agents']) {
     await page.goto(`${base}${legacyPath}`, { waitUntil: 'networkidle' });
     await page.waitForSelector('.app-shell');

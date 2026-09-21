@@ -80,6 +80,7 @@ export const api = {
 
   channels: () => req('GET', '/channels'),
   createChannel: (payload) => req('POST', '/channels', payload),
+  resetChannel: (id) => req('POST', `/channels/${encodeURIComponent(id)}/reset`),
   channelMessages: (id, params = {}) => req('GET', `/channels/${encodeURIComponent(id)}/messages${queryString(params)}`),
   sendChannelMessage: (id, payload) => req('POST', `/channels/${encodeURIComponent(id)}/messages`, payload),
 

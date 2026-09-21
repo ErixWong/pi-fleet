@@ -376,7 +376,7 @@ export function registerPostTools(server: McpServer): void {
       is_ready: z.boolean().optional(),
       channel: z.object({
         host_principal_id: z.string().min(1),
-        workdir: z.string().nullable().optional(),
+        workdir: z.string().min(1),
         run_user: z.string().nullable().optional(),
         name: z.string().optional(),
         status: z.enum(['open', 'archived']).optional(),

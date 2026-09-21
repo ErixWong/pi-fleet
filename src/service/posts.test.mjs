@@ -94,7 +94,7 @@ test('四种 kind 建帖并正确写入扩展表', { concurrency: false }, async
     visibility: 'private',
     channel: {
       host_principal_id: host.id,
-      workdir: 'demo',
+      workdir: '~/demo',
       run_user: 'pi-agent',
       name: 'demo channel',
     },
@@ -131,7 +131,7 @@ test('四种 kind 建帖并正确写入扩展表', { concurrency: false }, async
   );
   assert.deepEqual(
     [channelRows[0].host_principal_id, channelRows[0].workdir, channelRows[0].run_user, channelRows[0].name, channelRows[0].status],
-    [host.id, 'demo', 'pi-agent', 'demo channel', 'open'],
+    [host.id, '~/demo', 'pi-agent', 'demo channel', 'open'],
   );
   const verdictRows = await pool.query(
     'SELECT decision, target_task_id, opinion, source FROM post_verdict WHERE post_id = ?',

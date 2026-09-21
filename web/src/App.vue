@@ -11,6 +11,7 @@ const route = useRoute();
 const router = useRouter();
 const theme = ref(currentTheme());
 const isLogin = computed(() => route.path === '/login');
+const isFullscreen = computed(() => Boolean(route.meta.fullscreen));
 
 function switchTheme(id) {
   theme.value = id;
@@ -35,8 +36,8 @@ function logout() {
   <div v-if="isLogin" class="login-shell">
     <router-view />
   </div>
-  <div v-else class="app-shell">
-    <aside class="app-rail" aria-label="主导航">
+  <div v-else class="app-shell" :class="{ 'app-shell-fullscreen': isFullscreen }">
+    <aside v-if="!isFullscreen" class="app-rail" aria-label="主导航">
       <router-link to="/" class="rail-brand" title="返回仪表盘" aria-label="返回仪表盘">
         <i class="bi bi-command"></i>
       </router-link>
@@ -57,7 +58,7 @@ function logout() {
     </aside>
 
     <div class="app-workspace">
-      <header class="app-topbar">
+      <header v-if="!isFullscreen" class="app-topbar">
         <div class="app-brand">
           <span class="app-brand-mark"><i class="bi bi-hdd-network"></i></span>
           <span>
@@ -83,7 +84,7 @@ function logout() {
           </button>
         </div>
       </header>
-      <main class="app-content">
+      <main class="app-content" :class="{ 'app-content-fullscreen': isFullscreen }">
         <router-view />
       </main>
     </div>
