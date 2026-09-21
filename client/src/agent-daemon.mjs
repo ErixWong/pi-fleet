@@ -605,6 +605,54 @@ function threadPostLabel(post) {
   return `[${author} @ ${createdAt}] ${String(post?.body ?? '')}`;
 }
 
+const ANCESTRY_NODE_LIMIT = 500;
+const ANCESTRY_TOTAL_LIMIT = 2200;
+
+function truncateText(value, limit) {
+  const text = String(value ?? '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function formatAncestryBackground(ancestry) {
+  if (!Array.isArray(ancestry) || ancestry.length === 0) return '';
+  const blocks = [];
+  let total = 0;
+  for (const node of ancestry) {
+    const summary = node?.latest_submit_summary?.body
+      ? truncateText(node.latest_submit_summary.body, 260)
+      : '暂无提交摘要';
+    const block = [
+      `上级节点：${String(node?.id ?? '')}`,
+      `标题：${truncateText(node?.title, 120)}`,
+      `状态：${String(node?.status ?? '未知')}`,
+      `摘要：${summary}`,
+    ].join('\n');
+    const remaining = ANCESTRY_TOTAL_LIMIT - total;
+    if (remaining <= 0) break;
+    const limited = truncateText(block, Math.min(ANCESTRY_NODE_LIMIT, remaining));
+    blocks.push(limited);
+    total += limited.length;
+  }
+  if (blocks.length === 0) return '';
+  return [
+    '【上级任务链背景（只读）】',
+    '以下内容来自上级任务链，只提供位置与上下文；因果依赖仍以本任务任务书显式声明为准。',
+    ...blocks.map((block, index) => `--- 上级节点 ${index + 1} ---\n${block}`),
+    '【上级任务链背景结束】',
+  ].join('\n');
+}
+
+async function loadTaskAncestry(taskId) {
+  try {
+    const detail = await api('GET', `/api/v2/posts/${encodeURIComponent(taskId)}`);
+    return Array.isArray(detail?.ancestry) ? detail.ancestry : [];
+  } catch (error) {
+    console.log(`[daemon] 任务 ${taskId} ancestry 背景加载失败，跳过注入：${error.message}`);
+    return [];
+  }
+}
+
 async function loadTaskThread(taskId) {
   const detail = await api('GET', `/api/v2/posts/${encodeURIComponent(taskId)}`);
   const rootId = String(detail?.post?.root_id ?? taskId);
@@ -645,12 +693,14 @@ async function loadTaskThread(taskId) {
     });
 }
 
-function taskPrompt(item, taskId, cwd, sandboxDir, thread = []) {
+function taskPrompt(item, taskId, cwd, sandboxDir, thread = [], ancestry = []) {
   const task = taskDataOf(item);
   const title = String(item.title ?? '');
   const body = String(item.body ?? item.instruction ?? '');
+  const ancestryBackground = formatAncestryBackground(ancestry);
   const lines = [
     '你是任务分发平台的执行 agent，请只处理下面这一项任务。',
+    ...(ancestryBackground ? ['', ancestryBackground] : []),
     `任务 ID：${taskId}`,
     `标题：${title}`,
     `任务正文：${body}`,
@@ -781,6 +831,7 @@ async function spawnTaskAgent(item) {
   const taskId = taskIdOf(item);
   const task = taskDataOf(item);
   const thread = await loadTaskThread(taskId);
+  const ancestry = await loadTaskAncestry(taskId);
   const workdir = typeof task.workdir === 'string' ? task.workdir : null;
   const cwd = resolveTaskWorkdir(workdir)
     ?? path.join(WORK_ROOT, 'tasks', taskId);
@@ -807,10 +858,14 @@ async function spawnTaskAgent(item) {
   }
 
   console.log(`[daemon] 任务 ${taskId} prompt 纳入线程回复 ${thread.length} 条`);
+  const ancestryBackground = formatAncestryBackground(ancestry);
+  if (ancestryBackground) {
+    console.log(`[daemon][task-${taskId}] prompt 注入 ancestry 背景（${ancestry.length} 个节点）：\n${ancestryBackground}`);
+  }
   if (thread.length > 0) {
     console.log(`[daemon][task-${taskId}] 线程回复上下文：\n${thread.map(threadPostLabel).join('\n')}`);
   }
-  const invocation = buildAgentInvocation(taskPrompt(item, taskId, cwd, sandboxDir, thread));
+  const invocation = buildAgentInvocation(taskPrompt(item, taskId, cwd, sandboxDir, thread, ancestry));
   const outputLog = sandboxDir ? path.join(sandboxDir, 'output', 'stdout.txt') : null;
   console.log(`[daemon] 执行任务 ${taskId} cwd=${cwd}` + (workdir ? '（项目目录）' : '（沙箱）'));
   const child = spawnCli(invocation.cmd, invocation.args, {

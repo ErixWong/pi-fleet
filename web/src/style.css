@@ -774,6 +774,76 @@ body {
 .text-bg-primary { background: var(--badge-primary-bg) !important; color: var(--badge-primary-color) !important; }
 .text-bg-secondary { background: var(--badge-secondary-bg) !important; color: var(--badge-secondary-color) !important; }
 
+/* ─────────────────────────── 任务全景树 ─────────────────────────── */
+.task-tree {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+}
+.task-tree-node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.65rem 0.8rem 0.65rem calc(0.8rem + var(--tree-depth) * 1.35rem);
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-body);
+  background: transparent;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.task-tree-node:last-child { border-bottom: 0; }
+.task-tree-node:hover, .task-tree-node:focus-visible {
+  color: var(--text-strong);
+  background: var(--accent-hover);
+  outline: 0;
+}
+.task-tree-node::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(0.35rem + var(--tree-depth) * 1.35rem);
+  border-left: 1px solid var(--border-soft);
+}
+.task-tree-node::after {
+  content: '';
+  position: absolute;
+  left: calc(0.35rem + var(--tree-depth) * 1.35rem);
+  width: 0.7rem;
+  border-top: 1px solid var(--border-soft);
+}
+.task-tree-node[data-depth='0']::before,
+.task-tree-node[data-depth='0']::after { display: none; }
+.task-tree-branch {
+  position: relative;
+  z-index: 1;
+  width: 1rem;
+  flex-shrink: 0;
+  color: var(--accent-text);
+  text-align: center;
+}
+.task-tree-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.task-tree-title { color: var(--text-strong); font-weight: 700; }
+.task-tree-summary { color: var(--text-muted); font-size: 0.76rem; }
+.task-tree-executor { max-width: 10rem; }
+.task-panorama-modal { z-index: 1055; }
+.task-panorama-modal .modal-content {
+  color: var(--text-strong);
+  background: var(--bg-base);
+  border: 1px solid var(--border-soft);
+}
+.task-panorama-modal .modal-header,
+.task-panorama-modal .modal-footer { border-color: var(--border-soft); }
+
 /* ─────────────────────────── 按钮 ─────────────────────────── */
 .btn { border-radius: 0.6rem; font-weight: 600; }
 .btn-primary {

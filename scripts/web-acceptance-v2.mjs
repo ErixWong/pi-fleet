@@ -56,6 +56,27 @@ async function createFixtures() {
     throw new Error(`测试账号登录响应缺少 principal.id：${JSON.stringify(login.data)}`);
   }
 
+  let parentTaskId = null;
+  for (const title of [
+    `Web v2 全景根任务 ${runId}`,
+    `Web v2 全景协调任务 ${runId}`,
+    `Web v2 全景执行任务 ${runId}`,
+  ]) {
+    const created = await request('POST', '/api/v2/tasks', {
+      title,
+      body: `${title}：用于验证多层任务全景呈现。`,
+      visibility: 'private',
+      deliverable_spec: { items: ['acceptance result'] },
+      targets: [{ principal_id: principalId, role: 'assignee' }],
+      task: { is_ready: true, ...(parentTaskId ? { parent_task_id: parentTaskId } : {}) },
+    });
+    if (!created.response.ok || typeof created.data.post_id !== 'string') {
+      throw new Error(`创建全景树验收任务失败：${created.response.status} ${JSON.stringify(created.data)}`);
+    }
+    createdPostIds.push(created.data.post_id);
+    parentTaskId = created.data.post_id;
+  }
+
   for (let index = 0; index < 21; index += 1) {
     const created = await request('POST', '/api/v2/tasks', {
       title: `Web v2 验收 ${runId}-${index + 1}`,
@@ -117,20 +138,37 @@ try {
   check('任务列表可翻到第二页', await page.locator('.pagination .active').innerText() === '2');
 
   console.log('== 3. 任务详情契约（九键 + 树 parent/children） ==');
-  const detailId = createdPostIds[0];
+  const detailId = createdPostIds[3];
   const detailResponse = page.waitForResponse((response) =>
     response.request().method() === 'GET'
       && response.url().includes(`/api/v2/posts/${encodeURIComponent(detailId)}`));
   await page.goto(`${base}/tasks/${encodeURIComponent(detailId)}`, { waitUntil: 'networkidle' });
   const detailPayload = await (await detailResponse).json();
-  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
+  const expectedKeys = ['post', 'targets', 'task', 'parent', 'children', 'ancestry', 'channel', 'deliverables', 'verdicts', 'summary', 'recent', 'more'];
   check('任务详情页面渲染', await page.locator('.task-detail-page').count() === 1);
-  check('任务详情契约完整（旧九键 + parent/children）',
+  check('任务详情契约完整（旧九键 + parent/children/ancestry）',
     JSON.stringify(Object.keys(detailPayload).sort()) === JSON.stringify(expectedKeys.sort()),
     JSON.stringify(Object.keys(detailPayload)));
   check('任务详情显示任务内容', await page.locator('h1').filter({ hasText: `Web v2 验收 ${runId}-1` }).count() === 1);
 
-  console.log('== 4. 主机注册一次性 key ==');
+  console.log('== 4. 任务全景树与节点详情 modal ==');
+  const panoramaRootId = createdPostIds[0];
+  await page.goto(`${base}/tasks/${encodeURIComponent(panoramaRootId)}`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.task-tree-node');
+  const treeRows = page.locator('.task-tree-node');
+  check('全景树一次渲染三层节点', await treeRows.count() === 3);
+  check('节点行同时显示摘要与状态徽章',
+    await treeRows.filter({ hasText: `Web v2 全景执行任务 ${runId}` }).count() === 1
+      && await treeRows.locator('.badge-status').count() === 3);
+  await treeRows.filter({ hasText: `Web v2 全景执行任务 ${runId}` }).click();
+  await page.waitForSelector('.task-panorama-modal .modal-body h3');
+  check('点击节点打开详情 modal',
+    await page.locator('.task-panorama-modal').count() === 1
+      && await page.locator('.task-panorama-modal').getByRole('heading', { name: `Web v2 全景执行任务 ${runId}` }).count() === 1
+      && await page.locator('.task-panorama-modal').getByText('用于验证多层任务全景呈现。').count() >= 1);
+  await page.locator('.task-panorama-modal button[aria-label="关闭"]').click();
+
+  console.log('== 5. 主机注册一次性 key ==');
   await page.goto(`${base}/hosts`, { waitUntil: 'networkidle' });
   await page.click('button:has-text("注册主机")');
   await page.fill('input[placeholder="例如 build-host-01"]', `web-v2-host-${runId}`);
@@ -143,7 +181,7 @@ try {
   check('主机注册成功并显示一次性 key', keyText.length >= 20 && hostNameShown.includes(`web-v2-host-${runId}`));
   check('主机列表包含新主机', Boolean(createdHostId));
 
-  console.log('== 5. 已删前端路由不白屏 ==');
+  console.log('== 6. 已删前端路由不白屏 ==');
   for (const legacyPath of ['/plans', '/settings', '/chat', '/agents']) {
     await page.goto(`${base}${legacyPath}`, { waitUntil: 'networkidle' });
     await page.waitForSelector('.app-shell');
