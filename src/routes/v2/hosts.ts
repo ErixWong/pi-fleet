@@ -16,6 +16,12 @@ import {
   type HostStatus,
   type Scope,
 } from '../../service/identity.js';
+import {
+  answerListDirRequest,
+  createListDirRequest,
+  getControlRequest,
+  listPendingControlRequests,
+} from '../../service/host-control.js';
 import { getSettingInt } from '../../service/new-settings.js';
 
 export const hostsV2Router = Router();
@@ -64,6 +70,112 @@ function presentHost(host: {
     })),
   };
 }
+
+function presentControlRequest(request: {
+  id: string;
+  type: string;
+  path: string;
+  status: string;
+  result: unknown | null;
+  error: string | null;
+  requested_at: string;
+  answered_at: string | null;
+}): Record<string, unknown> {
+  return {
+    id: request.id,
+    type: request.type,
+    path: request.path,
+    status: request.status,
+    result: request.result,
+    error: request.error,
+    requested_at: request.requested_at,
+    answered_at: request.answered_at,
+  };
+}
+
+hostsV2Router.post(
+  '/:id/browse',
+  principalAuthMiddleware(),
+  requireScope('host:manage'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      const body = bodyRecord(req.body);
+      if (typeof body.path !== 'string' || body.path.trim() === '') {
+        res.status(400).json({ error: 'path is required' });
+        return;
+      }
+      const request = await createListDirRequest(
+        context.account_id,
+        req.params.id,
+        body.path,
+      );
+      res.status(202).json({
+        request: presentControlRequest(request),
+        request_id: request.id,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+hostsV2Router.get(
+  '/controls/:requestId',
+  principalAuthMiddleware(),
+  requireScope('host:manage'),
+  async (req, res, next) => {
+    try {
+      const request = await getControlRequest(req.params.requestId);
+      res.json({ request: presentControlRequest(request) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+hostsV2Router.get(
+  '/controls',
+  principalAuthMiddleware(),
+  requireScope('device:execute'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      if (context.principal.kind !== 'host') {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const items = await listPendingControlRequests(context.principal.id);
+      res.json({ items: items.map(presentControlRequest) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+hostsV2Router.post(
+  '/controls/:requestId/results',
+  principalAuthMiddleware(),
+  requireScope('device:execute'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      if (context.principal.kind !== 'host') {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const body = bodyRecord(req.body);
+      const request = await answerListDirRequest(
+        context.principal.id,
+        req.params.requestId,
+        body,
+      );
+      res.json({ ok: true, request: presentControlRequest(request) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 hostsV2Router.post(
   '/folders',

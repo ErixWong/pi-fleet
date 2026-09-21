@@ -19,6 +19,7 @@ const {
   upsertHostFolders,
   verifyApiKey,
   hasScope,
+  clearAuthCache,
 } = identity;
 const { getPool, initSchema } = identity;
 
@@ -146,6 +147,8 @@ test('key 轮换保留宽限期并继承旧 scopes，宽限期后拒绝旧 key',
     'UPDATE api_key SET expires_at = ? WHERE id = ?',
     ['2000-01-01 00:00:00', old.apiKey.id],
   );
+  // 鉴权缓存 TTL 内直连改库不会自动失效，按缓存契约显式清理后再断言。
+  clearAuthCache();
   assert.equal(await verifyApiKey(old.key), null);
   assert.equal((await verifyApiKey(rotated.key))?.key_id, rotated.apiKey.id);
 });

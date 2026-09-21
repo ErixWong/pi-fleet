@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { scanHomeFolders } from './host-folders.mjs';
+import { listHomeSubfolders, scanHomeFolders } from './host-folders.mjs';
 
 const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'config.json');
 const PI_MCP_CONFIG_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json');
@@ -255,15 +255,84 @@ async function reportHostFolders() {
   if (reportingHostFolders) return;
   reportingHostFolders = true;
   try {
-    const folders = scanHomeFolders({
+    const { folders, truncated } = scanHomeFolders({
       warn: (message) => console.log(message),
     });
     await api('POST', '/api/v2/hosts/folders', { folders });
-    console.log(`[daemon] 已上报主机 home 一级目录：${folders.length} 个`);
+    console.log(
+      `[daemon] 已上报主机 home 目录底图：${folders.length} 个`
+      + (truncated ? '（节点超限已截断）' : ''),
+    );
   } catch (error) {
     console.log(`[daemon] 主机目录上报失败：${error.message}`);
   } finally {
     reportingHostFolders = false;
+  }
+}
+
+// 主机控制链路：平台经短轮询捎带下发控制命令，daemon 执行后回传结果。
+// 旧平台（无 /api/v2/hosts/controls 端点）返回 404 时静默降级：每进程只告警一次，
+// 之后不再重试该端点也不刷日志，不影响任务/对话主流程。
+let controlsUnsupported = false;
+let controlsWarned = false;
+
+async function runListDirControl(request) {
+  const payload = request?.payload ?? {};
+  let target;
+  try {
+    target = resolveTaskWorkdir(payload.path);
+  } catch {
+    target = null;
+  }
+  if (!target) {
+    await api('POST', `/api/v2/hosts/controls/${encodeURIComponent(request.id)}/results`, {
+      error: `路径不在 home 下：${String(payload.path ?? '')}`,
+    });
+    return;
+  }
+  const entries = listHomeSubfolders({
+    home: os.homedir(),
+    target,
+    warn: (message) => console.log(message),
+  }).map((folder) => ({ path: folder }));
+  await api('POST', `/api/v2/hosts/controls/${encodeURIComponent(request.id)}/results`, {
+    entries,
+  });
+  console.log(`[daemon] list_dir ${payload.path}：回传 ${entries.length} 个子目录`);
+}
+
+async function pollHostControls() {
+  if (controlsUnsupported) return;
+  let requests;
+  try {
+    const result = await api('GET', '/api/v2/hosts/controls');
+    requests = Array.isArray(result?.items) ? result.items : [];
+  } catch (error) {
+    if (Number(error?.status) === 404) {
+      controlsUnsupported = true;
+      if (!controlsWarned) {
+        controlsWarned = true;
+        console.log('[daemon] 平台不支持主机控制链路（404），已静默降级为仅上报模式');
+      }
+      return;
+    }
+    console.log(`[daemon] 控制命令拉取失败：${error.message}`);
+    return;
+  }
+  for (const request of requests) {
+    if (!request || request.type !== 'list_dir' || !request.id) continue;
+    try {
+      await runListDirControl(request);
+    } catch (error) {
+      console.log(`[daemon] 控制命令 ${request.id} 执行失败：${error.message}`);
+      try {
+        await api('POST', `/api/v2/hosts/controls/${encodeURIComponent(request.id)}/results`, {
+          error: String(error?.message ?? 'unknown error').slice(0, 500),
+        });
+      } catch (reportError) {
+        console.log(`[daemon] 控制命令 ${request.id} 失败结果回传出错：${reportError.message}`);
+      }
+    }
   }
 }
 
@@ -583,6 +652,8 @@ async function pollChannels() {
     console.log(`[daemon] channel poll 失败：${error.message}`);
     return;
   }
+  // channel-poll 5s 节拍顺带拉取平台下发的控制命令（反向控制链路捎带）。
+  await pollHostControls();
   const channels = Array.isArray(result?.items) ? result.items : [];
   for (const channel of channels) {
     const channelId = String(channel?.id ?? '');

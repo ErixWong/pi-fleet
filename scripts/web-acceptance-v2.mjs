@@ -234,12 +234,64 @@ try {
     JSON.stringify(channelViewport));
   const hostNav = page.locator('.channel-host-list .channel-nav-item').filter({ hasText: `web-v2-host-${runId}` });
   await hostNav.click();
-  const reportedFolder = page.locator('.channel-folder-list .channel-nav-item')
-    .filter({ hasText: reportedFolderPath });
-  check('上报目录出现在文件夹列表', await reportedFolder.count() === 1);
-  await reportedFolder.click();
-  check('无对话文件夹显示最近上报时间',
-    await page.locator('.channel-folder-list .channel-nav-item').filter({ hasText: '最近上报：' }).count() >= 1);
+  const reportedLabel = page.locator('.channel-folder-tree .channel-tree-label[title="' + reportedFolderPath + '"]');
+  check('上报目录出现在文件夹树', await reportedLabel.count() === 1);
+  check('树形渲染根节点与多级缩进', await (async () => {
+    const rootToggle = page.locator('.channel-folder-tree .channel-tree-toggle').first();
+    const reportedRowIndent = reportedLabel.locator('xpath=ancestor::*[contains(@class,"channel-tree-row")]');
+    const reportedMargin = await reportedRowIndent.locator('.channel-tree-toggle').evaluate((el) => el.style.marginLeft);
+    const rootMargin = await rootToggle.evaluate((el) => el.style.marginLeft);
+    return rootMargin === '0px' && reportedMargin === '14px';
+  })());
+  check('有对话目录置顶并带对话数徽章', await (async () => {
+    const rows = page.locator('.channel-folder-tree .channel-tree-row');
+    const firstChild = rows.nth(1);
+    return (await firstChild.locator('.channel-tree-label').innerText()).includes('web-v2-')
+      && (await firstChild.locator('.badge').innerText()).trim() === '1';
+  })());
+
+  console.log('== 6a. 未缓存目录走 browse 控制链路并渲染结果 ==');
+  let browsePosts = 0;
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && req.url().includes('/api/v2/hosts/') && req.url().endsWith('/browse')) {
+      browsePosts += 1;
+    }
+  });
+  const reportedRow = reportedLabel.locator('xpath=ancestor::*[contains(@class,"channel-tree-row")]');
+  await reportedRow.locator('.channel-tree-toggle').click();
+  const browseResponse = await page.waitForResponse((response) =>
+    response.request().method() === 'POST' && response.url().endsWith('/browse'), { timeout: 10_000 });
+  const browsePayload = await browseResponse.json();
+  const browseRequestId = browsePayload.request_id;
+  check('未缓存节点发起 browse 请求', typeof browseRequestId === 'string' && browseRequestId.length > 0);
+  check('browse 加载态显示「正在读取主机目录…」',
+    await page.locator('.channel-folder-tree').getByText('正在读取主机目录…').count() >= 1);
+
+  // 无真实 daemon：用主机 key 模拟 daemon 回传 list_dir 结果。
+  const previousBearer2 = bearer;
+  bearer = createdHostBearer;
+  const controlAnswer = await request('POST', `/api/v2/hosts/controls/${encodeURIComponent(browseRequestId)}/results`, {
+    entries: [{ path: `${reportedFolderPath}/sub1` }],
+  });
+  bearer = previousBearer2;
+  check('daemon 回传 list_dir 结果被接受', controlAnswer.response.status === 200);
+  await page.waitForSelector('.channel-folder-tree .channel-tree-label[title="' + reportedFolderPath + '/sub1"]', { timeout: 20_000 });
+  check('browse 结果渲染为新树节点', true);
+  const sub1Row = page.locator('.channel-folder-tree .channel-tree-row', { has: page.locator('.channel-tree-label[title="' + reportedFolderPath + '/sub1"]') });
+  check('新节点按层级缩进（深度 2）',
+    (await sub1Row.locator('.channel-tree-toggle').evaluate((el) => el.style.marginLeft)) === '28px');
+
+  console.log('== 6b. 缓存展开零 browse 请求 ==');
+  await reportedRow.locator('.channel-tree-toggle').click(); // 收起
+  await page.waitForTimeout(300);
+  const browsePostsBefore = browsePosts;
+  await reportedRow.locator('.channel-tree-toggle').click(); // 展开（缓存命中）
+  await page.waitForSelector('.channel-folder-tree .channel-tree-label[title="' + reportedFolderPath + '/sub1"]', { timeout: 5_000 });
+  await page.waitForTimeout(3_000);
+  check('缓存命中时展开不重复发 browse 请求', browsePosts === browsePostsBefore);
+
+  await reportedLabel.click();
+  check('无对话目录显示读取状态入口', await page.getByRole('button', { name: '发起新对话' }).count() === 1);
   await page.getByRole('button', { name: '发起新对话' }).click();
   check('纯上报文件夹可快捷建对话',
     await page.locator('input[aria-label="工作目录"]').inputValue() === '~/reported');
@@ -252,8 +304,8 @@ try {
   if (quickChannelPayload.channel?.id) createdPostIds.push(quickChannelPayload.channel.id);
   check('快捷建对话提交成功', quickChannelPayload.channel?.id && quickChannelPayload.channel?.workdir === '~/reported');
 
-  const originalFolder = page.locator('.channel-folder-list .channel-nav-item')
-    .filter({ hasText: `~/web-v2-${runId}` });
+  const channelFolderPath = `/home/web-v2-${runId}/web-v2-${runId}`;
+  const originalFolder = page.locator('.channel-folder-tree .channel-tree-label[title="' + channelFolderPath + '"]');
   await originalFolder.click();
   check('点击文件夹后显示对话列表',
     await page.locator('.channel-dialog-list .channel-dialog-item').count() >= 1);

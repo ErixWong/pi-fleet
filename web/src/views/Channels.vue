@@ -116,6 +116,188 @@ const selectedFolder = computed(() =>
   folders.value.find((folder) => folder.key === selectedFolderKey.value) || null);
 const folderChannels = computed(() => selectedFolder.value?.channels || []);
 
+// ---- 目录树（按需钻目录：缓存直接渲染，未缓存走 browse 控制链路） ----
+const treeExpanded = reactive({});
+const browseStatus = reactive({}); // path -> 'loading' | 'error' | 'done'
+const browseErrors = reactive({});
+const browsedPaths = reactive({});
+const browseSeq = reactive({}); // path -> 正在轮询的 request_id
+
+const homePrefix = computed(() => hostHomePrefix(selectedHost.value));
+const useTree = computed(() => Boolean(homePrefix.value));
+
+function parentPathOf(path) {
+  const root = homePrefix.value;
+  if (!root || path === root) return null;
+  if (!path.startsWith(`${root}/`)) return null;
+  const rest = path.slice(root.length + 1);
+  const idx = rest.indexOf('/');
+  return idx === -1 ? root : `${root}/${rest.slice(0, idx)}`;
+}
+
+function childrenCached(path) {
+  return (selectedHost.value?.folders || [])
+    .some((folder) => String(folder?.path || '').startsWith(`${path}/`));
+}
+
+const treeNodes = computed(() => {
+  const map = new Map();
+  const root = homePrefix.value;
+  if (!root) return map;
+  const ensure = (path) => {
+    if (!map.has(path)) {
+      map.set(path, {
+        path,
+        name: path === root ? path.slice(path.lastIndexOf('/') + 1) : path.slice(path.lastIndexOf('/') + 1),
+        parent: parentPathOf(path),
+        channels: [],
+      });
+    }
+    return map.get(path);
+  };
+  ensure(root);
+  for (const group of folders.value) {
+    const key = group.key;
+    if (key !== root && !key.startsWith(`${root}/`)) continue;
+    const chain = [];
+    let parent = parentPathOf(key);
+    while (parent) {
+      chain.push(parent);
+      parent = parentPathOf(parent);
+    }
+    for (const ancestor of chain.reverse()) ensure(ancestor);
+    const node = ensure(key);
+    node.channels = group.channels;
+  }
+  return map;
+});
+
+const visibleTreeRows = computed(() => {
+  const rows = [];
+  const root = homePrefix.value;
+  if (!root || !treeNodes.value.has(root)) return rows;
+  const childrenOf = (parent) => {
+    const list = [];
+    for (const node of treeNodes.value.values()) {
+      if (node.parent === parent) list.push(node);
+    }
+    return list.sort((left, right) => {
+      const leftHot = left.channels.length > 0;
+      const rightHot = right.channels.length > 0;
+      if (leftHot !== rightHot) return rightHot ? 1 : -1;
+      return left.name.localeCompare(right.name);
+    });
+  };
+  const walk = (parent, depth) => {
+    for (const node of childrenOf(parent)) {
+      rows.push({ ...node, depth });
+      if (treeExpanded[node.path]) walk(node.path, depth + 1);
+    }
+  };
+  rows.push({ ...treeNodes.value.get(root), depth: 0 });
+  if (treeExpanded[root]) walk(root, 1);
+  return rows;
+});
+
+// 有对话的目录置顶展开（祖先链一并展开保证可见）。
+watch(folders, () => {
+  if (!useTree.value) return;
+  for (const group of folders.value) {
+    if (group.channels.length === 0) continue;
+    treeExpanded[group.key] = true;
+    let parent = parentPathOf(group.key);
+    while (parent) {
+      treeExpanded[parent] = true;
+      parent = parentPathOf(parent);
+    }
+  }
+});
+
+function hasKnownChildren(path) {
+  for (const node of treeNodes.value.values()) {
+    if (node.parent === path) return true;
+  }
+  return false;
+}
+
+function toggleTreeNode(row) {
+  const path = row.path;
+  if (treeExpanded[path]) {
+    treeExpanded[path] = false;
+    return;
+  }
+  treeExpanded[path] = true;
+  maybeBrowse(path);
+}
+
+function maybeBrowse(path) {
+  if (!useTree.value || !selectedHostId.value) return;
+  if (browsedPaths[path] || browseStatus[path] === 'loading') return;
+  if (childrenCached(path) || hasKnownChildren(path)) return;
+  void requestBrowse(path);
+}
+
+async function refreshHosts() {
+  const hostData = await api.hosts();
+  hosts.value = hostData.items ?? [];
+}
+
+async function requestBrowse(path) {
+  browseStatus[path] = 'loading';
+  browseErrors[path] = '';
+  let requestId;
+  try {
+    const data = await api.browseHost(selectedHostId.value, { path });
+    requestId = data.request_id;
+  } catch (e) {
+    browseStatus[path] = 'error';
+    browseErrors[path] = e.message || 'browse 请求失败';
+    return;
+  }
+  void pollBrowse(requestId, path);
+}
+
+async function pollBrowse(requestId, path) {
+  browseSeq[path] = requestId;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    if (browseSeq[path] !== requestId) return;
+    try {
+      const { request } = await api.hostControlRequest(requestId);
+      if (request.status === 'answered') {
+        browsedPaths[path] = true;
+        browseStatus[path] = 'done';
+        await refreshHosts();
+        return;
+      }
+      if (request.status === 'expired') {
+        browseStatus[path] = 'error';
+        browseErrors[path] = '主机未响应';
+        return;
+      }
+    } catch {
+      // 状态查询失败时下轮重试，直到超时按主机未响应处理。
+    }
+  }
+  browseStatus[path] = 'error';
+  browseErrors[path] = '主机未响应';
+}
+
+function retryBrowse(path) {
+  browsedPaths[path] = false;
+  browseStatus[path] = '';
+  void requestBrowse(path);
+}
+
+async function selectTreeNode(row) {
+  const group = folders.value.find((folder) => folder.key === row.path);
+  if (!group) {
+    toggleTreeNode(row);
+    return;
+  }
+  await selectFolder(group);
+}
+
 function fmtTime(value) {
   if (!value) return '暂无活动';
   const date = new Date(value);
@@ -444,23 +626,52 @@ onBeforeUnmount(() => {
         <div v-else-if="!folders.length" class="empty-state py-4">
           <i class="bi bi-folder2-open"></i><strong>暂无文件夹</strong><span>主机上报目录或新建对话后会自动出现。</span>
         </div>
-        <div v-else class="list-group list-group-flush channel-folder-list">
-          <button v-for="folder in folders" :key="folder.key" type="button"
-            class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
-            :class="{ active: selectedFolderKey === folder.key }"
-            :title="folder.channels.length ? '' : '点击后可在此文件夹发起新对话'"
-            @click="selectFolder(folder)">
-            <div class="d-flex align-items-center gap-2">
-              <i class="bi bi-folder2"></i>
-              <strong class="text-truncate">{{ folderTitle(folder) }}</strong>
-              <span class="badge text-bg-secondary ms-auto">{{ folder.channels.length }}</span>
+        <template v-else>
+          <div v-if="useTree" class="list-group list-group-flush channel-folder-list channel-folder-tree">
+            <div v-for="row in visibleTreeRows" :key="row.path"
+              class="list-group-item bg-transparent channel-tree-row"
+              :class="{ active: selectedFolderKey === row.path }">
+              <button type="button" class="channel-tree-toggle"
+                :aria-label="(treeExpanded[row.path] ? '收起 ' : '展开 ') + row.name"
+                :style="{ marginLeft: `${row.depth * 14}px` }"
+                @click.stop="toggleTreeNode(row)">
+                <i class="bi" :class="treeExpanded[row.path] ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+              </button>
+              <button type="button" class="channel-tree-label"
+                :class="{ active: selectedFolderKey === row.path }" :title="row.path"
+                @click="selectTreeNode(row)">
+                <i class="bi bi-folder2"></i>
+                <strong class="text-truncate">{{ row.name }}</strong>
+                <span class="badge text-bg-secondary">{{ row.channels.length }}</span>
+              </button>
+              <span v-if="browseStatus[row.path] === 'loading'" class="small text-secondary channel-tree-status">
+                正在读取主机目录…
+              </span>
+              <button v-else-if="browseStatus[row.path] === 'error'" type="button"
+                class="btn btn-sm btn-link text-danger p-0 channel-tree-status" :title="browseErrors[row.path]"
+                @click.stop="retryBrowse(row.path)">
+                {{ browseErrors[row.path] || '读取失败' }}，重试
+              </button>
             </div>
-            <div class="small opacity-75 mt-1">
-              <template v-if="folder.channels.length">最近：{{ fmtTime(folder.lastActivity) }}</template>
-              <template v-else>最近上报：{{ fmtTime(folder.lastReportedAt) }}</template>
-            </div>
-          </button>
-        </div>
+          </div>
+          <div v-else class="list-group list-group-flush channel-folder-list">
+            <button v-for="folder in folders" :key="folder.key" type="button"
+              class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
+              :class="{ active: selectedFolderKey === folder.key }"
+              :title="folder.channels.length ? '' : '点击后可在此文件夹发起新对话'"
+              @click="selectFolder(folder)">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-folder2"></i>
+                <strong class="text-truncate">{{ folderTitle(folder) }}</strong>
+                <span class="badge text-bg-secondary ms-auto">{{ folder.channels.length }}</span>
+              </div>
+              <div class="small opacity-75 mt-1">
+                <template v-if="folder.channels.length">最近：{{ fmtTime(folder.lastActivity) }}</template>
+                <template v-else>最近上报：{{ fmtTime(folder.lastReportedAt) }}</template>
+              </div>
+            </button>
+          </div>
+        </template>
       </section>
       </aside>
 
