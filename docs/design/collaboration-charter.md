@@ -59,6 +59,10 @@ scope 约定：执行者 key 只给 `task:read/claim/submit`；协调者额外�
 创建子任务。其他主体即使同账户也按资源不存在拒绝，避免通过 parent id 探测
 协作关系。
 
+当前产品没有独立于任务作者的跨 leader 创建入口，因此不额外强制
+`is_ready=false` 或自动 mention 父任务 leader；未来若增加代理创建入口，必须把
+该路径显式标为门控，并在父任务线程留下 mention。
+
 拒绝是合法交付的一部分。执行者发现粒度或目标不匹配时，应按三段式 submit
 说明现状、原因和建议重拆；leader 根据 deliverable_spec 给出 reject verdict，
 补充可执行的重拆要求，必要时重新创建子任务。只有 leader 验收后才调用 ready
