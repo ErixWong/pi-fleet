@@ -1,6 +1,8 @@
 import type { PoolConnection } from 'mariadb';
 import { getPool, withTransaction } from '../db/pool.js';
 import { badRequest, notFound } from '../util/errors.js';
+import { normalizeHomeWorkdir } from '../util/workdir.js';
+import { recordEvent } from './event-outbox.js';
 import { getSettingInt } from './new-settings.js';
 import {
   createPost,
@@ -23,6 +25,9 @@ export interface ChannelMessage {
 export interface ChannelSummary {
   id: string;
   title: string;
+  workdir: string | null;
+  revision: number;
+  last_activity_at: string;
   host: {
     id: string;
     name: string;
@@ -52,6 +57,12 @@ function nullableString(value: unknown): string | null {
 
 function numberValue(value: unknown): number {
   return Number(value ?? 0);
+}
+
+function nowString(): string {
+  const date = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function online(lastSeen: string | null, offlineAfterMin: number): boolean {
@@ -90,6 +101,9 @@ function channelFromRow(row: DbRow, offlineAfterMin: number): ChannelSummary {
   return {
     id: stringValue(row.id),
     title: stringValue(row.title),
+    workdir: nullableString(row.workdir),
+    revision: numberValue(row.revision),
+    last_activity_at: stringValue(row.last_activity_at ?? row.created_at),
     host: {
       id: stringValue(row.host_id),
       name: stringValue(row.host_name),
@@ -108,8 +122,9 @@ async function channelRow(
   forUpdate = false,
 ): Promise<DbRow | null> {
   const result = await conn.query(
-    `SELECT c.id, c.account_id, c.title, c.author_principal_id,
+    `SELECT c.id, c.account_id, c.title, c.author_principal_id, c.revision,
             ch.host_principal_id, ch.status,
+            ch.workdir,
             hp.name AS host_name
        FROM post c
        JOIN post_channel ch ON ch.post_id = c.id
@@ -136,7 +151,7 @@ async function channelSummaryById(
   const pool = getPool();
   const offlineAfterMin = getSettingInt('agent_offline_after_min', 30);
   const result = await pool.query(
-    `SELECT c.id, c.title,
+    `SELECT c.id, c.title, c.created_at, c.revision, ch.workdir,
             hp.id AS host_id, hp.name AS host_name, d.last_seen_at AS host_last_seen_at,
             lm.id AS last_message_id,
             lm.author_principal_id AS last_message_author_principal_id,
@@ -144,6 +159,7 @@ async function channelSummaryById(
             lp.name AS last_message_author_name,
             lm.body AS last_message_body,
             lm.created_at AS last_message_created_at,
+            COALESCE(lm.created_at, c.created_at) AS last_activity_at,
             (
               SELECT COUNT(*)
                 FROM post m
@@ -186,8 +202,12 @@ export async function createOrGetChannel(input: {
   account_id: string;
   principal_id: string;
   host_principal_id: string;
+  workdir: string;
   title?: string;
 }): Promise<ChannelSummary> {
+  const workdir = normalizeHomeWorkdir(input.workdir);
+  if (!workdir) throw badRequest('workdir is required and must be under ~');
+
   const channelId = await withTransaction(async (conn) => {
     const hostResult = await conn.query(
       `SELECT id, name
@@ -200,24 +220,6 @@ export async function createOrGetChannel(input: {
     const host = rows(hostResult)[0];
     if (!host) throw notFound('host not found');
 
-    const existingResult = await conn.query(
-      `SELECT c.id
-         FROM post c
-         JOIN post_channel ch ON ch.post_id = c.id
-        WHERE c.account_id = ?
-          AND c.kind = 'channel'
-          AND c.author_principal_id = ?
-          AND ch.host_principal_id = ?
-          AND ch.status = 'open'
-          AND c.deleted_at IS NULL
-        ORDER BY c.id DESC
-        LIMIT 1
-        FOR UPDATE`,
-      [input.account_id, input.principal_id, input.host_principal_id],
-    );
-    const existing = rows(existingResult)[0];
-    if (existing) return stringValue(existing.id);
-
     const title = input.title?.trim() || `与 ${stringValue(host.name)}`;
     if (title.length > 512) throw badRequest('title must be at most 512 characters');
     const post = await createPost(conn, {
@@ -227,7 +229,7 @@ export async function createOrGetChannel(input: {
       title,
       body: '',
       visibility: 'private',
-      channel: { host_principal_id: input.host_principal_id },
+      channel: { host_principal_id: input.host_principal_id, workdir },
     });
     return post.id;
   });
@@ -242,7 +244,7 @@ export async function listChannels(
   principalId: string,
 ): Promise<ChannelSummary[]> {
   const result = await getPool().query(
-    `SELECT c.id, c.title,
+    `SELECT c.id, c.title, c.created_at, c.revision, ch.workdir,
             hp.id AS host_id, hp.name AS host_name, d.last_seen_at AS host_last_seen_at,
             lm.id AS last_message_id,
             lm.author_principal_id AS last_message_author_principal_id,
@@ -250,6 +252,7 @@ export async function listChannels(
             lp.name AS last_message_author_name,
             lm.body AS last_message_body,
             lm.created_at AS last_message_created_at,
+            COALESCE(lm.created_at, c.created_at) AS last_activity_at,
             (
               SELECT COUNT(*)
                 FROM post m
@@ -293,6 +296,46 @@ export async function getChannel(
   channelId: string,
 ): Promise<ChannelSummary | null> {
   return channelSummaryById(channelId, accountId, principalId);
+}
+
+export async function resetChannelSession(input: {
+  account_id: string;
+  principal_id: string;
+  channel_id: string;
+}): Promise<ChannelSummary> {
+  await withTransaction(async (conn) => {
+    const channel = await channelRow(
+      conn,
+      input.account_id,
+      input.principal_id,
+      input.channel_id,
+      true,
+    );
+    if (!channel) throw notFound('channel not found');
+    const editedAt = nowString();
+    await conn.query(
+      `UPDATE post
+          SET revision = revision + 1, edited_at = ?
+        WHERE id = ? AND deleted_at IS NULL`,
+      [editedAt, input.channel_id],
+    );
+    await recordEvent(conn, {
+      account_id: input.account_id,
+      actor_principal_id: input.principal_id,
+      action: 'channel.session_reset',
+      resource_type: 'post',
+      resource_id: input.channel_id,
+      after_state: { edited_at: editedAt },
+    });
+  });
+
+  const channel = await channelSummaryById(
+    input.channel_id,
+    input.account_id,
+    input.principal_id,
+  );
+  if (!channel) throw new Error(`Channel was not found after reset: ${input.channel_id}`);
+  return channel;
 }
 
 export async function listChannelMessages(input: {

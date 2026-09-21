@@ -120,7 +120,7 @@ function relativeTime(value) {
 
 async function openChannel(host) {
   try {
-    const data = await api.createChannel({ host_principal_id: host.id });
+    const data = await api.createChannel({ host_principal_id: host.id, workdir: '~/tmp' });
     await router.push(`/channels/${encodeURIComponent(data.channel.id)}`);
   } catch (e) {
     error.value = e.message;

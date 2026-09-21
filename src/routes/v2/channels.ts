@@ -8,8 +8,10 @@ import {
   createOrGetChannel,
   listChannelMessages,
   listChannels,
+  resetChannelSession,
   sendChannelMessage,
 } from '../../service/channels.js';
+import { normalizeHomeWorkdir } from '../../util/workdir.js';
 
 export const channelsV2Router = Router();
 
@@ -44,6 +46,11 @@ channelsV2Router.post(
         res.status(400).json({ error: 'host_principal_id is required' });
         return;
       }
+      const workdir = normalizeHomeWorkdir(body.workdir);
+      if (!workdir) {
+        res.status(400).json({ error: 'workdir is required and must be under ~' });
+        return;
+      }
       if (body.title !== undefined && typeof body.title !== 'string') {
         res.status(400).json({ error: 'title must be a string' });
         return;
@@ -52,9 +59,29 @@ channelsV2Router.post(
         account_id: context.account_id,
         principal_id: context.principal.id,
         host_principal_id: body.host_principal_id,
+        workdir,
         title: typeof body.title === 'string' ? body.title : undefined,
       });
       res.status(201).json({ ok: true, channel_id: channel.id, channel });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+channelsV2Router.post(
+  '/:id/reset',
+  principalAuthMiddleware(),
+  requireScope('post:write'),
+  async (req, res, next) => {
+    try {
+      const context = requirePrincipal();
+      const channel = await resetChannelSession({
+        account_id: context.account_id,
+        principal_id: context.principal.id,
+        channel_id: req.params.id,
+      });
+      res.json({ ok: true, channel });
     } catch (error) {
       next(error);
     }
