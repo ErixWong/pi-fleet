@@ -151,6 +151,13 @@ export interface TaskParentSummary {
   title: string;
 }
 
+export interface LatestSubmitSummary {
+  post_id: string;
+  body: string;
+  author: PrincipalSummary | null;
+  created_at: string;
+}
+
 export interface TaskChildSummary {
   post_id: string;
   title: string;
@@ -158,12 +165,32 @@ export interface TaskChildSummary {
   attempts: number;
   max_attempts: number;
   assignee: { id: string; kind: string; name: string } | null;
+  latest_submit_summary: LatestSubmitSummary | null;
   latest_verdict: {
     post_id: string;
     decision: VerdictDecision;
     opinion: string;
     attempt_no: number;
   } | null;
+}
+
+export interface TaskAncestryNode {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  latest_submit_summary: LatestSubmitSummary | null;
+}
+
+export interface TaskSubtreeNode {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  summary: string;
+  executor: string | null;
+  assignee_principal_id: string | null;
+  assignee: { id: string; kind: string; name: string } | null;
+  latest_submit_summary: LatestSubmitSummary | null;
+  children: TaskSubtreeNode[];
 }
 
 export interface SummaryView {
@@ -180,6 +207,8 @@ export interface PostDetail {
   task: PostTask | null;
   parent: TaskParentSummary | null;
   children: TaskChildSummary[];
+  // ancestry 按根任务到当前任务的直接父任务排列，不包含当前任务自身。
+  ancestry: TaskAncestryNode[];
   channel: PostChannel | null;
   verdicts: PostVerdict[];
   deliverables: Array<Record<string, unknown>>;
@@ -425,6 +454,36 @@ function validateExtension(input: CreatePostInput): {
   return { task, channel, verdict };
 }
 
+async function validateTaskParentWithConnection(
+  conn: PoolConnection,
+  input: CreatePostInput,
+  task: TaskExtensionInput | undefined,
+): Promise<void> {
+  const parentTaskId = task?.parent_task_id;
+  if (input.kind !== 'task' || !parentTaskId) return;
+  const parentRows = rows(await conn.query(
+    `SELECT p.account_id, p.author_principal_id, t.assignee_principal_id
+       FROM post_task t
+       JOIN post p ON p.id = t.post_id
+      WHERE t.post_id = ? AND p.deleted_at IS NULL
+      LIMIT 1
+      FOR UPDATE`,
+    [parentTaskId],
+  ));
+  const parent = parentRows[0];
+  if (
+    !parent
+    || stringValue(parent.account_id) !== input.account_id
+    || (
+      stringValue(parent.author_principal_id) !== input.author_principal_id
+      && stringValue(parent.assignee_principal_id) !== input.author_principal_id
+    )
+  ) {
+    // 当前创建入口没有独立的跨 leader 身份：操作者就是子任务作者。
+    throw notFound(`parent task not found: ${parentTaskId}`);
+  }
+}
+
 async function getPostByIdWithConnection(
   conn: PoolConnection,
   id: string,
@@ -512,6 +571,8 @@ async function createPostWithConnection(
       }
     }
   }
+
+  await validateTaskParentWithConnection(conn, input, extension.task);
 
   await conn.query(
     `INSERT INTO post
@@ -678,6 +739,93 @@ export async function createPost(
   return withTransaction((conn) => createPostWithConnection(conn, connOrInput as CreatePostInput));
 }
 
+function latestSubmitSummaryFromRow(row: DbRow): LatestSubmitSummary {
+  const author = row.summary_author_id === null || row.summary_author_id === undefined
+    ? null
+    : {
+        id: stringValue(row.summary_author_id),
+        account_id: stringValue(row.summary_author_account_id),
+        kind: stringValue(row.summary_author_kind),
+        name: stringValue(row.summary_author_name),
+      };
+  return {
+    post_id: stringValue(row.summary_post_id),
+    body: stringValue(row.summary_body),
+    author,
+    created_at: stringValue(row.summary_created_at),
+  };
+}
+
+async function latestSubmitSummaries(
+  rootIds: string[],
+  accountId: string,
+): Promise<Map<string, LatestSubmitSummary>> {
+  if (rootIds.length === 0) return new Map();
+  const result = await getPool().query(
+    `SELECT m.root_id AS summary_root_id,
+            m.id AS summary_post_id, m.body AS summary_body, m.created_at AS summary_created_at,
+            pr.id AS summary_author_id, pr.account_id AS summary_author_account_id,
+            pr.kind AS summary_author_kind, pr.name AS summary_author_name
+       FROM post m
+       LEFT JOIN principal pr ON pr.id = m.author_principal_id
+      WHERE m.root_id IN (${rootIds.map(() => '?').join(', ')})
+        AND m.account_id = ?
+        AND m.kind = 'message'
+        AND m.subtype = 'submit'
+        AND m.deleted_at IS NULL
+      ORDER BY m.root_id, m.created_at DESC, m.id DESC`,
+    [...rootIds, accountId],
+  );
+  const summaries = new Map<string, LatestSubmitSummary>();
+  for (const row of rows(result)) {
+    const rootId = stringValue(row.summary_root_id);
+    if (!summaries.has(rootId)) summaries.set(rootId, latestSubmitSummaryFromRow(row));
+  }
+  return summaries;
+}
+
+async function getTaskAncestry(
+  task: PostTask,
+  accountId: string,
+): Promise<TaskAncestryNode[] | null> {
+  const pool = getPool();
+  const seen = new Set<string>([task.post_id]);
+  const chain: Array<{ id: string; title: string; status: TaskStatus; parent_task_id: string | null }> = [];
+  let parentTaskId = task.parent_task_id;
+  while (parentTaskId) {
+    if (seen.has(parentTaskId)) return null;
+    seen.add(parentTaskId);
+    const result = await pool.query(
+      `SELECT p.id, p.title, t.status, t.parent_task_id
+         FROM post p
+         JOIN post_task t ON t.post_id = p.id
+        WHERE p.id = ? AND p.account_id = ? AND p.deleted_at IS NULL
+        LIMIT 1`,
+      [parentTaskId, accountId],
+    );
+    const row = rows(result)[0];
+    if (!row) return null;
+    chain.push({
+      id: stringValue(row.id),
+      title: stringValue(row.title),
+      status: stringValue(row.status) as TaskStatus,
+      parent_task_id: nullableString(row.parent_task_id),
+    });
+    parentTaskId = nullableString(row.parent_task_id);
+  }
+
+  const summaryByTask = await latestSubmitSummaries(
+    chain.map((item) => item.id),
+    accountId,
+  );
+  return chain.reverse().map((item) => ({
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    latest_submit_summary: summaryByTask.get(item.id) ?? null,
+  }));
+}
+
 export async function getPostDetail(id: string): Promise<PostDetail | null> {
   const post = await getVisiblePostById(id);
   if (!post) return null;
@@ -744,18 +892,23 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
     opinion: string;
     attempt_no: number;
   }>();
+  let latestSubmitByTask = new Map<string, LatestSubmitSummary>();
   if (childRows.length > 0) {
     const childIds = childRows.map((row) => stringValue(row.id));
-    const childVerdictResult = await pool.query(
-      `SELECT v.target_task_id, v.post_id, v.decision, v.opinion, v.attempt_no
-         FROM post_verdict v
-         JOIN post verdict_post
-           ON verdict_post.id = v.post_id
-          AND verdict_post.deleted_at IS NULL
-        WHERE v.target_task_id IN (${childIds.map(() => '?').join(', ')})
-        ORDER BY v.post_id`,
-      childIds,
-    );
+    const [childVerdictResult, childSubmitByTask] = await Promise.all([
+      pool.query(
+        `SELECT v.target_task_id, v.post_id, v.decision, v.opinion, v.attempt_no
+           FROM post_verdict v
+           JOIN post verdict_post
+             ON verdict_post.id = v.post_id
+            AND verdict_post.deleted_at IS NULL
+          WHERE v.target_task_id IN (${childIds.map(() => '?').join(', ')})
+          ORDER BY v.post_id`,
+        childIds,
+      ),
+      latestSubmitSummaries(childIds, post.account_id),
+    ]);
+    latestSubmitByTask = childSubmitByTask;
     for (const row of rows(childVerdictResult)) {
       latestVerdictByTask.set(stringValue(row.target_task_id), {
         post_id: stringValue(row.post_id),
@@ -780,21 +933,17 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
             kind: stringValue(row.assignee_kind),
             name: stringValue(row.assignee_name),
           },
+      latest_submit_summary: latestSubmitByTask.get(childId) ?? null,
       latest_verdict: latestVerdictByTask.get(childId) ?? null,
     };
   });
-  let parent: TaskParentSummary | null = null;
-  if (task?.parent_task_id) {
-    // 父任务必须与本任务同账户，避免跨租户通过 parent_task_id 探测标题
-    const parentResult = await pool.query(
-      `SELECT id, title FROM post WHERE id = ? AND account_id = ? AND deleted_at IS NULL LIMIT 1`,
-      [task.parent_task_id, post.account_id],
-    );
-    const parentRow = rows(parentResult)[0];
-    if (parentRow) {
-      parent = { id: stringValue(parentRow.id), title: stringValue(parentRow.title) };
-    }
-  }
+  const ancestry = task ? await getTaskAncestry(task, post.account_id) : [];
+  // ancestry 经过账户和任务表双重校验；任一祖先缺失时按资源不存在处理。
+  if (ancestry === null) return null;
+  const directParent = ancestry.length > 0 ? ancestry[ancestry.length - 1] : null;
+  const parent: TaskParentSummary | null = directParent
+    ? { id: directParent.id, title: directParent.title }
+    : null;
   const [summary] = await Promise.all([getSummary(post.root_id)]);
   return {
     post,
@@ -802,6 +951,7 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
     task,
     parent,
     children,
+    ancestry,
     channel: rows(channelResult)[0] ? channelFromRow(rows(channelResult)[0]) : null,
     verdicts: rows(verdictResult).map(verdictFromRow),
     deliverables: rows(deliverableResult).map(deliverableFromRow),
@@ -812,6 +962,112 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
       hint: `post(list, root_id='${post.root_id}', after='…')`,
     },
   };
+}
+
+function subtreeSummary(
+  title: string,
+  status: TaskStatus,
+  executor: string | null,
+  assignee: { id: string; kind: string; name: string } | null,
+  latestSubmit: LatestSubmitSummary | null,
+): string {
+  const submitLine = latestSubmit?.body
+    .split(/\r?\n/, 1)[0]
+    .trim();
+  if (submitLine) return submitLine;
+  return `${title} · ${status} · ${executor ?? assignee?.name ?? '未分配'}`;
+}
+
+export async function getTaskSubtree(
+  rootId: string,
+  accountId: string,
+  depth = 4,
+): Promise<TaskSubtreeNode | null> {
+  if (!rootId) throw badRequest('root_id is required');
+  if (!Number.isInteger(depth) || depth < 0 || depth > 4) {
+    throw badRequest('depth must be an integer between 0 and 4');
+  }
+  const pool = getPool();
+  const rootResult = await pool.query(
+    `SELECT p.id AS subtree_id, p.title AS subtree_title,
+            t.status AS subtree_status, t.executor AS subtree_executor,
+            t.assignee_principal_id AS subtree_assignee_id,
+            pr.id AS subtree_assignee_principal_id,
+            pr.kind AS subtree_assignee_kind, pr.name AS subtree_assignee_name
+       FROM post p
+       JOIN post_task t ON t.post_id = p.id
+       LEFT JOIN principal pr ON pr.id = t.assignee_principal_id
+      WHERE p.id = ? AND p.account_id = ? AND p.deleted_at IS NULL
+      LIMIT 1`,
+    [rootId, accountId],
+  );
+  const rootRow = rows(rootResult)[0];
+  if (!rootRow) return null;
+
+  const taskRows = new Map<string, DbRow>();
+  taskRows.set(stringValue(rootRow.subtree_id), rootRow);
+  const childrenByParent = new Map<string, string[]>();
+  let frontier = [rootId];
+  const seen = new Set(frontier);
+  for (let level = 1; level <= depth && frontier.length > 0; level += 1) {
+    const result = await pool.query(
+      `SELECT p.id AS subtree_id, p.title AS subtree_title,
+              t.parent_task_id AS subtree_parent_id,
+              t.status AS subtree_status, t.executor AS subtree_executor,
+              t.assignee_principal_id AS subtree_assignee_id,
+              pr.id AS subtree_assignee_principal_id,
+              pr.kind AS subtree_assignee_kind, pr.name AS subtree_assignee_name
+         FROM post p
+         JOIN post_task t ON t.post_id = p.id
+         LEFT JOIN principal pr ON pr.id = t.assignee_principal_id
+        WHERE p.account_id = ? AND p.deleted_at IS NULL
+          AND t.parent_task_id IN (${frontier.map(() => '?').join(', ')})
+        ORDER BY p.id`,
+      [accountId, ...frontier],
+    );
+    const nextFrontier: string[] = [];
+    for (const row of rows(result)) {
+      const childId = stringValue(row.subtree_id);
+      if (seen.has(childId)) continue;
+      seen.add(childId);
+      taskRows.set(childId, row);
+      const parentId = stringValue(row.subtree_parent_id);
+      const siblings = childrenByParent.get(parentId) ?? [];
+      siblings.push(childId);
+      childrenByParent.set(parentId, siblings);
+      nextFrontier.push(childId);
+    }
+    frontier = nextFrontier;
+  }
+
+  const summaryByTask = await latestSubmitSummaries([...taskRows.keys()], accountId);
+  const buildNode = (id: string): TaskSubtreeNode => {
+    const row = taskRows.get(id);
+    if (!row) throw new Error(`Task subtree row was not loaded: ${id}`);
+    const assignee = row.subtree_assignee_principal_id === null
+      || row.subtree_assignee_principal_id === undefined
+      ? null
+      : {
+          id: stringValue(row.subtree_assignee_principal_id),
+          kind: stringValue(row.subtree_assignee_kind),
+          name: stringValue(row.subtree_assignee_name),
+        };
+    const status = stringValue(row.subtree_status) as TaskStatus;
+    const executor = nullableString(row.subtree_executor);
+    const latestSubmit = summaryByTask.get(id) ?? null;
+    return {
+      id,
+      title: stringValue(row.subtree_title),
+      status,
+      summary: subtreeSummary(stringValue(row.subtree_title), status, executor, assignee, latestSubmit),
+      executor,
+      assignee_principal_id: nullableString(row.subtree_assignee_id),
+      assignee,
+      latest_submit_summary: latestSubmit,
+      children: (childrenByParent.get(id) ?? []).map(buildNode),
+    };
+  };
+  return buildNode(rootId);
 }
 
 function attachmentFromRow(row: DbRow): Record<string, unknown> | null {

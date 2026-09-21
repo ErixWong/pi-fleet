@@ -89,6 +89,12 @@ test('detail projection keeps nine legacy keys plus tree keys and strips interna
       closed_at: null,
     },
     parent: { id: 'pst_parent', title: 'parent task' },
+    ancestry: [{
+      id: 'pst_grandparent',
+      title: 'grandparent task',
+      status: 'done',
+      latest_submit_summary: null,
+    }],
     children: [{
       post_id: 'pst_child',
       title: 'child task',
@@ -96,6 +102,7 @@ test('detail projection keeps nine legacy keys plus tree keys and strips interna
       attempts: 1,
       max_attempts: 3,
       assignee: { id: 'prn_host', kind: 'host', name: 'worker' },
+      latest_submit_summary: null,
       latest_verdict: {
         post_id: 'pst_verdict',
         decision: 'accept',
@@ -137,12 +144,14 @@ test('detail projection keeps nine legacy keys plus tree keys and strips interna
 
   assert.deepEqual(
     Object.keys(detail).sort(),
-    ['channel', 'children', 'deliverables', 'more', 'parent', 'post', 'recent', 'summary', 'targets', 'task', 'verdicts'].sort(),
+    ['ancestry', 'channel', 'children', 'deliverables', 'more', 'parent', 'post', 'recent', 'summary', 'targets', 'task', 'verdicts'].sort(),
   );
   assert.equal(detail.task.parent_task_id, 'pst_parent');
   assert.equal(detail.parent.id, 'pst_parent');
+  assert.equal(detail.ancestry[0].id, 'pst_grandparent');
   assert.equal(detail.children.length, 1);
   assert.equal(detail.children[0].assignee.name, 'worker');
+  assert.equal(detail.children[0].latest_submit_summary, null);
   assert.equal(detail.children[0].latest_verdict.decision, 'accept');
   assert.equal('account_id' in detail.children[0].assignee, false);
   const serialized = JSON.stringify(detail);
@@ -208,6 +217,7 @@ test('recent limit is bounded by the requested limit and kind controls extension
     recent: Array.from({ length: 5 }, (_, index) => post({ id: `pst_${index}`, kind: 'message' })),
     more: { count: 0, hint: '' },
     parent: null,
+    ancestry: [],
     children: [],
   });
 

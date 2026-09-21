@@ -8,13 +8,16 @@ import {
   editPost,
   getSummary,
   getPostDetail,
+  getTaskSubtree,
   listPosts,
   removeTarget,
   replyPost,
   type ListPostsFilter,
+  type LatestSubmitSummary,
   type Post,
   type PostDetail,
   type PostTask,
+  type TaskSubtreeNode,
 } from '../service/posts.js';
 import { publishTask } from '../service/task-flow.js';
 import { canReadAttachment, type Attachment } from '../service/resources.js';
@@ -167,6 +170,16 @@ function publicRecent(post: Post): Record<string, unknown> {
   };
 }
 
+function publicSubmitSummary(summary: LatestSubmitSummary | null): Record<string, unknown> | null {
+  if (!summary) return null;
+  return {
+    post_id: summary.post_id,
+    body: summary.body,
+    author: publicPrincipal(summary.author),
+    created_at: summary.created_at,
+  };
+}
+
 function publicTaskChild(child: PostDetail['children'][number]): Record<string, unknown> {
   return {
     post_id: child.post_id,
@@ -175,6 +188,7 @@ function publicTaskChild(child: PostDetail['children'][number]): Record<string, 
     attempts: child.attempts,
     max_attempts: child.max_attempts,
     assignee: publicPrincipal(child.assignee),
+    latest_submit_summary: publicSubmitSummary(child.latest_submit_summary),
     latest_verdict: child.latest_verdict
       ? {
           post_id: child.latest_verdict.post_id,
@@ -183,6 +197,20 @@ function publicTaskChild(child: PostDetail['children'][number]): Record<string, 
           attempt_no: child.latest_verdict.attempt_no,
         }
       : null,
+  };
+}
+
+function publicTaskSubtree(node: TaskSubtreeNode): Record<string, unknown> {
+  return {
+    id: node.id,
+    title: node.title,
+    status: node.status,
+    summary: node.summary,
+    executor: node.executor,
+    assignee_principal_id: node.assignee_principal_id,
+    assignee: publicPrincipal(node.assignee),
+    latest_submit_summary: publicSubmitSummary(node.latest_submit_summary),
+    children: node.children.map(publicTaskSubtree),
   };
 }
 
@@ -205,6 +233,12 @@ export function presentPostDetail(detail: PostDetail): Record<string, unknown> {
     task,
     parent: detail.parent ? { id: detail.parent.id, title: detail.parent.title } : null,
     children: detail.children.map(publicTaskChild),
+    ancestry: detail.ancestry.map((node) => ({
+      id: node.id,
+      title: node.title,
+      status: node.status,
+      latest_submit_summary: publicSubmitSummary(node.latest_submit_summary),
+    })),
     channel,
     deliverables: detail.deliverables.map(publicDeliverable),
     verdicts: detail.verdicts.map((verdict) => ({
@@ -277,6 +311,19 @@ export async function readPostDetail(
     return readable ? deliverable : { ...deliverable, attachment: null };
   }));
   return presentPostDetail({ ...detail, deliverables });
+}
+
+export async function readTaskSubtree(
+  rootId: string,
+  accountId: string,
+  depth = 4,
+): Promise<Record<string, unknown> | null> {
+  const subtree = await getTaskSubtree(rootId, accountId, depth);
+  if (!subtree) return null;
+  return {
+    depth,
+    root: publicTaskSubtree(subtree),
+  };
 }
 
 export async function readPostList(
@@ -355,6 +402,7 @@ export function registerPostTools(server: McpServer): void {
       page_size: z.number().int().min(1).max(200).optional(),
       after: z.string().optional(),
       limit: z.number().int().min(1).max(200).optional(),
+      depth: z.number().int().min(0).max(4).optional(),
     },
     async (args): Promise<ToolResult> => {
       try {
@@ -475,6 +523,14 @@ export function registerPostTools(server: McpServer): void {
             ...(summary ?? { summary: null }),
             pending_worker: args.refresh === true,
           });
+        }
+        if (args.action === 'subtree') {
+          guardScope('task:read');
+          const rootId = args.root_id ?? args.id;
+          if (!rootId) return toolErr('root_id is required');
+          const subtree = await readTaskSubtree(rootId, context.account_id, args.depth ?? 4);
+          if (!subtree) return toolErr('not found');
+          return toolOk(subtree);
         }
         if (args.action !== 'detail' && args.action !== 'list') {
           return toolErr(`unknown action: ${args.action}`);
