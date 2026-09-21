@@ -26,6 +26,7 @@ const draft = ref('');
 const newWorkdir = ref('~/tmp');
 const newTitle = ref('');
 const showCreate = ref(false);
+const sidebarOpen = ref(false);
 const messagesEl = ref(null);
 let refreshTimer = null;
 let refreshing = false;
@@ -193,6 +194,7 @@ function selectHost(host) {
   selectedHostId.value = host.id;
   selectedFolderKey.value = '';
   selectedId.value = '';
+  sidebarOpen.value = false;
   syncSelection();
   showCreate.value = false;
   sendError.value = '';
@@ -202,6 +204,7 @@ function selectHost(host) {
 async function selectFolder(folder) {
   selectedFolderKey.value = folder.key;
   selectedId.value = folder.channels[0]?.id || '';
+  sidebarOpen.value = false;
   showCreate.value = false;
   sendError.value = '';
   if (selectedId.value) {
@@ -216,6 +219,7 @@ async function selectChannel(channel) {
   selectedId.value = channel.id;
   selectedHostId.value = channel.host.id;
   selectedFolderKey.value = folderKey(channel);
+  sidebarOpen.value = false;
   sendError.value = '';
   await router.push(`/channels/${encodeURIComponent(channel.id)}`);
   await refreshSelectedMessages();
@@ -350,65 +354,72 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="channels-page">
-    <div class="d-flex justify-content-between align-items-end gap-3 mb-4">
-      <div>
-        <div class="eyebrow"><i class="bi bi-chat-dots me-1"></i>CHANNELS</div>
-        <h1 class="page-title">主机对话</h1>
-        <p class="text-secondary mb-0">先选主机和工作目录，再进入连续对话。</p>
-      </div>
-      <span class="text-secondary small"><i class="bi bi-arrow-repeat me-1"></i>每 3 秒刷新</span>
-    </div>
-
-    <div v-if="error" class="alert alert-danger">{{ error }}</div>
-
     <div class="channel-layout">
-      <aside class="channel-sidebar card" aria-label="主机和文件夹导航">
-        <section class="channel-panel-section channel-host-panel">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <strong>主机</strong><span class="text-secondary small">{{ hosts.length }} 台</span>
-          </div>
-          <div v-if="loading" class="empty-state py-4">加载中…</div>
-          <div v-else-if="!hosts.length" class="empty-state py-4">
-            <i class="bi bi-pc-display"></i><strong>还没有主机</strong><span>先注册一台主机。</span>
-          </div>
-          <div v-else class="list-group list-group-flush channel-host-list">
-            <button v-for="host in hosts" :key="host.id" type="button"
-              class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
-              :class="{ active: String(selectedHostId) === String(host.id) }" @click="selectHost(host)">
-              <div class="d-flex align-items-center gap-2">
-                <i class="bi bi-pc-display"></i>
-                <strong class="text-truncate">{{ hostTitle(host) }}</strong>
-                <StatusBadge class="ms-auto" kind="host" :status="host.status" :offline="host.offline" />
-              </div>
-              <div class="small opacity-75 mt-1 text-truncate">{{ host.id }}</div>
-            </button>
-          </div>
-        </section>
+      <aside class="channel-sidebar card" :class="{ 'is-open': sidebarOpen }" aria-label="主机和文件夹导航">
+      <div class="channel-sidebar-toolbar">
+        <router-link to="/" class="channel-back-link" aria-label="返回仪表盘">
+          <i class="bi bi-arrow-left"></i>
+        </router-link>
+        <div class="min-w-0">
+          <div class="eyebrow"><i class="bi bi-chat-dots me-1"></i>CHANNELS</div>
+          <strong class="channel-sidebar-title">主机对话</strong>
+        </div>
+        <span class="text-secondary small ms-auto" title="每 3 秒刷新"><i class="bi bi-arrow-repeat"></i></span>
+      </div>
 
-        <section class="channel-panel-section channel-folder-panel">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <strong>文件夹</strong><span class="text-secondary small">{{ folders.length }} 个</span>
-          </div>
-          <div v-if="!selectedHost" class="empty-state py-4">选择主机查看文件夹</div>
-          <div v-else-if="!folders.length" class="empty-state py-4">
-            <i class="bi bi-folder2-open"></i><strong>暂无对话文件夹</strong><span>新建对话后会自动出现。</span>
-          </div>
-          <div v-else class="list-group list-group-flush channel-folder-list">
-            <button v-for="folder in folders" :key="folder.key" type="button"
-              class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
-              :class="{ active: selectedFolderKey === folder.key }" @click="selectFolder(folder)">
-              <div class="d-flex align-items-center gap-2">
-                <i class="bi bi-folder2"></i>
-                <strong class="text-truncate">{{ folderTitle(folder) }}</strong>
-                <span class="badge text-bg-secondary ms-auto">{{ folder.channels.length }}</span>
-              </div>
-              <div class="small opacity-75 mt-1">最近：{{ fmtTime(folder.lastActivity) }}</div>
-            </button>
-          </div>
-        </section>
+      <section class="channel-panel-section channel-host-panel">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <strong>主机</strong><span class="text-secondary small">{{ hosts.length }} 台</span>
+        </div>
+        <div v-if="loading" class="empty-state py-4">加载中…</div>
+        <div v-else-if="!hosts.length" class="empty-state py-4">
+          <i class="bi bi-pc-display"></i><strong>还没有主机</strong><span>先注册一台主机。</span>
+        </div>
+        <div v-else class="list-group list-group-flush channel-host-list">
+          <button v-for="host in hosts" :key="host.id" type="button"
+            class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
+            :class="{ active: String(selectedHostId) === String(host.id) }" @click="selectHost(host)">
+            <div class="d-flex align-items-center gap-2">
+              <i class="bi bi-pc-display"></i>
+              <strong class="text-truncate">{{ hostTitle(host) }}</strong>
+              <StatusBadge class="ms-auto" kind="host" :status="host.status" :offline="host.offline" />
+            </div>
+            <div class="small opacity-75 mt-1 text-truncate">{{ host.id }}</div>
+          </button>
+        </div>
+      </section>
+
+      <section class="channel-panel-section channel-folder-panel">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <strong>文件夹</strong><span class="text-secondary small">{{ folders.length }} 个</span>
+        </div>
+        <div v-if="!selectedHost" class="empty-state py-4">选择主机查看文件夹</div>
+        <div v-else-if="!folders.length" class="empty-state py-4">
+          <i class="bi bi-folder2-open"></i><strong>暂无对话文件夹</strong><span>新建对话后会自动出现。</span>
+        </div>
+        <div v-else class="list-group list-group-flush channel-folder-list">
+          <button v-for="folder in folders" :key="folder.key" type="button"
+            class="list-group-item list-group-item-action bg-transparent text-start channel-nav-item"
+            :class="{ active: selectedFolderKey === folder.key }" @click="selectFolder(folder)">
+            <div class="d-flex align-items-center gap-2">
+              <i class="bi bi-folder2"></i>
+              <strong class="text-truncate">{{ folderTitle(folder) }}</strong>
+              <span class="badge text-bg-secondary ms-auto">{{ folder.channels.length }}</span>
+            </div>
+            <div class="small opacity-75 mt-1">最近：{{ fmtTime(folder.lastActivity) }}</div>
+          </button>
+        </div>
+      </section>
       </aside>
 
+      <button v-if="sidebarOpen" type="button" class="channel-sidebar-backdrop" aria-label="关闭导航" @click="sidebarOpen = false"></button>
+
       <section class="channel-main">
+        <button type="button" class="channel-mobile-toggle btn btn-sm btn-ghost" aria-label="打开主机和文件夹导航"
+          @click="sidebarOpen = true">
+          <i class="bi bi-layout-sidebar-inset me-1"></i>导航
+        </button>
+        <div v-if="error" class="alert alert-danger channel-alert">{{ error }}</div>
         <div v-if="!selectedFolder" class="card channel-empty">
           <i class="bi bi-arrow-left-circle"></i><strong>选择一个文件夹</strong>
           <span>从左侧选择主机和工作目录，查看该目录下的对话。</span>
