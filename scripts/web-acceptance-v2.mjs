@@ -15,6 +15,7 @@ let passed = 0;
 let failed = 0;
 let bearer = '';
 let createdHostId = '';
+let createdHostBearer = '';
 const createdPostIds = [];
 const runId = Date.now().toString(36);
 
@@ -175,6 +176,7 @@ try {
   await page.click('.modal.show button:has-text("注册并生成 key")');
   await page.waitForSelector('.alert-warning .key-box');
   const keyText = (await page.locator('.alert-warning .key-box').innerText()).trim();
+  createdHostBearer = keyText;
   const hostNameShown = await page.locator('.alert-warning').innerText();
   const hostsResponse = await request('GET', '/api/v2/hosts');
   createdHostId = hostsResponse.data.items?.find((host) => host.name === `web-v2-host-${runId}`)?.id ?? '';
@@ -182,6 +184,16 @@ try {
   check('主机列表包含新主机', Boolean(createdHostId));
 
   console.log('== 6. 主机→文件夹→对话导航与 workdir 校验 ==');
+  const reportedFolderPath = `/home/web-v2-${runId}/reported`;
+  const previousBearer = bearer;
+  bearer = createdHostBearer;
+  const reportedFolders = await request('POST', '/api/v2/hosts/folders', {
+    folders: [reportedFolderPath],
+  });
+  bearer = previousBearer;
+  check('主机 key 上报纯文件夹成功',
+    reportedFolders.response.status === 200
+      && reportedFolders.data.folders?.some((folder) => folder.path === reportedFolderPath));
   const channelCreate = await request('POST', '/api/v2/channels', {
     host_principal_id: createdHostId,
     workdir: `~/web-v2-${runId}`,
@@ -222,8 +234,27 @@ try {
     JSON.stringify(channelViewport));
   const hostNav = page.locator('.channel-host-list .channel-nav-item').filter({ hasText: `web-v2-host-${runId}` });
   await hostNav.click();
-  check('点击主机后显示文件夹', await page.locator('.channel-folder-list .channel-nav-item').count() >= 1);
-  await page.locator('.channel-folder-list .channel-nav-item').first().click();
+  const reportedFolder = page.locator('.channel-folder-list .channel-nav-item')
+    .filter({ hasText: reportedFolderPath });
+  check('上报目录出现在文件夹列表', await reportedFolder.count() === 1);
+  await reportedFolder.click();
+  check('无对话文件夹显示最近上报时间',
+    await page.locator('.channel-folder-list .channel-nav-item').filter({ hasText: '最近上报：' }).count() >= 1);
+  await page.getByRole('button', { name: '发起新对话' }).click();
+  check('纯上报文件夹可快捷建对话',
+    await page.locator('input[aria-label="工作目录"]').inputValue() === '~/reported');
+  await page.fill('input[aria-label="对话标题"]', `Web 上报目录对话 ${runId}`);
+  const quickChannelResponse = page.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && response.url().endsWith('/api/v2/channels'));
+  await page.getByRole('button', { name: '创建' }).click();
+  const quickChannelPayload = await (await quickChannelResponse).json();
+  if (quickChannelPayload.channel?.id) createdPostIds.push(quickChannelPayload.channel.id);
+  check('快捷建对话提交成功', quickChannelPayload.channel?.id && quickChannelPayload.channel?.workdir === '~/reported');
+
+  const originalFolder = page.locator('.channel-folder-list .channel-nav-item')
+    .filter({ hasText: `~/web-v2-${runId}` });
+  await originalFolder.click();
   check('点击文件夹后显示对话列表',
     await page.locator('.channel-dialog-list .channel-dialog-item').count() >= 1);
   await page.locator('.channel-dialog-list .channel-dialog-item').first().click();

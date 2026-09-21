@@ -228,6 +228,7 @@ async function cleanup() {
     const principalPlaceholders = createdPrincipalIds.map(() => '?').join(', ');
     await db.query(`DELETE FROM api_key WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM device_executor WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
+    await db.query(`DELETE FROM host_folder WHERE host_principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM device WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM principal WHERE id IN (${principalPlaceholders})`, createdPrincipalIds);
   }
@@ -276,6 +277,23 @@ try {
   const hostWhoami = await request('GET', '/api/v2/whoami', createdHostBearer);
   check('0f. host key authenticates as a host',
     hostWhoami.response.status === 200 && hostWhoami.data.principal?.kind === 'host');
+  const reportedFolderPath = `/home/rest-v2-host-${Date.now()}/reported`;
+  const reportedFolders = await request('POST', '/api/v2/hosts/folders', createdHostBearer, {
+    folders: [reportedFolderPath, `${reportedFolderPath}/../reported`],
+  });
+  check('0f1. host key can report home folders',
+    reportedFolders.response.status === 200
+      && reportedFolders.data.folders?.some((folder) => folder.path === reportedFolderPath));
+  const listedHosts = await request('GET', '/api/v2/hosts', loginBearer);
+  const listedCreatedHost = listedHosts.data.items?.find((host) => host.id === createdHostId);
+  check('0f2. host folders are included in the host list',
+    listedHosts.response.status === 200
+      && listedCreatedHost?.folders?.some((folder) => folder.path === reportedFolderPath));
+  const userReportDenied = await request('POST', '/api/v2/hosts/folders', loginBearer, {
+    host_principal_id: createdHostId,
+    folders: [reportedFolderPath],
+  });
+  check('0f3. non-host callers cannot report for a host', userReportDenied.response.status === 404);
   const hostDenied = await request('GET', '/api/v2/hosts', createdHostBearer);
   check('0g. host key without host:manage is hidden as 404', hostDenied.response.status === 404);
   const crossAccountPatch = await request('PATCH', `/api/v2/hosts/${otherHostId}`, loginBearer, {

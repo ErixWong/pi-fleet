@@ -160,7 +160,7 @@ export function newId(prefix: string, length = 16): string {
 
 ## 3. 表设计
 
-共 25 张表，分 7 组。**所有 `DATETIME` 由应用侧写入**（DDL 不写 `DEFAULT CURRENT_TIMESTAMP`）；**所有表主键为字符串 ID**；**删除统一 `deleted_at`（软删）**。
+共 26 张表，分 7 组。**所有 `DATETIME` 由应用侧写入**（DDL 不写 `DEFAULT CURRENT_TIMESTAMP`）；**所有表主键为字符串 ID**；**删除统一 `deleted_at`（软删）**。
 
 ### 3.1 主体与权限
 
@@ -187,6 +187,15 @@ CREATE TABLE principal (
   KEY idx_principal_acct (account_id, kind, id),
   CONSTRAINT fk_prn_account FOREIGN KEY (account_id) REFERENCES account(id),
   CONSTRAINT fk_prn_host    FOREIGN KEY (host_principal_id) REFERENCES principal(id)
+) ENGINE=InnoDB;
+
+-- 主机 daemon 上报的 home 一级目录清单
+CREATE TABLE host_folder (
+  host_principal_id VARCHAR(32)  NOT NULL,
+  path              VARCHAR(512) NOT NULL,
+  last_seen_at      DATETIME     NOT NULL,
+  PRIMARY KEY (host_principal_id, path),
+  CONSTRAINT fk_host_folder_prn FOREIGN KEY (host_principal_id) REFERENCES principal(id)
 ) ENGINE=InnoDB;
 
 -- kind=host 的 principal 的 1:1 扩展

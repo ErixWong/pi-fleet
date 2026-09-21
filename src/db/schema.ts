@@ -22,6 +22,14 @@ export const SCHEMA_STATEMENTS: string[] = [
   CONSTRAINT fk_prn_host    FOREIGN KEY (host_principal_id) REFERENCES principal(id)
 ) ENGINE=InnoDB`,
 
+  `CREATE TABLE host_folder (
+  host_principal_id VARCHAR(32)  NOT NULL,
+  path              VARCHAR(512) NOT NULL,
+  last_seen_at      DATETIME     NOT NULL,
+  PRIMARY KEY (host_principal_id, path),
+  CONSTRAINT fk_host_folder_prn FOREIGN KEY (host_principal_id) REFERENCES principal(id)
+) ENGINE=InnoDB`,
+
   `CREATE TABLE device (
   principal_id  VARCHAR(32) PRIMARY KEY,
   hostname      VARCHAR(255) NOT NULL DEFAULT '',
