@@ -283,7 +283,7 @@ onMounted(load);
                       <span class="fw-semibold">{{ key.label || '（未命名）' }}</span>
                       <span v-if="key.label === 'login'" class="badge text-bg-primary ms-1">会话</span>
                     </td>
-                    <td><code class="small">{{ key.scopes.join(', ') }}</code></td>
+                    <td class="scopes-cell"><code class="small">{{ key.scopes.join(', ') }}</code></td>
                     <td><span class="badge" :class="statusOf(key).class">{{ statusOf(key).text }}</span></td>
                     <td class="small text-secondary">{{ formatTime(key.created_at) }}</td>
                     <td class="small text-secondary">{{ formatTime(key.last_used_at) }}</td>
@@ -342,4 +342,6 @@ onMounted(load);
   padding: 1rem;
 }
 .modal-card { width: min(440px, 100%); }
+.scopes-cell { max-width: 240px; }
+.scopes-cell code { display: block; word-break: break-all; max-height: 5.5em; overflow-y: auto; }
 </style>
