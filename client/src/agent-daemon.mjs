@@ -23,6 +23,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createChannelEventsParser } from './channel-events.mjs';
 import { listHomeSubfolders, scanHomeFolders } from './host-folders.mjs';
 
 const CLIENT_CONFIG_PATH = path.join(os.homedir(), '.config', 'pi-agent', 'config.json');
@@ -223,6 +224,8 @@ function buildChannelInvocation(prompt, sessionId) {
       sessionId,
       '--session-dir',
       CHANNEL_SESSION_DIR,
+      '--mode',
+      'json',
       '-p',
       prompt,
     ],
@@ -511,6 +514,14 @@ async function nextChannelMessage(channel, principalId) {
         after = id;
         continue;
       }
+      // host↔host 乒乓防御：daemon 回发的消息以 host 主体落库，下一轮轮询必须跳过，
+      // 否则会被当作「对方主机」的新消息再次拉起 pi 形成无限乒乓。
+      if (String(item?.author_kind ?? '') === 'host') {
+        console.log(`[daemon][channel-${channel.id}] 跳过主机消息 ${id}`);
+        setChannelCursor(channel.id, id);
+        after = id;
+        continue;
+      }
       return item;
     }
     if (!page?.has_more || !page?.next_after || page.next_after === after) return null;
@@ -569,7 +580,11 @@ function runPiForChannel(channelId, prompt, cwd, sessionId) {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    let output = '';
+    const parser = createChannelEventsParser({
+      onToolExecution: (toolName, summary) => {
+        console.log(`[daemon][channel-${channelId}] 🔧 ${toolName}: ${summary}`);
+      },
+    });
     let settled = false;
     const finish = (error, value) => {
       if (settled) return;
@@ -579,28 +594,32 @@ function runPiForChannel(channelId, prompt, cwd, sessionId) {
       else resolve(value);
     };
     child.stdout?.on('data', (data) => {
-      output = (output + data.toString()).slice(-64 * 1024);
+      parser.feed(data.toString());
     });
     child.stderr?.on('data', (data) => {
       console.log(`[daemon][channel-${channelId}] ${String(data).slice(0, 400)}`);
     });
     const timeoutTimer = setTimeout(() => {
-      console.log(`[daemon][channel-${channelId}] 对话执行超时（>${CHANNEL_TIMEOUT_MS / 1000}s）`);
+      const partial = parser.finalize();
+      console.log(
+        `[daemon][channel-${channelId}] 对话执行超时（>${CHANNEL_TIMEOUT_MS / 1000}s）`
+        + ` 最后动作：${partial.lastAction || '（无）'}`,
+      );
       try { child.kill(); } catch { /* already dead */ }
       const timeoutError = new Error(`对话执行超时（超过 ${CHANNEL_TIMEOUT_MS / 60000} 分钟）`);
-      timeoutError.partialOutput = output;
+      timeoutError.partialOutput = partial;
       finish(timeoutError);
     }, CHANNEL_TIMEOUT_MS);
     child.on('close', (code, signal) => {
-      if (code === 0) finish(null, output);
+      if (code === 0) finish(null, parser.finalize());
       else {
         const exitError = new Error(`对话执行器异常退出（code=${code ?? signal ?? '?'})`);
-        exitError.partialOutput = output;
+        exitError.partialOutput = parser.finalize();
         finish(exitError);
       }
     });
     child.on('error', (error) => {
-      error.partialOutput = output;
+      error.partialOutput = parser.finalize();
       finish(error);
     });
   });
@@ -620,9 +639,21 @@ function truncateChannelBody(body) {
 async function reportChannelFailure(channelId, error) {
   console.log(`[daemon][channel-${channelId}] pi 处理失败：${error.message}`);
   let body = `处理失败：${error.message}`;
-  const partial = String(error?.partialOutput ?? '').trim();
-  if (partial) {
-    body += `\n\n--- pi 已有输出（尾部）---\n${partial.slice(-2000)}`;
+  const partial = error?.partialOutput;
+  if (partial && typeof partial === 'object') {
+    // 结构化桥接输出（--mode json）：文本尾部 + 最后执行动作。
+    const textTail = String(partial.text ?? '').trim();
+    if (textTail) {
+      body += `\n\n--- pi 已有输出（尾部）---\n${textTail.slice(-2000)}`;
+    }
+    if (partial.lastAction) {
+      body += `\n\n最后执行动作：${partial.lastAction}`;
+    }
+  } else {
+    const legacy = String(partial ?? '').trim();
+    if (legacy) {
+      body += `\n\n--- pi 已有输出（尾部）---\n${legacy.slice(-2000)}`;
+    }
   }
   try {
     await api('POST', `/api/v2/channels/${encodeURIComponent(channelId)}/messages`, {
@@ -673,8 +704,11 @@ async function runChannelMessage(channel, message) {
         output = await runPiForChannel(channel.id, restartPrompt, cwd, replacementId);
       } catch (restartError) {
         // 第二次失败时，若新 error 的 partialOutput 无有效内容而第一次有，带上第一次的输出尾部再抛。
-        const restartPartial = String(restartError.partialOutput ?? '').trim();
-        const resumePartial = String(resumeError.partialOutput ?? '').trim();
+        const partialText = (value) => String(
+          value && typeof value === 'object' ? value.text : value ?? '',
+        ).trim();
+        const restartPartial = partialText(restartError.partialOutput);
+        const resumePartial = partialText(resumeError.partialOutput);
         if (!restartPartial && resumePartial) {
           restartError.partialOutput = resumeError.partialOutput;
         }
@@ -683,9 +717,12 @@ async function runChannelMessage(channel, message) {
       await reportChannelRestarted(channel.id);
     }
     markChannelSessionInitialized(String(channel.id));
-    // trimmed 仅用于判断是否为空；转发时保留 pi 原始输出（含首尾空白）。
-    const trimmed = String(output ?? '').trim();
-    const body = trimmed ? truncateChannelBody(output) : '（pi 无输出）';
+    // trimmed 仅用于判断是否为空；转发时保留 pi 原始文本（含首尾空白）。
+    const trimmed = String(output?.text ?? '').trim();
+    let body = trimmed ? truncateChannelBody(output.text) : '（pi 无输出）';
+    if (trimmed && output.trace) {
+      body = truncateChannelBody(`${output.text}\n\n--- 处理轨迹 ---\n${output.trace}`);
+    }
     try {
       await api('POST', `/api/v2/channels/${encodeURIComponent(channel.id)}/messages`, { body });
     } catch (replyError) {
