@@ -7,6 +7,7 @@ import { channelsV2Router } from './channels.js';
 import { eventsV2Router } from './events.js';
 import { hostsV2Router } from './hosts.js';
 import { identitiesV2Router } from './identities.js';
+import { meV2Router } from './me.js';
 import { postsV2Router } from './posts.js';
 import { tasksV2Router } from './tasks.js';
 
@@ -35,6 +36,7 @@ v2Router.use('/attachments', attachmentsV2Router);
 v2Router.use('/events', eventsV2Router);
 v2Router.use('/hosts', hostsV2Router);
 v2Router.use('/keys', identitiesV2Router);
+v2Router.use('/me', meV2Router);
 v2Router.use(authV2Router);
 
 v2Router.use((

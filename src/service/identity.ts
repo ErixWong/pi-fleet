@@ -2,7 +2,7 @@ import crypto, { scryptSync, timingSafeEqual } from 'node:crypto';
 import type { PoolConnection } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
-import { badRequest, notFound } from '../util/errors.js';
+import { AppError, badRequest, notFound } from '../util/errors.js';
 import { normalizeReportedHomeFolder } from '../util/workdir.js';
 import {
   invalidateAuthCacheKeyHash,
@@ -184,6 +184,13 @@ function numberValue(value: unknown): number {
 
 function booleanValue(value: unknown): boolean {
   return Number(value) === 1;
+}
+
+/** Hash a password with the scrypt format understood by verifyPassword. */
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16);
+  const derived = scryptSync(password, salt, 64) as Buffer;
+  return `scrypt:${salt.toString('hex')}:${derived.toString('hex')}`;
 }
 
 /** Validate the scrypt format used by migrated administrator passwords. */
@@ -939,6 +946,135 @@ export async function listApiKeys(principalId: string): Promise<ApiKey[]> {
     [principalId],
   );
   return rows(result).map(apiKeyFromRow);
+}
+
+/**
+ * Change a principal's password after verifying the old one.
+ * All label='login' keys are revoked so other sessions are forced to re-login.
+ */
+export async function changePassword(
+  principalId: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  if (typeof newPassword !== 'string' || newPassword.length === 0) {
+    throw badRequest('new_password 必须是非空字符串');
+  }
+  if (newPassword.length > 128) {
+    throw badRequest('new_password 不能超过 128 个字符');
+  }
+  await withTransaction(async (conn) => {
+    const result = await conn.query(
+      `SELECT id, account_id, password_hash
+         FROM principal
+        WHERE id = ? AND deleted_at IS NULL
+        LIMIT 1
+        FOR UPDATE`,
+      [principalId],
+    );
+    const row = rows(result)[0];
+    if (!row) throw notFound(`Principal not found: ${principalId}`);
+    const passwordHash = nullableString(row.password_hash);
+    if (!passwordHash || !verifyPassword(oldPassword, passwordHash)) {
+      throw new AppError('旧密码不正确', 401);
+    }
+    const changedAt = nowString();
+    await conn.query(
+      `UPDATE principal SET password_hash = ? WHERE id = ?`,
+      [hashPassword(newPassword), principalId],
+    );
+    await conn.query(
+      `UPDATE api_key
+          SET revoked_at = ?
+        WHERE principal_id = ? AND label = 'login' AND revoked_at IS NULL`,
+      [changedAt, principalId],
+    );
+    // 登录态全部吊销，主动失效该主体全部鉴权缓存。
+    invalidateAuthCachePrincipal(principalId);
+    await recordEvent(conn, {
+      account_id: stringValue(row.account_id),
+      actor_principal_id: principalId,
+      action: 'password.changed',
+      resource_type: 'principal',
+      resource_id: principalId,
+      after_state: { login_keys_revoked: true },
+    });
+  });
+}
+
+/** List the caller's own keys, login sessions and long-term keys together. */
+export async function listPersonalApiKeys(principalId: string): Promise<ApiKey[]> {
+  const result = await getPool().query(
+    `SELECT id, principal_id, label, scopes, created_at, last_used_at,
+            expires_at, revoked_at
+       FROM api_key
+      WHERE principal_id = ?
+      ORDER BY created_at DESC, id DESC`,
+    [principalId],
+  );
+  return rows(result).map(apiKeyFromRow);
+}
+
+/**
+ * Issue a personal long-term key. Requested scopes must be a subset of the
+ * union of scopes the caller still holds on their active (unrevoked,
+ * unexpired) keys; anything else is hidden as not found.
+ */
+export async function createPersonalApiKey(
+  principalId: string,
+  input: {
+    label?: string;
+    scopes: string[];
+    expires_at?: string | null;
+  },
+): Promise<ApiKeyCreation> {
+  const scopes = validateScopes(input.scopes);
+  if (scopes.length === 0) throw badRequest('scopes 不能为空');
+  if (
+    input.expires_at != null
+    && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(input.expires_at)
+  ) {
+    throw badRequest('expires_at 必须是 YYYY-MM-DD HH:mm:ss 或 null');
+  }
+  return withTransaction(async (conn) => {
+    const principal = await getPrincipalWithConnection(conn, principalId);
+    if (!principal) throw notFound(`Principal not found: ${principalId}`);
+    const activeKeys = rows(await conn.query(
+      `SELECT scopes
+         FROM api_key
+        WHERE principal_id = ? AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > ?)`,
+      [principalId, nowString()],
+    ));
+    const allowed = new Set<string>();
+    for (const keyRow of activeKeys) {
+      for (const scope of parseScopes(keyRow.scopes)) allowed.add(scope);
+    }
+    const elevated = scopes.find((scope) => !allowed.has(scope));
+    if (elevated) throw notFound(`scope not held: ${elevated}`);
+    return insertApiKey(
+      conn,
+      {
+        principal_id: principalId,
+        scopes,
+        label: input.label,
+        expires_at: input.expires_at ?? null,
+      },
+      nowString(),
+    );
+  });
+}
+
+/** Revoke one of the caller's own keys; other principals' keys stay hidden. */
+export async function revokePersonalApiKey(
+  principalId: string,
+  keyId: string,
+): Promise<void> {
+  const apiKey = await getApiKey(keyId);
+  if (!apiKey || apiKey.principal_id !== principalId) {
+    throw notFound(`API key not found: ${keyId}`);
+  }
+  await revokeApiKey(keyId);
 }
 
 export async function getApiKey(keyId: string): Promise<ApiKey | null> {

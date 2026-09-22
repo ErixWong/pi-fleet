@@ -67,6 +67,9 @@ function logout() {
           </span>
         </div>
         <div class="app-topbar-actions">
+          <router-link to="/settings" class="btn btn-sm btn-ghost" title="个人设置">
+            <i class="bi bi-gear"></i><span class="d-none d-sm-inline ms-1">设置</span>
+          </router-link>
           <div class="dropdown">
             <button class="btn btn-sm btn-ghost dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
               <i class="bi me-1" :class="themeIcon()"></i><span class="d-none d-sm-inline">主题</span>
