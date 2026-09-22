@@ -108,6 +108,12 @@ test('pending 超 30s 惰性 expire：再次发起与拉取都视为 expired', a
     pending.some((request) => request.id === stale.id),
     false,
   );
+  // wire 契约回归：daemon 读 request.payload.path，服务层必须带上（#37 回归）
+  const wireShape = await listPendingControlRequests(host.id);
+  assert.ok(
+    wireShape.every((request) => typeof request.payload?.path === 'string' && request.payload.path === request.path),
+    'listPendingControlRequests must expose payload.path matching top-level path',
+  );
 });
 
 test('list_dir 回传：有效路径 upsert 进 host_folder，非法路径逐项容错', async () => {

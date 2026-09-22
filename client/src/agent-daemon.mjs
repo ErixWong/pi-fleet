@@ -277,7 +277,8 @@ let controlsUnsupported = false;
 let controlsWarned = false;
 
 async function runListDirControl(request) {
-  const payload = request?.payload ?? {};
+  // 兼容两种出参形状：平台新契约 payload: { path }，旧扁平形状 path 在顶层
+  const payload = { path: request?.payload?.path ?? request?.path };
   let target;
   try {
     target = resolveTaskWorkdir(payload.path);

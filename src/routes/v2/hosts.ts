@@ -75,6 +75,7 @@ function presentControlRequest(request: {
   id: string;
   type: string;
   path: string;
+  payload: { path: string };
   status: string;
   result: unknown | null;
   error: string | null;
@@ -85,6 +86,7 @@ function presentControlRequest(request: {
     id: request.id,
     type: request.type,
     path: request.path,
+    payload: { path: request.payload?.path ?? request.path },
     status: request.status,
     result: request.result,
     error: request.error,

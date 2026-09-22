@@ -229,6 +229,7 @@ async function cleanup() {
     await db.query(`DELETE FROM api_key WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM device_executor WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM host_folder WHERE host_principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
+    await db.query(`DELETE FROM host_control_request WHERE host_principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM device WHERE principal_id IN (${principalPlaceholders})`, createdPrincipalIds);
     await db.query(`DELETE FROM principal WHERE id IN (${principalPlaceholders})`, createdPrincipalIds);
   }
@@ -296,6 +297,22 @@ try {
   check('0f3. non-host callers cannot report for a host', userReportDenied.response.status === 404);
   const hostDenied = await request('GET', '/api/v2/hosts', createdHostBearer);
   check('0g. host key without host:manage is hidden as 404', hostDenied.response.status === 404);
+  const browsePath = `/home/rest-v2-browse-${Date.now()}`;
+  const browseCreated = await request('POST', `/api/v2/hosts/${createdHostId}/browse`, loginBearer, {
+    path: browsePath,
+  });
+  check('0g1. browse creates a pending list_dir request', browseCreated.response.status === 202
+    && browseCreated.data.request?.status === 'pending');
+  const pendingControls = await request('GET', '/api/v2/hosts/controls', createdHostBearer);
+  check('0g2. controls wire shape carries payload.path for daemon',
+    pendingControls.response.status === 200
+    && pendingControls.data.items?.some((item) => item.id === browseCreated.data.request_id
+      && item.payload?.path === browsePath));
+  const answered = await request('POST', `/api/v2/hosts/controls/${browseCreated.data.request_id}/results`,
+    createdHostBearer, { entries: [{ path: `${browsePath}/sub` }] });
+  check('0g3. daemon can answer list_dir with entries', answered.response.status === 200
+    && answered.data.request?.status === 'answered'
+    && answered.data.request?.result?.entries?.some((entry) => entry.path === `${browsePath}/sub`));
   const crossAccountPatch = await request('PATCH', `/api/v2/hosts/${otherHostId}`, loginBearer, {
     name: 'cross-account-update',
   });

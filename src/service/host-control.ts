@@ -20,6 +20,7 @@ export interface HostControlRequest {
   host_principal_id: string;
   type: HostControlType;
   path: string;
+  payload: { path: string };
   status: HostControlStatus;
   result: unknown | null;
   error: string | null;
@@ -69,6 +70,7 @@ function controlRequestFromRow(row: DbRow): HostControlRequest {
     host_principal_id: stringValue(row.host_principal_id),
     type: stringValue(row.type) as HostControlType,
     path: stringValue(payload.path),
+    payload: { path: stringValue(payload.path) },
     status: stringValue(row.status) as HostControlStatus,
     result,
     error,
