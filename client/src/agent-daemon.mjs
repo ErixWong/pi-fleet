@@ -352,6 +352,14 @@ const channelSessionIds = new Map(
 const channelSessionInitialized = new Map(
   Object.entries(channelState.initialized ?? {}).filter(([, value]) => typeof value === 'boolean'),
 );
+// 系统提示版本：存储的 prompt_version 与当前不一致时，旧会话按未初始化处理，
+// 以便 channelPrompt 重新注入完整系统提示，避免旧提示（如「必须用 post reply」）
+// 与 daemon stdout 转发桥同时生效导致双发。
+const PROMPT_VERSION = '2026-09-22-channel-stdout-bridge';
+const channelPromptVersions = new Map(
+  Object.entries(channelState.prompt_versions ?? {})
+    .filter(([, value]) => typeof value === 'string'),
+);
 const channelResetRevisions = new Map(
   Object.entries(channelState.reset_revisions ?? {})
     .filter(([, value]) => Number.isInteger(Number(value)))
@@ -368,6 +376,7 @@ function saveChannelState() {
     sessions: Object.fromEntries(channelSessionIds),
     initialized: Object.fromEntries(channelSessionInitialized),
     reset_revisions: Object.fromEntries(channelResetRevisions),
+    prompt_versions: Object.fromEntries(channelPromptVersions),
   };
   const tempPath = `${CHANNEL_STATE_PATH}.tmp-${process.pid}`;
   try {
@@ -425,7 +434,13 @@ function channelSession(channelId) {
     sessionId = channelId;
     channelSessionIds.set(channelId, sessionId);
   }
-  const initialized = channelSessionInitialized.get(channelId) === true || hasPiSession(sessionId);
+  let initialized = channelSessionInitialized.get(channelId) === true || hasPiSession(sessionId);
+  if (channelPromptVersions.get(channelId) !== PROMPT_VERSION) {
+    // 系统提示已升级：按首次处理，channelPrompt 会重新注入完整提示；旧会话历史保留。
+    // 注意：这里只做读判定、不写回版本——版本写回推迟到 markChannelSessionInitialized()，
+    // 保证「带新提示的 pi 调用成功」与「版本标记匹配」严格同时发生。
+    initialized = false;
+  }
   if (initialized) channelSessionInitialized.set(channelId, true);
   saveChannelState();
   return { sessionId, initialized };
@@ -433,6 +448,7 @@ function channelSession(channelId) {
 
 function markChannelSessionInitialized(channelId) {
   channelSessionInitialized.set(channelId, true);
+  channelPromptVersions.set(channelId, PROMPT_VERSION);
   saveChannelState();
 }
 
@@ -514,8 +530,9 @@ function channelSystemPrompt(channel, cwd) {
     `工作目录：${cwd}`,
     '允许在 ~ 下自由 cd 与执行命令。',
     '回答规则：简短、直接回答用户；这是对话，不要调用任何 task 相关工具，也不要认领、提交或处理任务。',
-    `需要回复时，必须使用 post(action="reply", parent_id="${channel.id}", body="...") 回复到当前通道。`,
-    '需要执行命令时可以执行，但不要把命令执行当成任务流程；完成后仍用上述 post reply 汇报。',
+    '直接把回答作为你的输出即可，daemon 会把你的输出原样转达给用户。',
+    '不要调用 post 或 task 相关工具。',
+    '需要执行命令时可以执行，但不要把命令执行当成任务流程；完成后直接把结果写进输出。',
   ];
   return lines.join('\n');
 }
@@ -570,21 +587,46 @@ function runPiForChannel(channelId, prompt, cwd, sessionId) {
     const timeoutTimer = setTimeout(() => {
       console.log(`[daemon][channel-${channelId}] 对话执行超时（>${CHANNEL_TIMEOUT_MS / 1000}s）`);
       try { child.kill(); } catch { /* already dead */ }
-      finish(new Error(`对话执行超时（超过 ${CHANNEL_TIMEOUT_MS / 60000} 分钟）`));
+      const timeoutError = new Error(`对话执行超时（超过 ${CHANNEL_TIMEOUT_MS / 60000} 分钟）`);
+      timeoutError.partialOutput = output;
+      finish(timeoutError);
     }, CHANNEL_TIMEOUT_MS);
     child.on('close', (code, signal) => {
       if (code === 0) finish(null, output);
-      else finish(new Error(`对话执行器异常退出（code=${code ?? signal ?? '?'})`));
+      else {
+        const exitError = new Error(`对话执行器异常退出（code=${code ?? signal ?? '?'})`);
+        exitError.partialOutput = output;
+        finish(exitError);
+      }
     });
-    child.on('error', (error) => finish(error));
+    child.on('error', (error) => {
+      error.partialOutput = output;
+      finish(error);
+    });
   });
+}
+
+const CHANNEL_BODY_MAX = 8000;
+const CHANNEL_BODY_TRUNCATE_SUFFIX = '\n\n…（已截断，完整输出见主机日志）';
+
+function truncateChannelBody(body) {
+  const text = String(body ?? '');
+  if (text.length <= CHANNEL_BODY_MAX) return text;
+  // 给后缀预留空间，保证截断后总长度不超过 CHANNEL_BODY_MAX。
+  return text.slice(0, CHANNEL_BODY_MAX - CHANNEL_BODY_TRUNCATE_SUFFIX.length)
+    + CHANNEL_BODY_TRUNCATE_SUFFIX;
 }
 
 async function reportChannelFailure(channelId, error) {
   console.log(`[daemon][channel-${channelId}] pi 处理失败：${error.message}`);
+  let body = `处理失败：${error.message}`;
+  const partial = String(error?.partialOutput ?? '').trim();
+  if (partial) {
+    body += `\n\n--- pi 已有输出（尾部）---\n${partial.slice(-2000)}`;
+  }
   try {
     await api('POST', `/api/v2/channels/${encodeURIComponent(channelId)}/messages`, {
-      body: '抱歉，这次处理失败，请稍后再试。',
+      body: truncateChannelBody(body),
     });
   } catch (replyError) {
     console.log(`[daemon][channel-${channelId}] 发送失败说明也失败：${replyError.message}`);
@@ -614,20 +656,45 @@ async function runChannelMessage(channel, message) {
       `[daemon][channel-${channel.id}] 收到 ${message.id}，session=${session.sessionId} `
       + `模式=${session.initialized ? '续接' : '首次'} prompt=仅当前消息（无历史拼接）`,
     );
+    let output;
+    let resumeError;
     try {
-      await runPiForChannel(channel.id, prompt, cwd, session.sessionId);
+      output = await runPiForChannel(channel.id, prompt, cwd, session.sessionId);
     } catch (error) {
       if (!session.initialized) throw error;
+      resumeError = error;
       const replacementId = restartChannelSession(String(channel.id));
       session = { sessionId: replacementId, initialized: false };
       const restartPrompt = channelPrompt(channel, message.body, cwd, false);
       console.log(
         `[daemon][channel-${channel.id}] 续接失败，换新 session=${replacementId} 重开`,
       );
-      await runPiForChannel(channel.id, restartPrompt, cwd, replacementId);
+      try {
+        output = await runPiForChannel(channel.id, restartPrompt, cwd, replacementId);
+      } catch (restartError) {
+        // 第二次失败时，若新 error 的 partialOutput 无有效内容而第一次有，带上第一次的输出尾部再抛。
+        const restartPartial = String(restartError.partialOutput ?? '').trim();
+        const resumePartial = String(resumeError.partialOutput ?? '').trim();
+        if (!restartPartial && resumePartial) {
+          restartError.partialOutput = resumeError.partialOutput;
+        }
+        throw restartError;
+      }
       await reportChannelRestarted(channel.id);
     }
     markChannelSessionInitialized(String(channel.id));
+    // trimmed 仅用于判断是否为空；转发时保留 pi 原始输出（含首尾空白）。
+    const trimmed = String(output ?? '').trim();
+    const body = trimmed ? truncateChannelBody(output) : '（pi 无输出）';
+    try {
+      await api('POST', `/api/v2/channels/${encodeURIComponent(channel.id)}/messages`, { body });
+    } catch (replyError) {
+      console.log(`[daemon][channel-${channel.id}] 转发 pi 输出失败：${replyError.message}`);
+      // 不能静默丢失：降级发送失败原因 + pi 输出尾部，让用户至少收到部分内容。
+      const err = new Error(`pi 输出转发失败：${replyError.message}`);
+      err.partialOutput = output;
+      await reportChannelFailure(channel.id, err);
+    }
     console.log(`[daemon][channel-${channel.id}] pi 完成 ${message.id} session=${session.sessionId}`);
   } catch (error) {
     await reportChannelFailure(channel.id, error);
