@@ -326,6 +326,94 @@ try {
   const rotatedWhoami = await request('GET', '/api/v2/whoami', rotatedHostBearer);
   check('0k. rotated host key authenticates',
     rotatedWhoami.response.status === 200 && rotatedWhoami.data.principal?.kind === 'host');
+
+  const meWrongOld = await request('POST', '/api/v2/me/password', loginBearer, {
+    old_password: 'wrong-old-password',
+    new_password: `rest-v2-new-${Date.now()}`,
+  });
+  check('0l. /me/password rejects a wrong old password with 401',
+    meWrongOld.response.status === 401,
+    JSON.stringify(meWrongOld.data));
+  const meNewPassword = `rest-v2-new-password-${Date.now()}`;
+  const meChanged = await request('POST', '/api/v2/me/password', loginBearer, {
+    old_password: loginPassword,
+    new_password: meNewPassword,
+  });
+  check('0m. /me/password changes the password and returns ok',
+    meChanged.response.status === 200 && meChanged.data.ok === true,
+    JSON.stringify(meChanged.data));
+  const oldPasswordLogin = await request('POST', '/api/v2/login', undefined, {
+    username: `rest-v2-login-${loginPrincipalId}`,
+    password: loginPassword,
+    account_name: loginAccountName,
+  });
+  check('0n. login with the old password is rejected', oldPasswordLogin.response.status === 401);
+  const newPasswordLogin = await request('POST', '/api/v2/login', undefined, {
+    username: `rest-v2-login-${loginPrincipalId}`,
+    password: meNewPassword,
+    account_name: loginAccountName,
+  });
+  const meBearer = newPasswordLogin.data.key;
+  check('0o. login with the new password succeeds',
+    newPasswordLogin.response.status === 200 && typeof meBearer === 'string');
+  const staleLoginWhoami = await request('GET', '/api/v2/whoami', loginBearer);
+  check('0p. previous login key is revoked after password change',
+    staleLoginWhoami.response.status === 401);
+  const meKeys = await request('GET', '/api/v2/me/keys', meBearer);
+  check('0q. /me/keys lists login sessions and long-term keys together',
+    meKeys.response.status === 200
+      && Array.isArray(meKeys.data.items)
+      && meKeys.data.items.some((item) => item.label === 'login'),
+    JSON.stringify(meKeys.data));
+  const meBadScope = await request('POST', '/api/v2/me/keys', meBearer, {
+    label: 'rest-v2-me-bad',
+    scopes: ['task:read', 'scope:unknown'],
+  });
+  check('0r. unknown scope on /me/keys is rejected with 400',
+    meBadScope.response.status === 400,
+    JSON.stringify(meBadScope.data));
+  const meLongKey = await request('POST', '/api/v2/me/keys', meBearer, {
+    label: 'rest-v2-me-long',
+    scopes: ['task:read', 'post:read'],
+    expires_at: null,
+  });
+  const meLongBearer = meLongKey.data.key;
+  const meLongKeyId = meLongKey.data.api_key?.id;
+  check('0s. /me/keys issues a long-term key with plaintext shown once',
+    meLongKey.response.status === 201
+      && typeof meLongBearer === 'string'
+      && meLongKey.data.api_key?.expires_at === null
+      && !('key_hash' in (meLongKey.data.api_key ?? {})),
+    JSON.stringify(meLongKey.data));
+  const meLongWhoami = await request('GET', '/api/v2/whoami', meLongBearer);
+  check('0t. long-term key authenticates whoami',
+    meLongWhoami.response.status === 200 && meLongWhoami.data.key_id === meLongKeyId,
+    JSON.stringify(meLongWhoami.data));
+  const meLowKey = await request('POST', '/api/v2/me/keys', meBearer, {
+    label: 'rest-v2-me-low',
+    scopes: ['task:read'],
+  });
+  const meElevation = await request('POST', '/api/v2/me/keys', meLowKey.data.key, {
+    label: 'rest-v2-me-elevated',
+    scopes: ['task:read', 'moderate'],
+  });
+  console.log(`  attack me-key privilege escalation: HTTP ${meElevation.response.status}`);
+  check('0u. narrow long-term key cannot mint wider scopes',
+    meElevation.response.status === 404,
+    JSON.stringify(meElevation.data));
+  const meLongRevoked = await request('DELETE', `/api/v2/me/keys/${meLongKeyId}`, meBearer);
+  check('0v. /me/keys/:id revokes the long-term key',
+    meLongRevoked.response.status === 200 && meLongRevoked.data.ok === true,
+    JSON.stringify(meLongRevoked.data));
+  const meLongWhoamiAfter = await request('GET', '/api/v2/whoami', meLongBearer);
+  check('0w. revoked long-term key no longer authenticates',
+    meLongWhoamiAfter.response.status === 401);
+  const meForeignRevoke = await request('DELETE', `/api/v2/me/keys/${otherReadKeyId}`, meBearer);
+  console.log(`  attack me-revoke-other-principal: HTTP ${meForeignRevoke.response.status}`);
+  check('0x. revoking another principal key via /me is hidden as 404',
+    meForeignRevoke.response.status === 404,
+    JSON.stringify(meForeignRevoke.data));
+
   const note = await request('POST', '/api/v2/posts', bearer, {
     kind: 'note',
     body: 'REST v2 note',

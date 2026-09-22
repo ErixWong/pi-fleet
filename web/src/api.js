@@ -68,6 +68,10 @@ function attachmentUrl(id) {
 export const api = {
   login: (username, password) => req('POST', '/login', { username, password }),
   whoami: () => req('GET', '/whoami'),
+  changePassword: (payload) => req('POST', '/me/password', payload),
+  meKeys: () => req('GET', '/me/keys'),
+  createMeKey: (payload) => req('POST', '/me/keys', payload),
+  revokeMeKey: (id) => req('DELETE', `/me/keys/${encodeURIComponent(id)}`),
   logout() {
     localStorage.removeItem('pm_key');
   },
