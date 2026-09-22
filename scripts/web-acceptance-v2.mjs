@@ -307,7 +307,9 @@ try {
   const channelFolderPath = `/home/web-v2-${runId}/web-v2-${runId}`;
   const originalFolder = page.locator('.channel-folder-tree .channel-tree-label[title="' + channelFolderPath + '"]');
   await originalFolder.click();
-  check('点击文件夹后显示对话列表',
+  // 对话列表默认收起（只留头部栏），点开目录头部展开按钮后显示对话列表
+  await page.locator('.channel-dialog-list .channel-dialog-toggle').click();
+  check('点击文件夹后可展开对话列表',
     await page.locator('.channel-dialog-list .channel-dialog-item').count() >= 1);
   await page.locator('.channel-dialog-list .channel-dialog-item').first().click();
   await page.waitForSelector('.channel-conversation');
