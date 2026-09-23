@@ -66,6 +66,26 @@ function nowString(): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+export function channelTitleFromFirstMessage(body: string): string | null {
+  const compact = body.replace(/\s+/gu, '');
+  if (!compact) return null;
+  const characters = Array.from(compact);
+  const title = characters.length > 24
+    ? `${characters.slice(0, 24).join('')}…`
+    : compact;
+  return title.slice(0, 512);
+}
+
+export function autoNameChannelTitle(input: {
+  currentTitle: string;
+  defaultTitle: string;
+  isFirstUserMessage: boolean;
+  body: string;
+}): string | null {
+  if (!input.isFirstUserMessage || input.currentTitle !== input.defaultTitle) return null;
+  return channelTitleFromFirstMessage(input.body);
+}
+
 function online(lastSeen: string | null, offlineAfterMin: number): boolean {
   if (!lastSeen) return false;
   const seen = new Date(lastSeen).getTime();
@@ -414,11 +434,53 @@ export async function sendChannelMessage(input: {
       true,
     );
     if (!channel) throw notFound('channel not found');
-    return replyPost(conn, {
+    const isChannelAuthor = stringValue(channel.author_principal_id) === input.principal_id
+      && stringValue(channel.host_principal_id) !== input.principal_id;
+    const previousUserMessage = isChannelAuthor
+      ? rows(await conn.query(
+          `SELECT id
+             FROM post
+            WHERE parent_id = ?
+              AND root_id = ?
+              AND kind = 'message'
+              AND author_principal_id = ?
+              AND deleted_at IS NULL
+            LIMIT 1`,
+          [input.channel_id, input.channel_id, input.principal_id],
+        ))[0]
+      : null;
+    const post = await replyPost(conn, {
       parent_id: input.channel_id,
       author_principal_id: input.principal_id,
       body: input.body,
     });
+    const defaultTitle = `与 ${stringValue(channel.host_name)}`;
+    const title = autoNameChannelTitle({
+      currentTitle: stringValue(channel.title),
+      defaultTitle,
+      isFirstUserMessage: isChannelAuthor && !previousUserMessage,
+      body: input.body,
+    });
+    if (title) {
+      const editedAt = nowString();
+      const revision = numberValue(channel.revision) + 1;
+      await conn.query(
+        `UPDATE post
+            SET title = ?, edited_at = ?, revision = ?
+          WHERE id = ? AND deleted_at IS NULL`,
+        [title, editedAt, revision, input.channel_id],
+      );
+      await recordEvent(conn, {
+        account_id: input.account_id,
+        actor_principal_id: input.principal_id,
+        action: 'post.edited',
+        resource_type: 'post',
+        resource_id: input.channel_id,
+        before_state: { title: channel.title, revision: numberValue(channel.revision) },
+        after_state: { title, revision },
+      });
+    }
+    return post;
   });
 }
 

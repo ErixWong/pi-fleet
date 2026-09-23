@@ -296,8 +296,9 @@ try {
   await reportedLabel.click();
   check('无对话目录显示读取状态入口', await page.getByRole('button', { name: '发起新对话' }).count() === 1);
   await page.getByRole('button', { name: '发起新对话' }).click();
-  check('纯上报文件夹可快捷建对话',
-    await page.locator('input[aria-label="工作目录"]').inputValue() === '~/reported');
+  check('纯上报文件夹自动使用工作目录',
+    await page.locator('input[aria-label="工作目录"]').count() === 0
+      && await page.locator('.channel-dialog-list').getByText('实际工作目录：~/reported', { exact: false }).count() === 1);
   await page.fill('input[aria-label="对话标题"]', `Web 上报目录对话 ${runId}`);
   const quickChannelResponse = page.waitForResponse((response) =>
     response.request().method() === 'POST'
@@ -310,11 +311,11 @@ try {
   const channelFolderPath = `/home/web-v2-${runId}/web-v2-${runId}`;
   const originalFolder = page.locator('.channel-folder-tree .channel-tree-label[title="' + channelFolderPath + '"]');
   await originalFolder.click();
-  // 对话列表默认收起（只留头部栏），点开目录头部展开按钮后显示对话列表
-  await page.locator('.channel-dialog-list .channel-dialog-toggle').click();
-  check('点击文件夹后可展开对话列表',
-    await page.locator('.channel-dialog-list .channel-dialog-item').count() >= 1);
-  await page.locator('.channel-dialog-list .channel-dialog-item').first().click();
+  const channelSelect = page.locator('#channel-dialog-select');
+  check('对话列表改为下拉框',
+    await channelSelect.count() === 1
+      && await channelSelect.locator('option').count() >= 1
+      && (await channelSelect.locator('option').first().innerText()).includes(`Web 对话 ${runId}`));
   await page.waitForSelector('.channel-conversation');
   check('选中对话后显示消息流和 workdir',
     await page.locator('.channel-conversation').getByText(`~/web-v2-${runId}`, { exact: false }).count() >= 1);

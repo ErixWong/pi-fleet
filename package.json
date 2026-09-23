@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:v2 && npm run test:web",
     "test:v2": "node scripts/mcp-acceptance-v2.mjs --phase read && node scripts/mcp-acceptance-v2.mjs --phase write && node scripts/rest-acceptance-v2.mjs && node scripts/events-acceptance-v2.mjs && node scripts/collab-acceptance-v2.mjs",
-    "test:unit": "node --import tsx --experimental-test-module-mocks --test --test-concurrency=1 client/src/host-folders.test.mjs client/src/channel-events.test.mjs src/id.test.mjs src/util/time.test.mjs src/auth-principal.test.mjs src/service/identity.test.mjs src/service/me.test.mjs src/service/auth-cache.test.mjs src/service/host-control.test.mjs src/service/events.test.mjs src/service/posts.test.mjs src/service/resources.test.mjs src/service/task-flow.test.mjs src/service/lifecycle.test.mjs src/mcp/post-tools.test.mjs src/mcp/task-tools.test.mjs",
+    "test:unit": "node --import tsx --experimental-test-module-mocks --test --test-concurrency=1 client/src/host-folders.test.mjs client/src/channel-events.test.mjs src/id.test.mjs src/util/time.test.mjs src/auth-principal.test.mjs src/service/identity.test.mjs src/service/me.test.mjs src/service/auth-cache.test.mjs src/service/host-control.test.mjs src/service/events.test.mjs src/service/posts.test.mjs src/service/channel-title.test.mjs src/service/resources.test.mjs src/service/task-flow.test.mjs src/service/lifecycle.test.mjs src/mcp/post-tools.test.mjs src/mcp/task-tools.test.mjs",
     "test:web": "node scripts/web-acceptance-v2.mjs",
     "db:backup": "node scripts/db-backup.mjs",
     "db-rebuild": "node scripts/db-rebuild.mjs",
