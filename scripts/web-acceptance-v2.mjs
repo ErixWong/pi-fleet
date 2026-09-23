@@ -295,18 +295,17 @@ try {
 
   await reportedLabel.click();
   check('无对话目录显示读取状态入口', await page.getByRole('button', { name: '发起新对话' }).count() === 1);
-  await page.getByRole('button', { name: '发起新对话' }).click();
-  check('纯上报文件夹自动使用工作目录',
-    await page.locator('input[aria-label="工作目录"]').count() === 0
-      && await page.locator('.channel-dialog-list').getByText('实际工作目录：~/reported', { exact: false }).count() === 1);
-  await page.fill('input[aria-label="对话标题"]', `Web 上报目录对话 ${runId}`);
   const quickChannelResponse = page.waitForResponse((response) =>
     response.request().method() === 'POST'
       && response.url().endsWith('/api/v2/channels'));
-  await page.getByRole('button', { name: '创建' }).click();
+  await page.getByRole('button', { name: '发起新对话' }).click();
   const quickChannelPayload = await (await quickChannelResponse).json();
   if (quickChannelPayload.channel?.id) createdPostIds.push(quickChannelPayload.channel.id);
-  check('快捷建对话提交成功', quickChannelPayload.channel?.id && quickChannelPayload.channel?.workdir === '~/reported');
+  check('发起新对话立即创建并进入会话',
+    quickChannelPayload.channel?.id && quickChannelPayload.channel?.workdir === '~/reported');
+  await page.waitForSelector('.channel-conversation');
+  check('新会话头部显示所选目录 workdir',
+    await page.locator('.channel-conversation').getByText('工作目录：~/reported', { exact: false }).count() >= 1);
 
   const channelFolderPath = `/home/web-v2-${runId}/web-v2-${runId}`;
   const originalFolder = page.locator('.channel-folder-tree .channel-tree-label[title="' + channelFolderPath + '"]');
@@ -327,9 +326,17 @@ try {
   check('消息流使用独立滚动区域',
     messageViewport.height > 0 && ['auto', 'scroll'].includes(messageViewport.overflowY),
     JSON.stringify(messageViewport));
+  const quickChannelResponse2 = page.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && response.url().endsWith('/api/v2/channels'));
   await page.getByRole('button', { name: '发起新对话' }).click();
-  check('新建对话表单要求 workdir',
-    await page.locator('input[aria-label="工作目录"][required]').count() === 1);
+  const quickChannelPayload2 = await (await quickChannelResponse2).json();
+  if (quickChannelPayload2.channel?.id) createdPostIds.push(quickChannelPayload2.channel.id);
+  check('非上报文件夹一键建对话使用目录 workdir',
+    quickChannelPayload2.channel?.workdir === `~/web-v2-${runId}`);
+  await page.waitForSelector('.channel-conversation');
+  check('一键创建后直接进入新会话',
+    await page.locator('.channel-conversation').getByText(`工作目录：~/web-v2-${runId}`, { exact: false }).count() >= 1);
 
   console.log('== 7. 旧路由与已删前端路由不白屏 ==');
   if (channelId) {

@@ -34,8 +34,6 @@ const sending = ref(false);
 const error = ref('');
 const sendError = ref('');
 const draft = ref('');
-const newWorkdir = ref('~/tmp');
-const showCreate = ref(false);
 const sidebarOpen = ref(false);
 const refreshingFolders = ref(false);
 const messagesEl = ref(null);
@@ -126,11 +124,6 @@ const folders = computed(() => {
 const selectedFolder = computed(() =>
   folders.value.find((folder) => folder.key === selectedFolderKey.value) || null);
 const folderChannels = computed(() => selectedFolder.value?.channels || []);
-const showCreateWorkdirInput = computed(() => {
-  const workdir = newWorkdir.value.trim();
-  return !selectedFolder.value?.reported
-    || !(workdir === '~' || workdir.startsWith('~/'));
-});
 
 // ---- 目录树（按需钻目录：缓存直接渲染，未缓存走 browse 控制链路） ----
 const treeExpanded = reactive({});
@@ -535,7 +528,6 @@ function selectHost(host) {
   selectedId.value = '';
   sidebarOpen.value = false;
   syncSelection();
-  showCreate.value = false;
   sendError.value = '';
   void router.push('/channels');
 }
@@ -543,7 +535,6 @@ async function selectFolder(folder) {
   selectedFolderKey.value = folder.key;
   selectedId.value = folder.channels[0]?.id || '';
   sidebarOpen.value = false;
-  showCreate.value = false;
   sendError.value = '';
   if (selectedId.value) {
     await router.push(`/channels/${encodeURIComponent(selectedId.value)}`);
@@ -569,30 +560,22 @@ async function selectChannelFromDropdown() {
   if (channel) await selectChannel(channel);
 }
 
-function openCreateForm() {
-  if (!selectedHost.value) return;
-  newWorkdir.value = folderCreateWorkdir(selectedFolder.value, selectedHost.value);
-  error.value = '';
-  showCreate.value = true;
-}
-
 async function createChannel() {
   if (!selectedHost.value) {
     error.value = '请先选择主机';
     return;
   }
-  if (!newWorkdir.value.trim()) {
-    error.value = '工作目录不能为空';
-    return;
-  }
+  if (creating.value) return;
   creating.value = true;
   error.value = '';
   try {
+    const workdir = selectedFolder.value
+      ? folderCreateWorkdir(selectedFolder.value, selectedHost.value)
+      : '~/tmp';
     const data = await api.createChannel({
       host_principal_id: selectedHost.value.id,
-      workdir: newWorkdir.value.trim(),
+      workdir,
     });
-    showCreate.value = false;
     await refreshData();
     await selectChannel(data.channel);
   } catch (e) {
@@ -791,28 +774,10 @@ onBeforeUnmount(() => {
                 <i class="bi bi-folder2-open me-2"></i>{{ folderTitle(selectedFolder) }}
                 <span class="badge text-bg-secondary ms-2">{{ selectedFolder.channels.length }}</span>
               </div>
-              <button class="btn btn-sm btn-primary flex-shrink-0" @click="openCreateForm">
-                <i class="bi bi-plus-lg me-1"></i>发起新对话
+              <button class="btn btn-sm btn-primary flex-shrink-0" :disabled="creating" @click="createChannel">
+                <i class="bi bi-plus-lg me-1"></i>{{ creating ? '创建中…' : '发起新对话' }}
               </button>
             </div>
-            <form v-if="showCreate" class="card-body border-bottom" @submit.prevent="createChannel">
-              <div class="row g-2 align-items-end">
-                <div v-if="showCreateWorkdirInput" class="col-md-8">
-                  <label class="form-label small">工作目录 *</label>
-                  <input v-model="newWorkdir" class="form-control form-control-sm" required
-                    aria-label="工作目录" placeholder="例如 ~/projects/demo">
-                </div>
-                <div class="col-md-4 d-flex gap-2">
-                  <button class="btn btn-sm btn-primary flex-grow-1" :disabled="creating">
-                    {{ creating ? '创建中…' : '创建' }}
-                  </button>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" @click="showCreate = false">取消</button>
-                </div>
-              </div>
-              <div class="small text-secondary mt-2">
-                主机固定为「{{ hostTitle(selectedHost) }}」，实际工作目录：{{ newWorkdir.trim() || '未设置' }}，必须位于 ~ 下。
-              </div>
-            </form>
             <div v-if="!folderChannels.length" class="empty-state py-4">
               <i class="bi bi-chat-square-text"></i><strong>该文件夹暂无对话</strong><span>点击右上角发起第一段对话。</span>
             </div>
