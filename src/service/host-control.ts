@@ -1,4 +1,4 @@
-import type { PoolConnection } from 'mariadb';
+import type { PoolConnection, SqlError } from 'mariadb';
 import { newId } from '../id.js';
 import { getPool, withTransaction } from '../db/pool.js';
 import { badRequest, notFound } from '../util/errors.js';
@@ -114,14 +114,37 @@ function staleCutoffString(): string {
   return `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())} ${pad(cutoff.getHours())}:${pad(cutoff.getMinutes())}:${pad(cutoff.getSeconds())}`;
 }
 
+function isIgnorableCleanupError(error: unknown): error is SqlError {
+  return error instanceof Error
+    && error.name === 'SqlError'
+    && 'errno' in error
+    && (error.errno === 1020 || error.errno === 1213);
+}
+
 /** 把 pending 超过 TTL 的请求标记为 expired（惰性清理，读取/发起时顺带执行）。 */
-async function expireStalePending(conn: PoolConnection): Promise<void> {
-  await conn.query(
-    `UPDATE host_control_request
-        SET status = 'expired', answered_at = ?
-      WHERE status = 'pending' AND requested_at < ?`,
-    [nowString(), staleCutoffString()],
-  );
+async function expireStalePending(conn: PoolConnection, hostId: string): Promise<void> {
+  try {
+    const staleRows = rows(await conn.query(
+      `SELECT id FROM host_control_request
+        WHERE host_principal_id = ? AND status = 'pending' AND requested_at < ?`,
+      [hostId, staleCutoffString()],
+    ));
+    const staleIds = staleRows.map((row) => stringValue(row.id));
+    if (staleIds.length > 0) {
+      await conn.query(
+        `UPDATE host_control_request
+            SET status = 'expired', answered_at = ?
+          WHERE id IN (?) AND status = 'pending'`,
+        [nowString(), staleIds],
+      );
+    }
+  } catch (error) {
+    if (isIgnorableCleanupError(error)) {
+      console.log(`[host-control] stale pending cleanup skipped (errno ${error.errno})`);
+      return;
+    }
+    throw error;
+  }
 }
 
 function validateListDirPath(path: string): string {
@@ -151,7 +174,7 @@ export async function createListDirRequest(
     );
     if (rows(hostResult).length === 0) throw notFound('host not found');
 
-    await expireStalePending(conn);
+    await expireStalePending(conn, hostId);
 
     const duplicate = await conn.query(
       `SELECT id FROM host_control_request
@@ -224,7 +247,7 @@ export async function listPendingControlRequests(
 ): Promise<HostControlRequest[]> {
   return withTransaction(async (conn) => {
     await requireHostWithConnection(conn, principalId);
-    await expireStalePending(conn);
+    await expireStalePending(conn, principalId);
     const result = await conn.query(
       `SELECT id, host_principal_id, type, payload, status, result, requested_at, answered_at
          FROM host_control_request
