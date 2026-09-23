@@ -1,5 +1,15 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import {
+  computed,
+  defineComponent,
+  h,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import { renderMd } from '../md';
@@ -29,6 +39,7 @@ const newTitle = ref('');
 const showCreate = ref(false);
 const sidebarOpen = ref(false);
 const listOpen = ref(false); // 对话列表默认收起，只留头部栏，节省消息流空间
+const refreshingFolders = ref(false);
 const messagesEl = ref(null);
 let refreshTimer = null;
 let refreshing = false;
@@ -176,32 +187,18 @@ const treeNodes = computed(() => {
   return map;
 });
 
-const visibleTreeRows = computed(() => {
-  const rows = [];
-  const root = homePrefix.value;
-  if (!root || !treeNodes.value.has(root)) return rows;
-  const childrenOf = (parent) => {
-    const list = [];
-    for (const node of treeNodes.value.values()) {
-      if (node.parent === parent) list.push(node);
-    }
-    return list.sort((left, right) => {
-      const leftHot = left.channels.length > 0;
-      const rightHot = right.channels.length > 0;
-      if (leftHot !== rightHot) return rightHot ? 1 : -1;
-      return left.name.localeCompare(right.name);
-    });
-  };
-  const walk = (parent, depth) => {
-    for (const node of childrenOf(parent)) {
-      rows.push({ ...node, depth });
-      if (treeExpanded[node.path]) walk(node.path, depth + 1);
-    }
-  };
-  rows.push({ ...treeNodes.value.get(root), depth: 0 });
-  if (treeExpanded[root]) walk(root, 1);
-  return rows;
-});
+function treeChildren(parent) {
+  const list = [];
+  for (const node of treeNodes.value.values()) {
+    if (node.parent === parent) list.push(node);
+  }
+  return list.sort((left, right) => {
+    const leftHot = left.channels.length > 0;
+    const rightHot = right.channels.length > 0;
+    if (leftHot !== rightHot) return rightHot ? 1 : -1;
+    return left.name.localeCompare(right.name);
+  });
+}
 
 // 有对话的目录置顶展开（祖先链一并展开保证可见）。同一目录只自动展开一次，
 // 用户手动收起后（watch 不再覆盖）保持收起状态。
@@ -305,6 +302,75 @@ function retryBrowse(path) {
   browseEmpty[path] = false;
   void requestBrowse(path);
 }
+
+const ChannelTreeNode = defineComponent({
+  name: 'ChannelTreeNode',
+  props: {
+    node: { type: Object, required: true },
+  },
+  setup(props) {
+    return () => {
+      const node = props.node;
+      const expanded = Boolean(treeExpanded[node.path]);
+      const children = treeChildren(node.path);
+      const status = browseStatus[node.path];
+      const rowChildren = [
+        h('button', {
+          type: 'button',
+          class: 'channel-tree-toggle',
+          'aria-label': `${expanded ? '收起 ' : '展开 '}${node.name}`,
+          onClick: (event) => {
+            event.stopPropagation();
+            toggleTreeNode(node);
+          },
+        }, [
+          h('i', { class: ['bi', expanded ? 'bi-chevron-down' : 'bi-chevron-right'] }),
+        ]),
+        h('button', {
+          type: 'button',
+          class: ['channel-tree-label', selectedFolderKey.value === node.path ? 'active' : ''],
+          title: node.path,
+          onClick: () => selectTreeNode(node),
+        }, [
+          h('i', { class: 'bi bi-folder2' }),
+          h('strong', { class: 'text-truncate' }, node.name),
+          h('span', { class: 'badge text-bg-secondary' }, String(node.channels.length)),
+        ]),
+      ];
+
+      if (status === 'loading') {
+        rowChildren.push(h('span', { class: 'small text-secondary channel-tree-status' }, '正在读取主机目录…'));
+      } else if (status === 'error') {
+        rowChildren.push(h('button', {
+          type: 'button',
+          class: 'btn btn-sm btn-link text-danger p-0 channel-tree-status',
+          title: browseErrors[node.path],
+          onClick: (event) => {
+            event.stopPropagation();
+            retryBrowse(node.path);
+          },
+        }, `${browseErrors[node.path] || '读取失败'}，重试`));
+      } else if (browseEmpty[node.path]) {
+        rowChildren.push(h('span', { class: 'small text-secondary channel-tree-status' }, '（空目录）'));
+      }
+
+      return h('div', { class: 'channel-tree-branch' }, [
+        h('div', {
+          class: [
+            'list-group-item',
+            'bg-transparent',
+            'channel-tree-row',
+            selectedFolderKey.value === node.path ? 'active' : '',
+          ],
+        }, rowChildren),
+        expanded && children.length
+          ? h('div', { class: 'channel-tree-children' }, children.map((child) =>
+            h(ChannelTreeNode, { key: child.path, node: child })))
+          : null,
+      ]);
+    };
+  },
+});
 
 async function selectTreeNode(row) {
   const group = folders.value.find((folder) => folder.key === row.path);
@@ -419,6 +485,30 @@ async function refreshData() {
     error.value = e.message;
   } finally {
     refreshing = false;
+  }
+}
+
+async function refreshFolders() {
+  if (!selectedHost.value || refreshingFolders.value) return;
+  refreshingFolders.value = true;
+  try {
+    for (const path of Object.keys(browsedPaths)) delete browsedPaths[path];
+    for (const path of Object.keys(browseEmpty)) delete browseEmpty[path];
+    for (const path of Object.keys(browseErrors)) delete browseErrors[path];
+
+    const root = homePrefix.value;
+    if (useTree.value && root) {
+      const paths = new Set([root]);
+      for (const [path, expanded] of Object.entries(treeExpanded)) {
+        if (expanded && (path === root || path.startsWith(`${root}/`))) paths.add(path);
+      }
+      for (const path of paths) {
+        if (browseStatus[path] !== 'loading') void requestBrowse(path);
+      }
+    }
+    await refreshData();
+  } finally {
+    refreshingFolders.value = false;
   }
 }
 
@@ -637,7 +727,15 @@ onBeforeUnmount(() => {
 
       <section class="channel-panel-section channel-folder-panel">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <strong>文件夹</strong><span class="text-secondary small">{{ folders.length }} 个</span>
+          <strong>文件夹</strong>
+          <div class="d-flex align-items-center gap-1">
+            <button type="button" class="btn btn-sm btn-ghost channel-folder-refresh"
+              :class="{ spin: refreshingFolders }" :disabled="refreshingFolders || !selectedHost"
+              aria-label="刷新目录" title="实时读取主机目录" @click="refreshFolders">
+              <i class="bi bi-arrow-repeat"></i>
+            </button>
+            <span class="text-secondary small">{{ folders.length }} 个</span>
+          </div>
         </div>
         <div v-if="!selectedHost" class="empty-state py-4">选择主机查看文件夹</div>
         <div v-else-if="!folders.length" class="empty-state py-4">
@@ -645,34 +743,7 @@ onBeforeUnmount(() => {
         </div>
         <template v-else>
           <div v-if="useTree" class="list-group list-group-flush channel-folder-list channel-folder-tree">
-            <div v-for="row in visibleTreeRows" :key="row.path"
-              class="list-group-item bg-transparent channel-tree-row"
-              :class="{ active: selectedFolderKey === row.path }">
-              <button type="button" class="channel-tree-toggle"
-                :aria-label="(treeExpanded[row.path] ? '收起 ' : '展开 ') + row.name"
-                :style="{ marginLeft: `${row.depth * 14}px` }"
-                @click.stop="toggleTreeNode(row)">
-                <i class="bi" :class="treeExpanded[row.path] ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
-              </button>
-              <button type="button" class="channel-tree-label"
-                :class="{ active: selectedFolderKey === row.path }" :title="row.path"
-                @click="selectTreeNode(row)">
-                <i class="bi bi-folder2"></i>
-                <strong class="text-truncate">{{ row.name }}</strong>
-                <span class="badge text-bg-secondary">{{ row.channels.length }}</span>
-              </button>
-              <span v-if="browseStatus[row.path] === 'loading'" class="small text-secondary channel-tree-status">
-                正在读取主机目录…
-              </span>
-              <button v-else-if="browseStatus[row.path] === 'error'" type="button"
-                class="btn btn-sm btn-link text-danger p-0 channel-tree-status" :title="browseErrors[row.path]"
-                @click.stop="retryBrowse(row.path)">
-                {{ browseErrors[row.path] || '读取失败' }}，重试
-              </button>
-              <span v-else-if="browseEmpty[row.path]" class="small text-secondary channel-tree-status">
-                （空目录）
-              </span>
-            </div>
+            <ChannelTreeNode v-if="treeNodes.get(homePrefix)" :node="treeNodes.get(homePrefix)" />
           </div>
           <div v-else class="list-group list-group-flush channel-folder-list">
             <button v-for="folder in folders" :key="folder.key" type="button"

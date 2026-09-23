@@ -237,11 +237,13 @@ try {
   const reportedLabel = page.locator('.channel-folder-tree .channel-tree-label[title="' + reportedFolderPath + '"]');
   check('上报目录出现在文件夹树', await reportedLabel.count() === 1);
   check('树形渲染根节点与多级缩进', await (async () => {
-    const rootToggle = page.locator('.channel-folder-tree .channel-tree-toggle').first();
-    const reportedRowIndent = reportedLabel.locator('xpath=ancestor::*[contains(@class,"channel-tree-row")]');
-    const reportedMargin = await reportedRowIndent.locator('.channel-tree-toggle').evaluate((el) => el.style.marginLeft);
-    const rootMargin = await rootToggle.evaluate((el) => el.style.marginLeft);
-    return rootMargin === '0px' && reportedMargin === '14px';
+    // 嵌套渲染：根行直接挂在树容器下（无缩进容器祖先），上报目录行嵌在
+    // .channel-tree-children 子容器内（缩进 + 参考线由容器提供）。
+    const rootRow = page.locator('.channel-folder-tree > .channel-tree-branch > .channel-tree-row').first();
+    const rootOk = await rootRow.count() === 1;
+    const nesting = await reportedLabel
+      .locator('xpath=ancestor::div[contains(@class,"channel-tree-children")]').count();
+    return rootOk && nesting >= 1;
   })());
   check('有对话目录置顶并带对话数徽章', await (async () => {
     const rows = page.locator('.channel-folder-tree .channel-tree-row');
@@ -279,7 +281,8 @@ try {
   check('browse 结果渲染为新树节点', true);
   const sub1Row = page.locator('.channel-folder-tree .channel-tree-row', { has: page.locator('.channel-tree-label[title="' + reportedFolderPath + '/sub1"]') });
   check('新节点按层级缩进（深度 2）',
-    (await sub1Row.locator('.channel-tree-toggle').evaluate((el) => el.style.marginLeft)) === '28px');
+    // 深度 2 = 祖先链上有两层 .channel-tree-children 缩进容器
+    (await sub1Row.locator('xpath=ancestor::div[contains(@class,"channel-tree-children")]').count()) === 2);
 
   console.log('== 6b. 缓存展开零 browse 请求 ==');
   await reportedRow.locator('.channel-tree-toggle').click(); // 收起

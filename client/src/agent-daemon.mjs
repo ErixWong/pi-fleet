@@ -1221,7 +1221,6 @@ async function startTaskPolling() {
   if (taskPolling) return;
   taskPolling = true;
   while (true) {
-    void reportHostFolders();
     await pollTasks();
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
