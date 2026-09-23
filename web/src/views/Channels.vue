@@ -141,9 +141,8 @@ function parentPathOf(path) {
   const root = homePrefix.value;
   if (!root || path === root) return null;
   if (!path.startsWith(`${root}/`)) return null;
-  const rest = path.slice(root.length + 1);
-  const idx = rest.indexOf('/');
-  return idx === -1 ? root : `${root}/${rest.slice(0, idx)}`;
+  const idx = path.lastIndexOf('/');
+  return idx <= root.length ? root : path.slice(0, idx);
 }
 
 function childrenCached(path) {

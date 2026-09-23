@@ -284,6 +284,32 @@ try {
     // 深度 2 = 祖先链上有两层 .channel-tree-children 缩进容器
     (await sub1Row.locator('xpath=ancestor::div[contains(@class,"channel-tree-children")]').count()) === 2);
 
+  // 深度 ≥3 回归：browse sub1 返回其子目录 sub2，验证 sub2 挂在 sub1 下（深度 3）。
+  // 旧 bug（parentPathOf 取 root 后第一段）会把 sub2 平铺到 reported 下（仅 2 层缩进）。
+  await sub1Row.locator('.channel-tree-toggle').click();
+  const browseResponse2 = await page.waitForResponse((response) =>
+    response.request().method() === 'POST' && response.url().endsWith('/browse'), { timeout: 10_000 });
+  const browsePayload2 = await browseResponse2.json();
+  const browseRequestId2 = browsePayload2.request_id;
+  check('深层节点发起 browse 请求', typeof browseRequestId2 === 'string' && browseRequestId2.length > 0);
+  const previousBearer3 = bearer;
+  bearer = createdHostBearer;
+  const controlAnswer2 = await request('POST', `/api/v2/hosts/controls/${encodeURIComponent(browseRequestId2)}/results`, {
+    entries: [{ path: `${reportedFolderPath}/sub1/sub2` }],
+  });
+  bearer = previousBearer3;
+  check('daemon 回传深层 list_dir 结果被接受', controlAnswer2.response.status === 200);
+  await page.waitForSelector('.channel-folder-tree .channel-tree-label[title="' + reportedFolderPath + '/sub1/sub2"]', { timeout: 20_000 });
+  check('深层目录按直接父目录嵌套（深度 3，防平铺回归）', await (async () => {
+    // 修复后 sub2 挂在 sub1 下：祖先链三层缩进容器；旧实现平铺到 reported 下只有两层。
+    const sub2Row = page.locator('.channel-folder-tree .channel-tree-row', {
+      has: page.locator('.channel-tree-label[title="' + reportedFolderPath + '/sub1/sub2"]'),
+    });
+    const sub2Depth = await sub2Row.locator('xpath=ancestor::div[contains(@class,"channel-tree-children")]').count();
+    const sub1Depth = await sub1Row.locator('xpath=ancestor::div[contains(@class,"channel-tree-children")]').count();
+    return sub2Depth === 3 && sub1Depth === 2;
+  })());
+
   console.log('== 6b. 缓存展开零 browse 请求 ==');
   await reportedRow.locator('.channel-tree-toggle').click(); // 收起
   await page.waitForTimeout(300);
