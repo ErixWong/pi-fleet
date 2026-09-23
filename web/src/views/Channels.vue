@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
+import { renderMd } from '../md';
 import StatusBadge from '../components/StatusBadge.vue';
 
 const route = useRoute();
@@ -27,6 +28,7 @@ const newWorkdir = ref('~/tmp');
 const newTitle = ref('');
 const showCreate = ref(false);
 const sidebarOpen = ref(false);
+const listOpen = ref(false); // 对话列表默认收起，只留头部栏，节省消息流空间
 const messagesEl = ref(null);
 let refreshTimer = null;
 let refreshing = false;
@@ -118,7 +120,9 @@ const folderChannels = computed(() => selectedFolder.value?.channels || []);
 
 // ---- 目录树（按需钻目录：缓存直接渲染，未缓存走 browse 控制链路） ----
 const treeExpanded = reactive({});
+const autoExpanded = new Set(); // 记录已自动展开过的目录 key，手动收起后不再被 watch 重新展开
 const browseStatus = reactive({}); // path -> 'loading' | 'error' | 'done'
+const browseEmpty = reactive({}); // path -> browse 返回 0 个子目录（给"展开无内容"一个明确反馈）
 const browseErrors = reactive({});
 const browsedPaths = reactive({});
 const browseSeq = reactive({}); // path -> 正在轮询的 request_id
@@ -199,16 +203,25 @@ const visibleTreeRows = computed(() => {
   return rows;
 });
 
-// 有对话的目录置顶展开（祖先链一并展开保证可见）。
+// 有对话的目录置顶展开（祖先链一并展开保证可见）。同一目录只自动展开一次，
+// 用户手动收起后（watch 不再覆盖）保持收起状态。
 watch(folders, () => {
   if (!useTree.value) return;
   for (const group of folders.value) {
     if (group.channels.length === 0) continue;
-    treeExpanded[group.key] = true;
     let parent = parentPathOf(group.key);
+    const chain = [];
     while (parent) {
-      treeExpanded[parent] = true;
+      chain.push(parent);
       parent = parentPathOf(parent);
+    }
+    for (const ancestor of chain.reverse()) {
+      treeExpanded[ancestor] = true;
+      autoExpanded.add(ancestor);
+    }
+    if (!autoExpanded.has(group.key)) {
+      treeExpanded[group.key] = true;
+      autoExpanded.add(group.key);
     }
   }
 });
@@ -236,7 +249,6 @@ function maybeBrowse(path) {
   if (childrenCached(path) || hasKnownChildren(path)) return;
   void requestBrowse(path);
 }
-
 async function refreshHosts() {
   const hostData = await api.hosts();
   hosts.value = hostData.items ?? [];
@@ -268,6 +280,10 @@ async function pollBrowse(requestId, path) {
         browsedPaths[path] = true;
         browseStatus[path] = 'done';
         await refreshHosts();
+        // browse 成功但没有子目录：给个明确反馈，否则看起来像"点不开"
+        const children = (selectedHost.value?.folders || [])
+          .some((folder) => String(folder?.path || '').startsWith(`${path}/`));
+        if (!children && !hasKnownChildren(path)) browseEmpty[path] = true;
         return;
       }
       if (request.status === 'expired') {
@@ -286,6 +302,7 @@ async function pollBrowse(requestId, path) {
 function retryBrowse(path) {
   browsedPaths[path] = false;
   browseStatus[path] = '';
+  browseEmpty[path] = false;
   void requestBrowse(path);
 }
 
@@ -429,7 +446,6 @@ function selectHost(host) {
   sendError.value = '';
   void router.push('/channels');
 }
-
 async function selectFolder(folder) {
   selectedFolderKey.value = folder.key;
   selectedId.value = folder.channels[0]?.id || '';
@@ -449,6 +465,7 @@ async function selectChannel(channel) {
   selectedHostId.value = channel.host.id;
   selectedFolderKey.value = folderKey(channel, selectedHost.value);
   sidebarOpen.value = false;
+  listOpen.value = false; // 选中对话后收起列表，把空间让给消息流
   sendError.value = '';
   await router.push(`/channels/${encodeURIComponent(channel.id)}`);
   await refreshSelectedMessages();
@@ -652,6 +669,9 @@ onBeforeUnmount(() => {
                 @click.stop="retryBrowse(row.path)">
                 {{ browseErrors[row.path] || '读取失败' }}，重试
               </button>
+              <span v-else-if="browseEmpty[row.path]" class="small text-secondary channel-tree-status">
+                （空目录）
+              </span>
             </div>
           </div>
           <div v-else class="list-group list-group-flush channel-folder-list">
@@ -688,13 +708,15 @@ onBeforeUnmount(() => {
           <span>从左侧选择主机和工作目录，查看该目录下的对话。</span>
         </div>
         <template v-else>
-          <section class="card channel-dialog-list">
+          <section class="card channel-dialog-list" :class="{ 'is-open': listOpen }">
             <div class="card-header d-flex justify-content-between align-items-center gap-2">
-              <div>
-                <strong><i class="bi bi-folder2-open me-2"></i>{{ folderTitle(selectedFolder) }}</strong>
-                <div class="small text-secondary mt-1">{{ selectedFolder.channels.length }} 个对话 · {{ selectedHost ? hostTitle(selectedHost) : '' }}</div>
-              </div>
-              <button class="btn btn-sm btn-primary" @click="openCreateForm">
+              <button type="button" class="btn btn-sm btn-ghost channel-dialog-toggle text-start"
+                :aria-expanded="listOpen" @click="listOpen = !listOpen">
+                <i class="bi me-2" :class="listOpen ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+                <i class="bi bi-folder2-open me-2"></i>{{ folderTitle(selectedFolder) }}
+                <span class="badge text-bg-secondary ms-2">{{ selectedFolder.channels.length }}</span>
+              </button>
+              <button class="btn btn-sm btn-primary flex-shrink-0" @click="openCreateForm">
                 <i class="bi bi-plus-lg me-1"></i>发起新对话
               </button>
             </div>
@@ -721,7 +743,7 @@ onBeforeUnmount(() => {
             <div v-if="!folderChannels.length" class="empty-state py-4">
               <i class="bi bi-chat-square-text"></i><strong>该文件夹暂无对话</strong><span>点击右上角发起第一段对话。</span>
             </div>
-            <div v-else class="list-group list-group-flush channel-dialog-items">
+            <div v-else-if="listOpen || !selectedId" class="list-group list-group-flush channel-dialog-items">
               <button v-for="channel in folderChannels" :key="channel.id" type="button"
                 class="list-group-item list-group-item-action bg-transparent text-start channel-dialog-item"
                 :class="{ active: String(selectedId) === String(channel.id) }" @click="selectChannel(channel)">
@@ -764,7 +786,7 @@ onBeforeUnmount(() => {
                   <div v-for="message in selectedMessages" :key="message.id" class="channel-message-row" :class="{ mine: isMine(message) }">
                     <div class="channel-message-bubble">
                       <div class="channel-message-author">{{ isMine(message) ? '我' : (message.author?.name || '主机') }}</div>
-                      <div class="channel-message-body">{{ message.body }}</div>
+                      <div class="channel-message-body md-content" v-html="renderMd(message.body)"></div>
                       <time>{{ fmtTime(message.created_at) }}</time>
                     </div>
                   </div>

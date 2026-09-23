@@ -1139,6 +1139,9 @@ code { color: var(--code-text); }
   min-height: 0;
 }
 .channel-folder-tree .channel-tree-row.active {
+  /* 覆盖 Bootstrap .list-group-item.active 的白色前景（bg 被 bg-transparent 抹掉后
+     浅色主题下白字配浅底不可见）；不用 !important，靠更高优先级覆盖 */
+  color: var(--text-strong);
   background: var(--accent-soft);
   border-left: 3px solid var(--accent);
 }
@@ -1193,9 +1196,18 @@ code { color: var(--code-text); }
   border-radius: 0;
 }
 .channel-dialog-list {
-  flex: 0 1 38%;
+  flex: 0 0 auto; /* 收起时只占头部栏高度，不再吃掉主区 38% */
   display: flex;
   flex-direction: column;
+}
+.channel-dialog-list.is-open { flex: 0 1 38%; }
+.channel-dialog-toggle {
+  min-width: 0;
+  padding: 0.1rem 0.25rem;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .channel-dialog-list > .card-header,
 .channel-dialog-list > form { flex-shrink: 0; }
@@ -1228,7 +1240,7 @@ code { color: var(--code-text); }
   background: var(--accent-soft);
 }
 .channel-message-author { color: var(--accent-text); font-size: 0.75rem; font-weight: 700; margin-bottom: 0.2rem; }
-.channel-message-body { line-height: 1.55; }
+.channel-message-body { line-height: 1.55; white-space: normal; }
 .channel-message-bubble time { display: block; color: var(--text-faint); font-size: 0.7rem; margin-top: 0.35rem; }
 .channel-composer { flex-shrink: 0; padding: 0.85rem 1rem 1rem; border-top: 1px solid var(--border-soft); }
 .channel-composer textarea { resize: vertical; min-height: 48px; }
@@ -1264,6 +1276,6 @@ code { color: var(--code-text); }
     z-index: 8;
     display: block;
   }
-  .channel-dialog-list { flex-basis: 42%; }
+  .channel-dialog-list.is-open { flex-basis: 42%; }
   .channel-message-bubble { max-width: 88%; }
 }
