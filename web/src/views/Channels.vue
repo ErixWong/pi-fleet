@@ -35,7 +35,6 @@ const error = ref('');
 const sendError = ref('');
 const draft = ref('');
 const newWorkdir = ref('~/tmp');
-const newTitle = ref('');
 const showCreate = ref(false);
 const sidebarOpen = ref(false);
 const refreshingFolders = ref(false);
@@ -573,7 +572,6 @@ async function selectChannelFromDropdown() {
 function openCreateForm() {
   if (!selectedHost.value) return;
   newWorkdir.value = folderCreateWorkdir(selectedFolder.value, selectedHost.value);
-  newTitle.value = '';
   error.value = '';
   showCreate.value = true;
 }
@@ -593,7 +591,6 @@ async function createChannel() {
     const data = await api.createChannel({
       host_principal_id: selectedHost.value.id,
       workdir: newWorkdir.value.trim(),
-      ...(newTitle.value.trim() ? { title: newTitle.value.trim() } : {}),
     });
     showCreate.value = false;
     await refreshData();
@@ -800,16 +797,12 @@ onBeforeUnmount(() => {
             </div>
             <form v-if="showCreate" class="card-body border-bottom" @submit.prevent="createChannel">
               <div class="row g-2 align-items-end">
-                <div v-if="showCreateWorkdirInput" class="col-md-5">
+                <div v-if="showCreateWorkdirInput" class="col-md-8">
                   <label class="form-label small">工作目录 *</label>
                   <input v-model="newWorkdir" class="form-control form-control-sm" required
                     aria-label="工作目录" placeholder="例如 ~/projects/demo">
                 </div>
-                <div class="col-md-5">
-                  <label class="form-label small">对话标题</label>
-                  <input v-model="newTitle" class="form-control form-control-sm" aria-label="对话标题" placeholder="可选">
-                </div>
-                <div class="col-md-2 d-flex gap-2">
+                <div class="col-md-4 d-flex gap-2">
                   <button class="btn btn-sm btn-primary flex-grow-1" :disabled="creating">
                     {{ creating ? '创建中…' : '创建' }}
                   </button>
