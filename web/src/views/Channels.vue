@@ -35,10 +35,8 @@ const error = ref('');
 const sendError = ref('');
 const draft = ref('');
 const newWorkdir = ref('~/tmp');
-const newTitle = ref('');
 const showCreate = ref(false);
 const sidebarOpen = ref(false);
-const listOpen = ref(false); // 对话列表默认收起，只留头部栏，节省消息流空间
 const refreshingFolders = ref(false);
 const messagesEl = ref(null);
 let refreshTimer = null;
@@ -128,6 +126,11 @@ const folders = computed(() => {
 const selectedFolder = computed(() =>
   folders.value.find((folder) => folder.key === selectedFolderKey.value) || null);
 const folderChannels = computed(() => selectedFolder.value?.channels || []);
+const showCreateWorkdirInput = computed(() => {
+  const workdir = newWorkdir.value.trim();
+  return !selectedFolder.value?.reported
+    || !(workdir === '~' || workdir.startsWith('~/'));
+});
 
 // ---- 目录树（按需钻目录：缓存直接渲染，未缓存走 browse 控制链路） ----
 const treeExpanded = reactive({});
@@ -555,16 +558,20 @@ async function selectChannel(channel) {
   selectedHostId.value = channel.host.id;
   selectedFolderKey.value = folderKey(channel, selectedHost.value);
   sidebarOpen.value = false;
-  listOpen.value = false; // 选中对话后收起列表，把空间让给消息流
   sendError.value = '';
   await router.push(`/channels/${encodeURIComponent(channel.id)}`);
   await refreshSelectedMessages();
 }
 
+async function selectChannelFromDropdown() {
+  const channel = folderChannels.value.find((item) =>
+    String(item.id) === String(selectedId.value));
+  if (channel) await selectChannel(channel);
+}
+
 function openCreateForm() {
   if (!selectedHost.value) return;
   newWorkdir.value = folderCreateWorkdir(selectedFolder.value, selectedHost.value);
-  newTitle.value = '';
   error.value = '';
   showCreate.value = true;
 }
@@ -584,7 +591,6 @@ async function createChannel() {
     const data = await api.createChannel({
       host_principal_id: selectedHost.value.id,
       workdir: newWorkdir.value.trim(),
-      ...(newTitle.value.trim() ? { title: newTitle.value.trim() } : {}),
     });
     showCreate.value = false;
     await refreshData();
@@ -629,7 +635,7 @@ async function sendMessage() {
     cursors[selectedChannel.value.id] = data.post_id;
     loaded[selectedChannel.value.id] = true;
     draft.value = '';
-    await refreshSelectedMessages();
+    await refreshData();
   } catch (e) {
     sendError.value = e.message;
   } finally {
@@ -779,53 +785,45 @@ onBeforeUnmount(() => {
           <span>从左侧选择主机和工作目录，查看该目录下的对话。</span>
         </div>
         <template v-else>
-          <section class="card channel-dialog-list" :class="{ 'is-open': listOpen }">
+          <section class="card channel-dialog-list">
             <div class="card-header d-flex justify-content-between align-items-center gap-2">
-              <button type="button" class="btn btn-sm btn-ghost channel-dialog-toggle text-start"
-                :aria-expanded="listOpen" @click="listOpen = !listOpen">
-                <i class="bi me-2" :class="listOpen ? 'bi-chevron-down' : 'bi-chevron-right'"></i>
+              <div class="d-flex align-items-center gap-2 min-w-0">
                 <i class="bi bi-folder2-open me-2"></i>{{ folderTitle(selectedFolder) }}
                 <span class="badge text-bg-secondary ms-2">{{ selectedFolder.channels.length }}</span>
-              </button>
+              </div>
               <button class="btn btn-sm btn-primary flex-shrink-0" @click="openCreateForm">
                 <i class="bi bi-plus-lg me-1"></i>发起新对话
               </button>
             </div>
             <form v-if="showCreate" class="card-body border-bottom" @submit.prevent="createChannel">
               <div class="row g-2 align-items-end">
-                <div class="col-md-5">
+                <div v-if="showCreateWorkdirInput" class="col-md-8">
                   <label class="form-label small">工作目录 *</label>
                   <input v-model="newWorkdir" class="form-control form-control-sm" required
                     aria-label="工作目录" placeholder="例如 ~/projects/demo">
                 </div>
-                <div class="col-md-5">
-                  <label class="form-label small">对话标题</label>
-                  <input v-model="newTitle" class="form-control form-control-sm" aria-label="对话标题" placeholder="可选">
-                </div>
-                <div class="col-md-2 d-flex gap-2">
+                <div class="col-md-4 d-flex gap-2">
                   <button class="btn btn-sm btn-primary flex-grow-1" :disabled="creating">
                     {{ creating ? '创建中…' : '创建' }}
                   </button>
                   <button type="button" class="btn btn-sm btn-outline-secondary" @click="showCreate = false">取消</button>
                 </div>
               </div>
-              <div class="small text-secondary mt-2">主机固定为「{{ hostTitle(selectedHost) }}」，工作目录必须位于 ~ 下。</div>
+              <div class="small text-secondary mt-2">
+                主机固定为「{{ hostTitle(selectedHost) }}」，实际工作目录：{{ newWorkdir.trim() || '未设置' }}，必须位于 ~ 下。
+              </div>
             </form>
             <div v-if="!folderChannels.length" class="empty-state py-4">
               <i class="bi bi-chat-square-text"></i><strong>该文件夹暂无对话</strong><span>点击右上角发起第一段对话。</span>
             </div>
-            <div v-else-if="listOpen || !selectedId" class="list-group list-group-flush channel-dialog-items">
-              <button v-for="channel in folderChannels" :key="channel.id" type="button"
-                class="list-group-item list-group-item-action bg-transparent text-start channel-dialog-item"
-                :class="{ active: String(selectedId) === String(channel.id) }" @click="selectChannel(channel)">
-                <div class="d-flex align-items-center gap-2">
-                  <i class="bi bi-chat-left-text"></i>
-                  <strong class="text-truncate">{{ channel.title || '未命名对话' }}</strong>
-                  <span class="badge text-bg-secondary ms-auto">{{ channel.message_count }}</span>
-                </div>
-                <div class="small opacity-75 mt-1 text-truncate">工作目录：{{ channel.workdir || '默认（~/tmp）' }}</div>
-                <div class="small opacity-50 mt-1">{{ fmtTime(channel.last_activity_at) }}</div>
-              </button>
+            <div v-else class="card-body py-2">
+              <label class="visually-hidden" for="channel-dialog-select">选择对话</label>
+              <select id="channel-dialog-select" v-model="selectedId" class="form-select form-select-sm"
+                aria-label="选择对话" @change="selectChannelFromDropdown">
+                <option v-for="channel in folderChannels" :key="channel.id" :value="channel.id">
+                  {{ channel.title || '未命名对话' }}（{{ channel.message_count }} 条消息）
+                </option>
+              </select>
             </div>
           </section>
 
