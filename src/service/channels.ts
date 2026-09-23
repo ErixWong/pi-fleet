@@ -17,6 +17,7 @@ interface DbRow {
 export interface ChannelMessage {
   id: string;
   author_principal_id: string;
+  author_kind: string;
   author: { id: string; name: string } | null;
   body: string;
   created_at: string;
@@ -76,6 +77,7 @@ function messageFromRow(row: DbRow, prefix = ''): ChannelMessage {
   return {
     id: stringValue(row[`${prefix}id`] ?? row.id),
     author_principal_id: stringValue(row[`${prefix}author_principal_id`] ?? row.author_principal_id),
+    author_kind: stringValue(row[`${prefix}author_kind`] ?? row.author_kind),
     author: authorId === null || authorId === undefined
       ? null
       : {
@@ -375,7 +377,7 @@ export async function listChannelMessages(input: {
   }
   const result = await getPool().query(
     `SELECT m.id, m.author_principal_id, m.body, m.created_at,
-            p.id AS author_id, p.name AS author_name
+            p.id AS author_id, p.name AS author_name, p.kind AS author_kind
        FROM post m
        JOIN principal p ON p.id = m.author_principal_id
       WHERE m.parent_id = ?
