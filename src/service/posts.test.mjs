@@ -241,6 +241,263 @@ test('软删保留行但线程和详情读取不返回已删 post', { concurrenc
   assert.equal(await getPostDetail(post.id), null);
 });
 
+function placeholders(list) {
+  return list.map(() => '?').join(', ');
+}
+
+test('级联删除：删根节点软删整树（任务+子任务+回帖）同时间戳并逐行记录事件', { concurrency: false }, async () => {
+  const root = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'cascade root',
+    body: 'root',
+    visibility: 'private',
+    task: { deliverable_spec: '{"format":"text"}' },
+  });
+  postIds.push(root.id);
+  const sub = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'cascade sub',
+    body: 'sub',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: root.id,
+    },
+  });
+  postIds.push(sub.id);
+  const subReply = await replyPost({
+    parent_id: sub.id,
+    author_principal_id: recipientOne.id,
+    body: 'reply on sub',
+  });
+  postIds.push(subReply.id);
+  const subReplyNested = await replyPost({
+    parent_id: subReply.id,
+    author_principal_id: recipientTwo.id,
+    body: 'nested reply on sub',
+  });
+  postIds.push(subReplyNested.id);
+  const rootReply = await replyPost({
+    parent_id: root.id,
+    author_principal_id: recipientOne.id,
+    body: 'reply on root',
+  });
+  postIds.push(rootReply.id);
+
+  const before = await getPostDetail(sub.id);
+  assert.equal(before.ancestry.length, 1);
+  assert.equal(before.ancestry[0].id, root.id);
+
+  await deletePost(root.id);
+
+  const ids = [root.id, sub.id, subReply.id, subReplyNested.id, rootReply.id];
+  const rows = await getPool().query(
+    `SELECT id, deleted_at FROM post WHERE id IN (${placeholders(ids)})`,
+    ids,
+  );
+  assert.equal(rows.length, ids.length);
+  const timestamps = new Set(rows.map((row) => String(row.deleted_at)));
+  assert.equal(timestamps.size, 1, '整树 deleted_at 应统一');
+  const eventRows = await getPool().query(
+    `SELECT resource_id FROM event
+      WHERE action = 'post.deleted' AND resource_id IN (${placeholders(ids)})`,
+    ids,
+  );
+  assert.equal(eventRows.length, ids.length, '每行应各有一条 post.deleted 事件');
+  assert.deepEqual(new Set(eventRows.map((row) => String(row.resource_id))), new Set(ids));
+  assert.equal(await getPostDetail(root.id), null);
+  assert.equal(await getPostDetail(sub.id), null);
+});
+
+test('级联删除：删中间节点只影响其后代，父帖与兄弟存活', { concurrency: false }, async () => {
+  const root = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'mid cascade root',
+    body: 'root',
+    visibility: 'private',
+    task: { deliverable_spec: '{"format":"text"}' },
+  });
+  postIds.push(root.id);
+  const mid = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'mid cascade mid',
+    body: 'mid',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: root.id,
+    },
+  });
+  postIds.push(mid.id);
+  const leaf = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'mid cascade leaf',
+    body: 'leaf',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: mid.id,
+    },
+  });
+  postIds.push(leaf.id);
+  const sibling = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'mid cascade sibling',
+    body: 'sibling',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: root.id,
+    },
+  });
+  postIds.push(sibling.id);
+  const rootReply = await replyPost({
+    parent_id: root.id,
+    author_principal_id: recipientOne.id,
+    body: 'reply on root',
+  });
+  postIds.push(rootReply.id);
+  const midReply = await replyPost({
+    parent_id: mid.id,
+    author_principal_id: recipientOne.id,
+    body: 'reply on mid',
+  });
+  postIds.push(midReply.id);
+
+  await deletePost(mid.id);
+
+  const pool = getPool();
+  const rows = await pool.query(
+    `SELECT id, deleted_at FROM post WHERE id IN (${placeholders([mid.id, leaf.id, midReply.id])})`,
+    [mid.id, leaf.id, midReply.id],
+  );
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((row) => row.deleted_at));
+  const rootRows = await pool.query(
+    `SELECT deleted_at FROM post WHERE id IN (${placeholders([root.id, sibling.id, rootReply.id])})`,
+    [root.id, sibling.id, rootReply.id],
+  );
+  assert.ok(rootRows.every((row) => !row.deleted_at), '父任务、兄弟任务和父帖回帖应存活');
+  const detail = await getPostDetail(root.id);
+  assert.ok(detail);
+  assert.deepEqual(detail.children.map((child) => child.post_id), [sibling.id]);
+  const eventRows = await pool.query(
+    `SELECT resource_id FROM event
+      WHERE action = 'post.deleted' AND resource_id IN (${placeholders([mid.id, leaf.id, midReply.id])})`,
+    [mid.id, leaf.id, midReply.id],
+  );
+  assert.equal(eventRows.length, 3);
+});
+
+test('级联删除回帖链时 reply_count 只按存活父帖递减一次', { concurrency: false }, async () => {
+  const root = await createPost({
+    account_id: account.id,
+    kind: 'note',
+    author_principal_id: author.id,
+    body: 'reply count root',
+    visibility: 'private',
+  });
+  postIds.push(root.id);
+  const first = await replyPost({
+    parent_id: root.id,
+    author_principal_id: recipientOne.id,
+    body: 'first reply',
+  });
+  postIds.push(first.id);
+  const nested = await replyPost({
+    parent_id: first.id,
+    author_principal_id: recipientTwo.id,
+    body: 'nested reply',
+  });
+  postIds.push(nested.id);
+  const second = await replyPost({
+    parent_id: root.id,
+    author_principal_id: recipientOne.id,
+    body: 'second reply',
+  });
+  postIds.push(second.id);
+
+  await deletePost(first.id);
+
+  const detail = await getPostDetail(root.id);
+  assert.equal(detail.post.reply_count, 1, 'first 与 nested 已删，只递减一次');
+  const directReplies = await getDirectReplies(root.id);
+  assert.deepEqual(directReplies.map((post) => post.id), [second.id]);
+});
+
+test('ancestry 遇已删祖先截断，子任务详情仍可打开', { concurrency: false }, async () => {
+  const parent = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'legacy parent',
+    body: 'parent',
+    visibility: 'private',
+    task: { deliverable_spec: '{"format":"text"}' },
+  });
+  postIds.push(parent.id);
+  const child = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'legacy child',
+    body: 'child',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: parent.id,
+    },
+  });
+  postIds.push(child.id);
+  // 模拟旧 deletePost 遗留状态：父任务已删、子任务存活（绕过服务直接软删）。
+  await getPool().query('UPDATE post SET deleted_at = ? WHERE id = ?', ['2026-09-22 14:20:54', parent.id]);
+
+  const detail = await getPostDetail(child.id);
+  assert.ok(detail, '祖先已删的遗留任务详情应可打开');
+  assert.equal(detail.ancestry.length, 0, 'ancestry 应在已删祖先处截断');
+  assert.equal(detail.parent, null);
+
+  const parentTwo = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'live parent',
+    body: 'parent two',
+    visibility: 'private',
+    task: { deliverable_spec: '{"format":"text"}' },
+  });
+  postIds.push(parentTwo.id);
+  const childTwo = await createPost({
+    account_id: account.id,
+    kind: 'task',
+    author_principal_id: author.id,
+    title: 'live child',
+    body: 'child two',
+    visibility: 'private',
+    task: {
+      deliverable_spec: '{"format":"text"}',
+      parent_task_id: parentTwo.id,
+    },
+  });
+  postIds.push(childTwo.id);
+  const liveDetail = await getPostDetail(childTwo.id);
+  assert.equal(liveDetail.ancestry.length, 1);
+  assert.equal(liveDetail.ancestry[0].id, parentTwo.id);
+  assert.equal(liveDetail.parent.id, parentTwo.id);
+});
+
 test('getPostDetail 返回结构化上下文，recent 限制为 5 条并计算 more', { concurrency: false }, async () => {
   const task = await createPost({
     account_id: account.id,

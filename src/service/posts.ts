@@ -802,15 +802,17 @@ async function getTaskAncestry(
     if (seen.has(parentTaskId)) return null;
     seen.add(parentTaskId);
     const result = await pool.query(
-      `SELECT p.id, p.title, t.status, t.parent_task_id
+      `SELECT p.id, p.title, p.deleted_at AS ancestor_deleted_at, t.status, t.parent_task_id
          FROM post p
          JOIN post_task t ON t.post_id = p.id
-        WHERE p.id = ? AND p.account_id = ? AND p.deleted_at IS NULL
+        WHERE p.id = ? AND p.account_id = ?
         LIMIT 1`,
       [parentTaskId, accountId],
     );
     const row = rows(result)[0];
+    // 行缺失或跨账户属于真正的异常；祖先已删则截断：链到此为止，不再上溯。
     if (!row) return null;
+    if (row.ancestor_deleted_at !== null && row.ancestor_deleted_at !== undefined) break;
     chain.push({
       id: stringValue(row.id),
       title: stringValue(row.title),
@@ -944,7 +946,7 @@ export async function getPostDetail(id: string): Promise<PostDetail | null> {
     };
   });
   const ancestry = task ? await getTaskAncestry(task, post.account_id) : [];
-  // ancestry 经过账户和任务表双重校验；任一祖先缺失时按资源不存在处理。
+  // ancestry 遇已删祖先会截断；返回 null 仅表示环路或行缺失等真正的异常。
   if (ancestry === null) return null;
   const directParent = ancestry.length > 0 ? ancestry[ancestry.length - 1] : null;
   const parent: TaskParentSummary | null = directParent
@@ -1295,27 +1297,100 @@ export async function editPost(
   });
 }
 
+interface DeleteSubtreeRow {
+  id: string;
+  account_id: string;
+  author_principal_id: string;
+  parent_id: string | null;
+}
+
+// 级联深度上限，防止脏数据（环）导致 BFS 不收敛。
+const DELETE_CASCADE_MAX_DEPTH = 100;
+
+// 收集以 rootId 为根的完整存活后代集合：任务子树按 post_task.parent_task_id、
+// 回帖按 post.parent_id 两种边统一 BFS（子任务的回帖 parent_id 指向子任务，
+// 同样会被纳入）。仅返回当前 deleted_at IS NULL 的行；已删行由更早的删除操作负责。
+async function collectDeleteSubtreeWithConnection(
+  conn: PoolConnection,
+  root: DeleteSubtreeRow,
+): Promise<DeleteSubtreeRow[]> {
+  const subtree = new Map<string, DeleteSubtreeRow>([[root.id, root]]);
+  let frontier = [root.id];
+  for (let depth = 0; frontier.length > 0; depth += 1) {
+    if (depth >= DELETE_CASCADE_MAX_DEPTH) {
+      throw new Error(`Delete cascade exceeded max depth at post: ${frontier[0]}`);
+    }
+    const collectedIds = [...subtree.keys()];
+    const frontierPlaceholders = frontier.map(() => '?').join(', ');
+    const collectedPlaceholders = collectedIds.map(() => '?').join(', ');
+    const result = rows(await conn.query(
+      `SELECT p.id, p.account_id, p.author_principal_id, p.parent_id
+         FROM post p
+         LEFT JOIN post_task t ON t.post_id = p.id
+        WHERE p.account_id = ?
+          AND p.deleted_at IS NULL
+          AND (p.parent_id IN (${frontierPlaceholders})
+           OR t.parent_task_id IN (${frontierPlaceholders}))
+          AND p.id NOT IN (${collectedPlaceholders})`,
+      [root.account_id, ...frontier, ...frontier, ...collectedIds],
+    ));
+    const nextFrontier: string[] = [];
+    for (const row of result) {
+      const childId = stringValue(row.id);
+      subtree.set(childId, {
+        id: childId,
+        account_id: stringValue(row.account_id),
+        author_principal_id: stringValue(row.author_principal_id),
+        parent_id: nullableString(row.parent_id),
+      });
+      nextFrontier.push(childId);
+    }
+    frontier = nextFrontier;
+  }
+  return [...subtree.values()];
+}
+
 export async function deletePost(id: string): Promise<void> {
   await withTransaction(async (conn) => {
     const before = await getPostByIdWithConnection(conn, id);
     if (!before) throw notFound(`Post not found: ${id}`);
-    if (!before.deleted_at) {
-      const deletedAt = nowString();
-      await conn.query(`UPDATE post SET deleted_at = ? WHERE id = ?`, [deletedAt, id]);
-      if (before.parent_id) {
-        await conn.query(
-          `UPDATE post
-              SET reply_count = GREATEST(reply_count - 1, 0)
-            WHERE id = ?`,
-          [before.parent_id],
-        );
+    if (before.deleted_at) return;
+    // 先取完整子树快照，再统一软删：所有行写同一个 deleted_at，逐行记 post.deleted 事件。
+    const subtree = await collectDeleteSubtreeWithConnection(conn, {
+      id: before.id,
+      account_id: before.account_id,
+      author_principal_id: before.author_principal_id,
+      parent_id: before.parent_id,
+    });
+    const deletedAt = nowString();
+    const ids = subtree.map((row) => row.id);
+    await conn.query(
+      `UPDATE post SET deleted_at = ? WHERE id IN (${ids.map(() => '?').join(', ')})`,
+      [deletedAt, ...ids],
+    );
+    // 父帖 reply_count 递减只针对仍然存活的父帖；父帖也在删除集合内时无需维护。
+    const subtreeIds = new Set(ids);
+    const decrementByParent = new Map<string, number>();
+    for (const row of subtree) {
+      if (row.parent_id && !subtreeIds.has(row.parent_id)) {
+        decrementByParent.set(row.parent_id, (decrementByParent.get(row.parent_id) ?? 0) + 1);
       }
+    }
+    for (const [parentId, delta] of decrementByParent) {
+      await conn.query(
+        `UPDATE post
+            SET reply_count = GREATEST(reply_count - ?, 0)
+          WHERE id = ?`,
+        [delta, parentId],
+      );
+    }
+    for (const row of subtree) {
       await recordEvent(conn, {
-        account_id: before.account_id,
-        actor_principal_id: before.author_principal_id,
+        account_id: row.account_id,
+        actor_principal_id: row.author_principal_id,
         action: 'post.deleted',
         resource_type: 'post',
-        resource_id: id,
+        resource_id: row.id,
         before_state: { deleted_at: null },
         after_state: { deleted_at: deletedAt },
       });
