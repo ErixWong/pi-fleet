@@ -656,7 +656,46 @@ body {
 .activity-actor { color: var(--text-muted); }
 .activity-ref { color: var(--accent-text); text-decoration: none; }
 .activity-ref:hover { text-decoration: underline; }
+.activity-ref-title {
+  display: inline-block;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.activity-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 10rem;
+  padding: 0.02rem 0.45rem;
+  border-radius: 999px;
+  background: var(--badge-info-bg);
+  color: var(--badge-info-color);
+  font-size: 0.66rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-reason {
+  display: inline-block;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--text-muted);
+}
 .activity-meta time { margin-left: auto; }
+.activity-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.4rem 1.25rem 1.1rem;
+}
+.activity-page-info { color: var(--text-muted); font-size: 0.72rem; }
 .activity-more { padding: 0.2rem 1.25rem 1.25rem; text-align: center; }
 .activity-empty { min-height: 220px; }
 .activity-empty strong, .activity-empty span { display: block; }

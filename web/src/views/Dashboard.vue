@@ -1,11 +1,16 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { api } from '../api';
 import StatusBadge from '../components/StatusBadge.vue';
+
+const EVENTS_PER_PAGE = 10;
+const EVENTS_WINDOW = 200;
 
 const due = ref({ items: [], total: 0 });
 const hosts = ref([]);
 const events = ref([]);
+const eventsTotal = ref(0);
+const eventPage = ref(1);
 const loading = ref(true);
 const error = ref('');
 let refreshTimer = null;
@@ -14,22 +19,152 @@ function onlineHosts() {
   return hosts.value.filter((host) => host.status === 'active' && !host.offline).length;
 }
 
-function eventIcon(action) {
-  if (action.includes('create')) return 'bi-plus-circle';
-  if (action.includes('claim')) return 'bi-hand-index-thumb';
-  if (action.includes('submit')) return 'bi-upload';
-  if (action.includes('accept') || action.includes('approve')) return 'bi-check2-circle';
-  if (action.includes('reject') || action.includes('fail')) return 'bi-exclamation-octagon';
-  if (action.includes('reopen')) return 'bi-arrow-repeat';
-  if (action.includes('reply')) return 'bi-chat-left-text';
-  return 'bi-activity';
+const pagedEvents = computed(() => {
+  const start = (eventPage.value - 1) * EVENTS_PER_PAGE;
+  return events.value.slice(start, start + EVENTS_PER_PAGE);
+});
+
+const maxEventPage = computed(() => Math.max(1, Math.ceil(events.value.length / EVENTS_PER_PAGE)));
+
+const ACTION_TEXT = {
+  'post.created': '创建了任务',
+  'key.created': '创建了 API Key',
+  'task.created': '创建了任务',
+  'post.deleted': '删除了任务',
+  'key.revoked': '吊销了 API Key',
+  'deliverable.created': '新增了交付物',
+  'task.submitted': '提交了交付',
+  'task.claimed': '认领了任务',
+  'task.verdict': '验收决定',
+  'verdict.created': '提交了验收意见',
+  'post.replied': '发表了回复',
+  'post.target.read': '阅读了任务',
+  'attachment.created': '上传了附件',
+  'attachment.scan_status_changed': '附件扫描状态更新',
+  'channel.created': '创建了频道',
+  'task.reopened': '重开了任务',
+  'password.changed': '修改了登录密码',
+  'post.edited': '编辑了任务',
+  'task.ready_changed': '更新了就绪状态',
+  'channel.session_reset': '重置了频道会话',
+  'task.precheck_failed': '预检失败',
+  'task.reclaimed': '重新认领了任务',
+};
+
+const RESOURCE_TEXT = {
+  key: 'API Key',
+  attachment: '附件',
+  deliverable: '交付物',
+  principal: '成员',
+  channel: '频道',
+  post: '任务',
+};
+
+const ACTOR_KIND_TEXT = {
+  user: '用户',
+  host: '主机',
+};
+
+function payloadField(event, key) {
+  const payload = event?.payload;
+  if (payload && typeof payload === 'object') {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 }
 
-function eventClass(action) {
-  if (action.includes('reject') || action.includes('fail')) return 'danger';
-  if (action.includes('accept') || action.includes('approve')) return 'success';
-  if (action.includes('claim') || action.includes('submit')) return 'info';
+function actionLabel(event) {
+  if (event.action === 'task.verdict') {
+    const decision = payloadField(event, 'decision');
+    if (decision === 'accept') return '验收通过';
+    if (decision === 'reject') return '验收驳回';
+  }
+  return ACTION_TEXT[event.action] ?? event.action;
+}
+
+function actionReason(event) {
+  return event.action === 'task.verdict' ? payloadField(event, 'reason') || payloadField(event, 'opinion') : '';
+}
+
+function eventIcon(event) {
+  switch (event.action) {
+    case 'post.created':
+    case 'task.created':
+    case 'key.created':
+    case 'deliverable.created':
+    case 'attachment.created':
+    case 'channel.created':
+      return 'bi-plus-circle';
+    case 'key.revoked':
+      return 'bi-key';
+    case 'task.claimed':
+    case 'task.reclaimed':
+      return 'bi-hand-index-thumb';
+    case 'task.submitted':
+      return 'bi-upload';
+    case 'task.verdict':
+    case 'verdict.created':
+      return 'bi-check2-circle';
+    case 'task.reopened':
+      return 'bi-arrow-repeat';
+    case 'post.replied':
+      return 'bi-chat-left-text';
+    case 'post.target.read':
+      return 'bi-eye';
+    case 'post.deleted':
+      return 'bi-trash3';
+    case 'post.edited':
+      return 'bi-pencil-square';
+    case 'password.changed':
+      return 'bi-shield-lock';
+    case 'task.precheck_failed':
+      return 'bi-exclamation-octagon';
+    case 'channel.session_reset':
+      return 'bi-arrow-counterclockwise';
+    case 'attachment.scan_status_changed':
+      return 'bi-shield-check';
+    case 'task.ready_changed':
+      return 'bi-toggle-on';
+    default:
+      if (event.action.includes('fail') || event.action.includes('reject')) return 'bi-exclamation-octagon';
+      if (event.action.includes('create')) return 'bi-plus-circle';
+      if (event.action.includes('claim')) return 'bi-hand-index-thumb';
+      if (event.action.includes('submit')) return 'bi-upload';
+      if (event.action.includes('accept') || event.action.includes('approve')) return 'bi-check2-circle';
+      if (event.action.includes('reply')) return 'bi-chat-left-text';
+      if (event.action.includes('reopen')) return 'bi-arrow-repeat';
+      return 'bi-activity';
+  }
+}
+
+function eventClass(event) {
+  if (event.action === 'task.verdict') {
+    const decision = payloadField(event, 'decision');
+    if (decision === 'reject') return 'danger';
+    if (decision === 'accept') return 'success';
+  }
+  if (event.action.includes('reject') || event.action.includes('fail')) return 'danger';
+  if (event.action.includes('accept') || event.action.includes('approve')) return 'success';
+  if (event.action.includes('revoke') || event.action.includes('deleted')) return 'danger';
+  if (event.action.includes('claim') || event.action.includes('submit') || event.action.includes('replied') || event.action.includes('read')) return 'info';
   return 'primary';
+}
+
+function actorLabel(event) {
+  if (event.actor_name) return event.actor_name;
+  return ACTOR_KIND_TEXT[event.actor_kind] ?? '系统';
+}
+
+function resourceTitle(event) {
+  if (event.resource_type === 'post') return event.resource_title || '未命名任务';
+  return RESOURCE_TEXT[event.resource_type] ?? event.resource_type;
+}
+
+function fullTime(value) {
+  const time = new Date(value);
+  if (!Number.isFinite(time.getTime())) return value || '';
+  return time.toLocaleString('zh-CN', { hour12: false });
 }
 
 function relativeTime(value) {
@@ -49,11 +184,13 @@ async function loadDashboard() {
     const [taskData, hostData, eventData] = await Promise.all([
       api.tasks({ view: 'due', page: 1, page_size: 5 }),
       api.hosts(),
-      api.events({ limit: 50 }),
+      api.events({ order: 'desc', limit: EVENTS_WINDOW }),
     ]);
     due.value = { items: taskData.items ?? [], total: Number(taskData.total ?? 0) };
     hosts.value = hostData.items ?? [];
-    events.value = (eventData.items ?? []).slice(-20).reverse();
+    events.value = eventData.items ?? [];
+    eventsTotal.value = Number(eventData.total ?? events.value.length);
+    eventPage.value = Math.min(eventPage.value, maxEventPage.value);
   } catch (e) {
     error.value = e.message;
   } finally {
@@ -103,7 +240,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="metric-card">
         <span class="metric-icon metric-icon-danger"><i class="bi bi-activity"></i></span>
-        <span><strong>{{ events.length }}</strong><small>最近事件</small></span>
+        <span><strong>{{ eventsTotal }}</strong><small>最近事件</small></span>
       </div>
     </div>
 
@@ -152,21 +289,39 @@ onBeforeUnmount(() => {
           <div v-else-if="!events.length" class="empty-state activity-empty">
             <i class="bi bi-stars"></i><strong>还没有事件</strong><span>创建任务或连接主机后，最新动态会显示在这里。</span>
           </div>
-          <ol v-else class="activity-timeline">
-            <li v-for="event in events" :key="event.id" class="activity-item">
-              <div class="activity-marker" :class="eventClass(event.action)">
-                <i class="bi" :class="eventIcon(event.action)"></i>
-              </div>
-              <div class="activity-body">
-                <div class="activity-summary">{{ event.summary || event.action }}</div>
-                <div class="activity-meta">
-                  <span>{{ event.actor_name || '系统' }}</span>
-                  <router-link v-if="event.resource_type === 'post' && event.resource_id" :to="`/tasks/${event.resource_id}`" class="activity-ref">{{ event.resource_id }}</router-link>
-                  <time :datetime="event.occurred_at">{{ relativeTime(event.occurred_at) }}</time>
+          <template v-else>
+            <ol class="activity-timeline">
+              <li v-for="event in pagedEvents" :key="event.id" class="activity-item">
+                <div class="activity-marker" :class="eventClass(event)">
+                  <i class="bi" :class="eventIcon(event)"></i>
                 </div>
-              </div>
-            </li>
-          </ol>
+                <div class="activity-body">
+                  <div class="activity-summary">{{ actionLabel(event) }}</div>
+                  <div class="activity-meta">
+                    <span class="activity-actor">{{ actorLabel(event) }}</span>
+                    <router-link
+                      v-if="event.resource_type === 'post' && event.resource_id"
+                      :to="`/tasks/${event.resource_id}`"
+                      class="activity-ref activity-ref-title"
+                      :title="`任务 ID：${event.resource_id}`"
+                    >{{ resourceTitle(event) }}</router-link>
+                    <span v-else-if="event.resource_id" class="activity-tag" :title="event.resource_id">{{ resourceTitle(event) }}</span>
+                    <span v-if="actionReason(event)" class="activity-reason" :title="actionReason(event)">{{ actionReason(event) }}</span>
+                    <time :datetime="event.occurred_at" :title="fullTime(event.occurred_at)">{{ relativeTime(event.occurred_at) }}</time>
+                  </div>
+                </div>
+              </li>
+            </ol>
+            <nav v-if="maxEventPage > 1" class="activity-pagination">
+              <button class="btn btn-sm btn-ghost" :disabled="eventPage <= 1" title="上一页" @click="eventPage -= 1">
+                <i class="bi bi-chevron-left"></i>
+              </button>
+              <span class="activity-page-info">第 {{ eventPage }} / {{ maxEventPage }} 页</span>
+              <button class="btn btn-sm btn-ghost" :disabled="eventPage >= maxEventPage" title="下一页" @click="eventPage += 1">
+                <i class="bi bi-chevron-right"></i>
+              </button>
+            </nav>
+          </template>
         </div>
       </section>
     </div>
