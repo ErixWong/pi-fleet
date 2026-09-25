@@ -29,8 +29,20 @@ async function req(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (res.status === 401) {
+    if (path === '/login') {
+      // 登录请求本身 401：凭据错误，不是会话过期，不要清 key 也不要跳转
+      const text = await res.text().catch(() => '');
+      let serverError = '';
+      try {
+        const parsed = JSON.parse(text);
+        serverError = parsed && typeof parsed === 'object' ? parsed.error : '';
+      } catch { /* body 非 JSON，忽略 */ }
+      const err = new Error(serverError ? `用户名或密码错误（${serverError}）` : '用户名或密码错误');
+      err.status = 401;
+      throw err;
+    }
     localStorage.removeItem('pm_key');
-    if (path !== '/login') window.location.replace('/login');
+    window.location.replace('/login');
     const err = new Error('登录已过期，请重新登录');
     err.status = 401;
     throw err;
