@@ -36,6 +36,77 @@ const sendError = ref('');
 const draft = ref('');
 const sidebarOpen = ref(false);
 const refreshingFolders = ref(false);
+
+// ---- 左侧导航栏宽度拖拽调整（220–480px，localStorage 持久化） ----
+const SIDEBAR_WIDTH_STORAGE_KEY = 'pm_channel_sidebar_width';
+const SIDEBAR_DEFAULT_WIDTH = 300;
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 480;
+const sidebarWidth = ref(SIDEBAR_DEFAULT_WIDTH);
+const sidebarResizing = ref(false);
+let resizeStartX = 0;
+let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
+
+function clampSidebarWidth(value) {
+  const num = Math.round(Number(value));
+  if (!Number.isFinite(num)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, num));
+}
+
+function loadSidebarWidth() {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (raw == null || String(raw).trim() === '') return SIDEBAR_DEFAULT_WIDTH;
+    const num = Math.round(Number(raw));
+    // 非法/越界值一律回退默认值，不把脏数据带进会话
+    if (!Number.isFinite(num) || num < SIDEBAR_MIN_WIDTH || num > SIDEBAR_MAX_WIDTH) {
+      return SIDEBAR_DEFAULT_WIDTH;
+    }
+    return num;
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function persistSidebarWidth() {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.value));
+  } catch {
+    // localStorage 不可用时静默降级为仅本次会话生效
+  }
+}
+
+function onSidebarResizeMove(event) {
+  sidebarWidth.value = clampSidebarWidth(resizeStartWidth + (event.clientX - resizeStartX));
+}
+
+function onSidebarResizeEnd() {
+  window.removeEventListener('mousemove', onSidebarResizeMove);
+  window.removeEventListener('mouseup', onSidebarResizeEnd);
+  document.body.classList.remove('sidebar-resizing');
+  sidebarResizing.value = false;
+  persistSidebarWidth();
+}
+
+function startSidebarResize(event) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  resizeStartX = event.clientX;
+  resizeStartWidth = sidebarWidth.value;
+  sidebarResizing.value = true;
+  document.body.classList.add('sidebar-resizing');
+  window.addEventListener('mousemove', onSidebarResizeMove);
+  window.addEventListener('mouseup', onSidebarResizeEnd);
+}
+
+function resetSidebarWidth() {
+  sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH;
+  try {
+    window.localStorage.removeItem(SIDEBAR_WIDTH_STORAGE_KEY);
+  } catch {
+    // 同上：静默降级
+  }
+}
 const messagesEl = ref(null);
 let refreshTimer = null;
 let refreshing = false;
@@ -666,6 +737,7 @@ watch(() => route.params.channelId, async (value) => {
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibilityChange);
+  sidebarWidth.value = loadSidebarWidth();
   await initialLoad();
   startPolling();
 });
@@ -673,13 +745,19 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopPolling();
   document.removeEventListener('visibilitychange', onVisibilityChange);
+  // 拖拽中卸载也要确保 window 监听与 body 状态被清理
+  window.removeEventListener('mousemove', onSidebarResizeMove);
+  window.removeEventListener('mouseup', onSidebarResizeEnd);
+  document.body.classList.remove('sidebar-resizing');
 });
 </script>
 
 <template>
   <div class="channels-page">
     <div class="channel-layout">
-      <aside class="channel-sidebar card" :class="{ 'is-open': sidebarOpen }" aria-label="主机和文件夹导航">
+      <aside class="channel-sidebar card" :class="{ 'is-open': sidebarOpen, 'is-resizing': sidebarResizing }"
+        :style="{ width: sidebarWidth + 'px', flexBasis: sidebarWidth + 'px' }"
+        aria-label="主机和文件夹导航">
       <div class="channel-sidebar-toolbar">
         <router-link to="/" class="channel-back-link" aria-label="返回仪表盘">
           <i class="bi bi-arrow-left"></i>
@@ -752,6 +830,11 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </section>
+      <div class="channel-sidebar-resize-handle" role="separator" aria-orientation="vertical"
+        aria-label="拖拽调整导航栏宽度，双击恢复默认宽度" :aria-valuenow="sidebarWidth"
+        :aria-valuemin="SIDEBAR_MIN_WIDTH" :aria-valuemax="SIDEBAR_MAX_WIDTH"
+        title="拖拽调整宽度（220–480px），双击恢复默认 300px"
+        @mousedown="startSidebarResize" @dblclick="resetSidebarWidth"></div>
       </aside>
 
       <button v-if="sidebarOpen" type="button" class="channel-sidebar-backdrop" aria-label="关闭导航" @click="sidebarOpen = false"></button>

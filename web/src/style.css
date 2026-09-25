@@ -1108,6 +1108,24 @@ code { color: var(--code-text); }
 .channel-dialog-list:hover,
 .channel-conversation:hover,
 .channel-empty:hover { transform: none; }
+
+/* 拖拽调整左侧导航栏宽度（220–480px，桌面端） */
+.channel-sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 40;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.channel-sidebar-resize-handle:hover,
+.channel-sidebar.is-resizing .channel-sidebar-resize-handle { background: var(--accent-soft); }
+.channel-sidebar.is-resizing .channel-sidebar-resize-handle { background: var(--accent-border-hover); }
+body.sidebar-resizing { user-select: none; }
 .channel-sidebar-toolbar {
   min-height: 68px;
   display: flex;
@@ -1284,11 +1302,14 @@ code { color: var(--code-text); }
     top: 0;
     bottom: 0;
     left: 0;
-    width: min(300px, calc(100vw - 2.5rem));
+    /* 抽屉宽度固定，覆盖桌面端拖拽写入的内联宽度，抽屉行为不受拖拽持久化值影响 */
+    width: min(300px, calc(100vw - 2.5rem)) !important;
+    flex: 0 0 auto !important;
     height: 100%;
     transform: translateX(-101%);
     transition: transform 0.2s ease;
   }
+  .channel-sidebar-resize-handle { display: none; }
   .channel-sidebar.is-open { transform: translateX(0); }
   .channel-sidebar-backdrop {
     position: absolute;
