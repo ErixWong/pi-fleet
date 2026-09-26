@@ -29,23 +29,57 @@ daemon 是任务执行器，不是业务状态机：
 
 ## 平台侧注册
 
-注册由平台管理员完成，客户端不会自注册：
+注册由平台管理员完成，客户端不会自注册。两种方式：
 
-1. 在目标账号中创建 `host` principal（名称使用主机名或运维资产编号）。
-2. 为该 principal 创建 API key，至少授予：
-   `task:read`、`task:claim`、`task:submit`。
+**方式 A（推荐）：Web 页面一键注册**
+
+1. 登录平台 Web → **主机（Hosts）页 → 注册主机**，填入名称（主机名或运维资产编号）。
+2. 平台创建 `host` principal 并**生成一把一次性 API key**（内部即
+   `POST /api/v2/hosts`，自动授予 `task:read`/`task:claim`/`task:submit`）。
+3. 弹窗里**立即复制保存**——这把 key 只显示这一次，关掉就再也看不到（丢了只能
+   在 Hosts 页 rotate 换新）。通过安全渠道交给主机操作者。
+
+**方式 B：REST/API 手工建**
+
+1. 在目标账号中创建 `host` principal。
+2. 为该 principal 创建 API key，至少授予：`task:read`、`task:claim`、
+   `task:submit`（要上传交付物文件另加 `attachment:write`）。
 3. 将 key 通过安全渠道交给主机操作者。key 只在 setup 时写入本机配置，不要提交
    到仓库、日志或 shell 脚本。
 
-API key 的有效期、吊销和轮换由平台管理员管理。轮换后在主机重新运行 setup
+API key 的有效期、吊销和轮换由平台管理员管理（Hosts 页的 key rotate，或
+`POST /api/v2/hosts/:id/keys/rotate`）。轮换后在主机重新运行 setup
 即可覆盖本地配置。
 
 ## 主机侧安装
 
-要求 Node.js 18 或更新版本，以及可运行的 pi CLI 和 pi 的模型配置。
+要求 Node.js 18 或更新版本，以及可运行的 pi CLI 和 pi 的模型配置
+（`~/.pi/agent/models.json`）。无 GUI 环境可运行。
+
+客户端包 `@pi-market/pi-agent-client` **设计上走 npm 安装，但截至当前尚未发布
+到公共 registry**（实测 404），现状按源码分发：
 
 ```bash
+# 包发布后的正式做法（保留在此，待发布后生效）
 npm install -g @pi-market/pi-agent-client
+
+# 现状做法：clone 整仓库（如 /opt/pi-market），pi-agent 入口在 client/bin/pi-agent.js
+git clone https://git.erix.vip/eric/agent-market.git /opt/pi-market
+```
+
+## 端到端 checklist（新设备从零到接单）
+
+1. ☐ 平台 Hosts 页注册主机，保存一次性 key
+2. ☐ 设备装 Node ≥18 + pi CLI + 模型配置
+3. ☐ 获取客户端（npm 或 clone 仓库，见上节）
+4. ☐ `pi-agent setup --url=<平台地址> --key=<一次性 key>`（本地写 config + 合并
+   pi 的 `mcp.json`，不调平台接口）
+5. ☐ `pi-agent run` 前台试跑，观察轮询日志
+6. ☐ 回平台 Web Hosts 页确认设备出现且活跃时间在刷新
+7. ☐ 发一个测试任务把该设备设为目标，确认认领/提交/交付物闭环
+8. ☐ `sudo pi-agent install-service` 转 systemd 常驻，按需配置沙箱隔离（见下）
+
+```bash
 pi-agent setup --key=<key> --url=https://platform.example
 pi-agent run
 ```
