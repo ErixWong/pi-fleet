@@ -5,22 +5,23 @@
 
 ## 总体架构图
 
+角色关系：**人是唯一任务发起方**（浏览器访问平台下达指令、验收交付物）；
+**设备是执行方**——任意数量、异构的 Linux 主机（x86 服务器、ARM 盒子、无 GUI
+容器均可，只要求 Node ≥18 + pi CLI），不自注册，由管理员创建 host principal
+并签发 API key 接入。平台是星型中心：指令向下分发，结果向上回流。
+
 ```mermaid
 flowchart TB
-    subgraph clients["客户端"]
-        WEB["Web 浏览器<br/>(web/ Vue SPA)"]
-        HOST["主机 daemon<br/>(client/src/agent-daemon.mjs)"]
-        PI["pi-agent<br/>(MCP 客户端)"]
-    end
+    HUMAN["👤 管理员（浏览器）<br/>发任务 / 下指令 / 看消息 / 验收交付物"]
 
-    subgraph server["平台服务 (node dist/src/index.js)"]
+    subgraph platform["平台服务（单进程 node dist/src/index.js）"]
         direction TB
         HTTP["HTTP 入口<br/>/api/v2 REST · /mcp2 Streamable HTTP · 静态 Web"]
-        AUTH["auth-principal.ts<br/>Bearer key → principal + scope"]
+        AUTH["auth-principal.ts<br/>Bearer key → principal + scope<br/>（人 = user principal，设备 = host principal）"]
         subgraph svc["service/ 业务层（REST 与 MCP2 共用）"]
             ID["identity<br/>account/principal/device/api_key"]
             POSTS["posts<br/>post/线程/目标/摘要"]
-            TASK["task-flow<br/>post_task 状态机"]
+            TASK["task-flow<br/>任务状态机：发布/认领/提交/验收"]
             RES["resources<br/>附件/交付物/权限"]
             EVT["event-outbox / event-log"]
         end
@@ -32,15 +33,28 @@ flowchart TB
         SET["new-settings.ts<br/>运行参数缓存"]
     end
 
-    subgraph store["存储"]
-        DB[("MariaDB 新库 erix<br/>25 表，唯一 schema 来源<br/>src/db/schema.ts")]
-        FS[("本地磁盘 ATTACHMENTS_ROOT<br/>principal_id/年/月/日/sha256")]
+    subgraph devices["执行设备群（异构、水平扩展）"]
+        D1["x86 主机 A<br/>agent-daemon + pi"]
+        D2["ARM 盒子（无 GUI）<br/>agent-daemon + pi"]
+        DN["…更多设备"]
     end
 
-    WEB -- "HTTPS Bearer key<br/>REST /api/v2" --> HTTP
-    HOST -- "短轮询 5s 捎带<br/>认领/提交/心跳/控制应答" --> HTTP
-    PI -- "Streamable HTTP /mcp2<br/>MCP 工具调用" --> HTTP
+    subgraph device1["单台设备内部（每台同构）"]
+        DM["agent-daemon<br/>短轮询认领/提交/心跳"]
+        P1["pi 进程（按任务拉起）<br/>经 /mcp2 读上下文、提交交付物"]
+        DM --> P1
+    end
+
+    HUMAN -- "HTTPS 浏览器<br/>REST /api/v2" --> HTTP
+    HTTP <-->|"daemon 5s 轮询：拉任务/认领/提交/心跳"| DM
+    P1 -- "MCP /mcp2" --> HTTP
+    D1 -.-> DM
+    D2 -.->|"同左：每台一套 daemon+pi"| device1
+    DN -.-> DM
     HTTP --> AUTH --> svc
+
+    HUMAN ~~~ platform
+    workers ~~~ devices
     svc --> DB
     RES --> FS
     RES --> DB
@@ -50,14 +64,19 @@ flowchart TB
     W2 --> DB
     W3 --> DB
     SET --> DB
+
+    DB[("MariaDB 新库 erix<br/>25 表，唯一 schema 来源<br/>src/db/schema.ts")]
+    FS[("本地磁盘 ATTACHMENTS_ROOT<br/>principal_id/年/月/日/sha256")]
 ```
 
 图上各元素与代码的对应：
 
 - HTTP 入口在 `src/routes/v2/`（REST）与 `src/mcp/index.ts`（MCP2），共用
   `auth-principal.ts` 鉴权；静态 Web 由同一进程托管（`web/dist`）。
-- 主机 daemon 与平台之间除任务拉取外还有双向控制链路（`host_control_request`，
-  捎带式短轮询，详见下文「主机控制链路」）。
+- 人和设备都是平台上的 principal：人用 `user` principal 的 key 登录 Web；
+  设备用 `host` principal 的 key（scope：`task:read/claim/submit`）跑 daemon。
+- 设备上每台一套 `agent-daemon`（systemd 常驻）：daemon 只负责轮询认领、
+  异常兑底提交和心跳上报；任务本体由它按需拉起的 pi 进程经 `/mcp2` 完成。
 - 附件文件本体落 `ATTACHMENTS_ROOT`（默认 `<项目>/attachments/`），元数据与
   sha256 去重记录在 `attachment` 表。
 
@@ -71,9 +90,13 @@ flowchart TB
   → `npm run platform:start` 启动（`platform:stop` 停止；脚本记录真实 node pid、
   显式端口防环境变量污染，见 issue #63）。新库初始化流程见仓库根 `AGENTS.md`。
 - **主机端 agent**：`client/` 子包（`@pi-market/pi-agent-client`，`bin:
-  pi-agent`）随仓库整体分发到主机（如 `/opt/pi-market`），以
-  `pi-agent setup --url <平台> --key <key>` 写入签发的 Agent key，再用
-  `pi-agent install-service` 生成 systemd 服务常驻；daemon 轮询平台认领任务。
+  pi-agent`）。接入文档（`docs/agent-onboarding.md`）写的是
+  `npm install -g @pi-market/pi-agent-client`，但**截至当前尚未发布到公共
+  registry**（实测 404），现状按源码分发：clone 整仓库到主机（如
+  `/opt/pi-market`），接入流程为：管理员在平台上创建 host principal + API key →
+  `pi-agent setup --url <平台> --key <key>` 写入本机配置并合并 pi 的
+  `mcp.json` → `pi-agent install-service` 生成 systemd 服务常驻。设备侧要求
+  Node ≥18 + pi CLI，无 GUI 环境也可运行。
 - **容器部署**：另有 Portainer stack 部署路径，见 `docs/portainer-deploy-pi.md`。
 
 ## 运行面
