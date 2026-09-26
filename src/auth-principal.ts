@@ -18,14 +18,22 @@ export interface PrincipalContext {
   account_id: string;
 }
 
+declare module 'express-serve-static-core' {
+  interface Request {
+    // multer 等流式中间件的 done 回调可能丢失 AsyncLocalStorage 上下文，
+    // auth 中间件把 principal 同时挂在 req 上作为兜底。
+    principal?: PrincipalContext;
+  }
+}
+
 export const principalContext = new AsyncLocalStorage<PrincipalContext>();
 
 export function currentPrincipal(): PrincipalContext | null {
   return principalContext.getStore() ?? null;
 }
 
-export function requirePrincipal(): PrincipalContext {
-  const context = currentPrincipal();
+export function requirePrincipal(req?: { principal?: PrincipalContext }): PrincipalContext {
+  const context = req?.principal ?? currentPrincipal();
   if (!context) {
     const error = new Error('principal authentication required');
     Object.assign(error, { status: 401 });
@@ -64,7 +72,10 @@ export function principalAuthMiddleware(): RequestHandler {
           // 心跳更新不是鉴权条件；设备记录异常不能阻塞已认证请求。
         }
       }
-      principalContext.run(context, next);
+      principalContext.run(context, () => {
+        req.principal = context;
+        next();
+      });
     })().catch(next);
   };
 }

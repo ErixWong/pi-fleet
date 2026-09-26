@@ -58,7 +58,7 @@ attachmentsV2Router.post(
   upload.single('file'),
   async (req, res, next) => {
     try {
-      const context = requirePrincipal();
+      const context = requirePrincipal(req);
       const file = req.file;
       if (!file || file.size === 0) {
         res.status(400).json({ error: 'file is required and cannot be empty' });
