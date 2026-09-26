@@ -262,6 +262,12 @@ body {
 }
 .card:hover {
   border-color: var(--accent-border-hover);
+}
+/* 上浮效果只给可点击卡片（显式加 .card-interactive），静态卡片不再位移 */
+.card-interactive {
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.card-interactive:hover {
   transform: translateY(-2px);
 }
 
@@ -893,15 +899,28 @@ body {
 }
 .task-tree-title { color: var(--text-strong); font-weight: 700; }
 .task-tree-summary { color: var(--text-muted); font-size: 0.76rem; }
+.task-tree-current {
+  flex-shrink: 0;
+  padding: 0 0.45rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
 .task-tree-executor { max-width: 10rem; }
-.task-panorama-modal { z-index: 1055; }
-.task-panorama-modal .modal-content {
+.task-panorama-modal,
+.attachment-preview-modal { z-index: 1055; }
+.task-panorama-modal .modal-content,
+.attachment-preview-modal .modal-content {
   color: var(--text-strong);
   background: var(--bg-base);
   border: 1px solid var(--border-soft);
 }
 .task-panorama-modal .modal-header,
-.task-panorama-modal .modal-footer { border-color: var(--border-soft); }
+.task-panorama-modal .modal-footer,
+.attachment-preview-modal .modal-header,
+.attachment-preview-modal .modal-footer { border-color: var(--border-soft); }
 
 /* ─────────────────────────── 按钮 ─────────────────────────── */
 .btn { border-radius: 0.6rem; font-weight: 600; }
@@ -1328,4 +1347,16 @@ body.sidebar-resizing { user-select: none; }
     display: block;
   }
   .channel-message-bubble { max-width: 88%; }
+}
+
+/* 交付要求：普通提示框，不再用 <pre> 代码块承载普通文本 */
+.deliverable-spec {
+  background: var(--accent-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  color: var(--text-body);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

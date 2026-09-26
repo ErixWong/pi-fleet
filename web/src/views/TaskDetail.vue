@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '../api';
 import { renderMd } from '../md';
@@ -23,9 +23,26 @@ const subtree = ref(null);
 const subtreeLoading = ref(false);
 const subtreeError = ref('');
 const selectedTaskId = ref('');
+// 附件预览 modal 状态：{ attachment, url, kind, text, error }
+const preview = ref(null);
+let previewUrl = '';
+// 附件预览请求序号：连续打开或关闭后，旧请求返回时若 token 已过期则丢弃结果，
+// 避免覆盖最新预览；同时兜住组件卸载后异步回调写状态的问题。
+let previewRequestSeq = 0;
 
 const task = computed(() => detail.value?.task);
 const post = computed(() => detail.value?.post);
+const VISIBILITY_LABELS = { private: '私有', account: '账号内', public: '公开' };
+const visibilityLabel = computed(() => VISIBILITY_LABELS[post.value?.visibility] || post.value?.visibility || '—');
+const hostPrincipal = computed(() =>
+  (detail.value?.targets ?? []).find((item) => item.principal?.kind === 'host')?.principal ?? null);
+const hostLabel = computed(() => hostPrincipal.value?.name || hostPrincipal.value?.id || '');
+const ROLE_LABELS = { author: '发起人', assignee: '执行者', mention: '提及', watcher: '关注者' };
+function roleLabel(role) {
+  return ROLE_LABELS[role] || role;
+}
+// 右侧「任务操作」卡片仅在存在即时操作时渲染，避免空卡片。
+const hasActions = computed(() => ['open', 'claimed', 'submitted', 'pending_confirm'].includes(task.value?.status));
 const assigneePrincipal = computed(() => {
   const assigneeId = task.value?.assignee_principal_id;
   if (!assigneeId) return null;
@@ -177,25 +194,79 @@ async function runAction(action) {
   }
 }
 
+function previewKind(mime) {
+  // 规范化：trim + 小写 + 截掉 `; charset=...` 等参数（后端文本类响应会追加 charset）
+  const normalized = String(mime ?? '').split(';', 1)[0].trim().toLowerCase();
+  if (!normalized) return 'unknown';
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized === 'application/pdf') return 'pdf';
+  if (
+    normalized.startsWith('text/')
+    || normalized.endsWith('+json')
+    || normalized.endsWith('+xml')
+    || [
+      'application/json',
+      'application/xml',
+      'application/javascript',
+      'application/x-yaml',
+      'application/yaml',
+      'application/sql',
+      'application/markdown',
+      'application/x-sh',
+    ].includes(normalized)
+  ) return 'text';
+  return 'unknown';
+}
+
 async function openAttachment(attachment) {
+  // 先 revoke 上一轮 ObjectURL（closeAttachmentPreview 内部处理），再签发新 token
+  closeAttachmentPreview();
+  const token = ++previewRequestSeq;
+  preview.value = { attachment, url: '', kind: 'loading', text: '', error: '' };
+  let url = '';
   try {
     const result = await api.attachmentBlob(attachment.id);
-    const url = URL.createObjectURL(result.blob);
-    const opened = window.open(url, '_blank', 'noopener');
-    if (!opened) {
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = attachment.filename;
-      link.click();
+    url = URL.createObjectURL(result.blob);
+    const kind = previewKind(attachment.mime || result.blob.type);
+    let text = '';
+    if (kind === 'text') {
+      text = await result.blob.text();
+      if (text.length > 200_000) text = `${text.slice(0, 200_000)}\n\n…（内容过长，已截断显示）`;
     }
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    if (token !== previewRequestSeq) {
+      // 过期请求：立即释放本次 URL 并丢弃结果，不覆盖当前预览状态
+      URL.revokeObjectURL(url);
+      return;
+    }
+    previewUrl = url;
+    preview.value = { attachment, url, kind, text, error: '' };
   } catch (e) {
-    error.value = e.message;
+    // 异常路径：释放尚未交给 previewUrl 的 ObjectURL（含 token 过期分支），避免泄漏
+    if (url && url !== previewUrl) URL.revokeObjectURL(url);
+    if (token !== previewRequestSeq) return;
+    preview.value = { attachment, url: '', kind: 'error', text: '', error: e.message };
   }
 }
 
+function downloadPreview() {
+  if (!preview.value?.url) return;
+  const link = document.createElement('a');
+  link.href = preview.value.url;
+  link.download = preview.value.attachment.filename || 'attachment';
+  link.click();
+}
+
+function closeAttachmentPreview() {
+  previewRequestSeq += 1; // 使进行中的 openAttachment 请求过期
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+  }
+  preview.value = null;
+}
+
 function targetName(target) {
-  return target.principal?.name || target.principal?.id || target.role;
+  return target.principal?.name || target.principal?.id || roleLabel(target.role);
 }
 
 function openTaskModal(taskId) {
@@ -208,6 +279,8 @@ function closeTaskModal() {
 
 onMounted(load);
 watch(() => route.params.taskId, load);
+// 路由离开/组件卸载时清理预览，避免 ObjectURL 泄漏和卸载后写状态
+onBeforeUnmount(closeAttachmentPreview);
 </script>
 
 <template>
@@ -224,24 +297,33 @@ watch(() => route.params.taskId, load);
     <template v-else-if="detail && post && task">
       <div class="card mb-3">
         <div class="card-body">
+          <!-- 标题区：标题 + 状态 -->
           <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
             <h1 class="h4 fw-bold mb-0">{{ post.title || '未命名任务' }}</h1>
             <StatusBadge :status="task.status" />
-            <span class="badge text-bg-secondary">{{ post.visibility }}</span>
-            <code class="small">{{ post.id }}</code>
           </div>
+          <!-- 元信息区：发起人 / 执行者 / 执行主机 / 创建时间（低对比度） -->
           <div class="d-flex align-items-center gap-2 flex-wrap small mb-1">
             <PrincipalChip v-if="post.author" :principal="post.author" role="发起人" />
-            <PrincipalChip v-if="assigneePrincipal" :principal="assigneePrincipal" role="认领" />
-            <span class="text-secondary"><i class="bi bi-clock me-1"></i>{{ post.created_at }}</span>
+            <PrincipalChip v-if="assigneePrincipal" :principal="assigneePrincipal" role="执行者" />
+            <span v-if="hostLabel" class="text-secondary"><i class="bi bi-pc-display me-1"></i>执行主机：{{ hostLabel }}</span>
+            <span class="text-secondary"><i class="bi bi-clock me-1"></i>创建时间：{{ post.created_at }}</span>
           </div>
+          <div class="task-meta-faint small mb-2">
+            <code class="task-post-id">{{ post.id }}</code>
+            <span>可见范围：{{ visibilityLabel }}</span>
+            <span>工作目录：{{ task.workdir || '—' }}</span>
+            <span>执行器：{{ task.executor || '—' }}</span>
+          </div>
+          <!-- 进度区：时间线（含尝试次数，全页仅此一处） -->
           <TaskTimeline :status="task.status" :attempts="task.attempts" :max-attempts="task.max_attempts" />
+          <!-- 内容区：任务说明 + 目标 -->
           <div class="md-content" v-html="renderMd(post.body)"></div>
           <div v-if="detail.targets?.length" class="border-top pt-2 mt-3 small">
             <span class="text-secondary me-2">目标：</span>
             <span v-for="target in detail.targets" :key="`${target.principal?.id || target.role}-${target.role}`" class="d-inline-block me-1">
-              <PrincipalChip v-if="target.principal" :principal="target.principal" :role="target.role" />
-              <span v-else class="badge text-bg-light me-1">{{ targetName(target) }} · {{ target.role }}</span>
+              <PrincipalChip v-if="target.principal" :principal="target.principal" :role="roleLabel(target.role)" />
+              <span v-else class="text-secondary me-1">{{ targetName(target) }} · {{ roleLabel(target.role) }}</span>
             </span>
           </div>
         </div>
@@ -283,6 +365,12 @@ watch(() => route.params.taskId, load);
                 </div>
                 <div class="md-content" v-html="renderMd(message.body)"></div>
               </article>
+              <!-- 回复框移入消息流卡片底部 -->
+              <div class="border-top pt-3">
+                <label class="form-label fw-semibold" for="task-reply-input">回复任务</label>
+                <textarea id="task-reply-input" v-model="replyText" class="form-control mb-2" rows="3" placeholder="补充信息、指导执行方或说明验收意见"></textarea>
+                <button class="btn btn-primary" :disabled="!replyText.trim()" @click="reply"><i class="bi bi-send me-1"></i>发送回复</button>
+              </div>
             </div>
           </section>
 
@@ -291,11 +379,11 @@ watch(() => route.params.taskId, load);
             <div class="card-body">
               <div v-if="task.deliverable_spec" class="mb-3">
                 <div class="text-secondary small mb-1">交付要求</div>
-                <pre class="small mb-0">{{ parseSpec(task.deliverable_spec) }}</pre>
+                <div class="deliverable-spec small mb-0">{{ parseSpec(task.deliverable_spec) }}</div>
               </div>
               <div v-if="!detail.deliverables?.length" class="text-secondary small">暂无交付物。</div>
               <div v-for="deliverable in detail.deliverables" :key="`${deliverable.name}-${deliverable.version}`" class="d-flex align-items-start gap-2 border-top py-2">
-                <span class="badge" :class="deliverable.current ? 'text-bg-success' : 'text-bg-secondary'">v{{ deliverable.version }}</span>
+                <span class="small text-secondary flex-shrink-0 pt-1">v{{ deliverable.version }}</span>
                 <div class="flex-grow-1">
                   <strong>{{ deliverable.name }}</strong>
                   <div v-if="deliverable.note" class="text-secondary small">{{ deliverable.note }}</div>
@@ -313,7 +401,7 @@ watch(() => route.params.taskId, load);
         </div>
 
         <div class="col-xl-4">
-          <section class="card mb-3">
+          <section v-if="hasActions" class="card mb-3 task-actions-card">
             <div class="card-header"><strong><i class="bi bi-lightning-charge me-2"></i>任务操作</strong></div>
             <div class="card-body">
               <button v-if="task.status === 'open'" class="btn btn-primary w-100 mb-2" @click="claim">认领任务</button>
@@ -328,14 +416,6 @@ watch(() => route.params.taskId, load);
                 <button class="btn btn-success w-100 mb-2" @click="verdict('accept')">验收通过</button>
                 <button class="btn btn-outline-danger w-100" @click="verdict('reject')">打回续做</button>
               </template>
-              <div v-if="!['open', 'claimed', 'submitted', 'pending_confirm'].includes(task.status)" class="text-secondary small">
-                当前状态不提供即时操作。
-              </div>
-              <div class="small text-secondary mt-3">
-                尝试次数：{{ task.attempts }} / {{ task.max_attempts }}<br>
-                工作目录：{{ task.workdir || '—' }}<br>
-                执行器：{{ task.executor || '—' }}
-              </div>
             </div>
           </section>
 
@@ -356,14 +436,72 @@ watch(() => route.params.taskId, load);
         </div>
       </div>
 
-      <section class="card">
-        <div class="card-body">
-          <label class="form-label fw-semibold">回复任务</label>
-          <textarea v-model="replyText" class="form-control mb-2" rows="3" placeholder="补充信息、指导执行方或说明验收意见"></textarea>
-          <button class="btn btn-primary" :disabled="!replyText.trim()" @click="reply"><i class="bi bi-send me-1"></i>发送回复</button>
-        </div>
-      </section>
     </template>
+    <div v-if="preview" class="modal show d-block attachment-preview-modal" tabindex="-1" role="dialog" aria-modal="true"
+      :aria-label="`预览 ${preview.attachment.filename || '附件'}`">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 class="modal-title h5 mb-0 text-truncate"><i class="bi bi-eye me-2"></i>{{ preview.attachment.filename || '附件预览' }}</h2>
+            <button type="button" class="btn-close" aria-label="关闭" @click="closeAttachmentPreview"></button>
+          </div>
+          <div class="modal-body">
+            <div v-if="preview.kind === 'loading'" class="text-secondary text-center py-5">
+              <i class="bi bi-arrow-repeat me-1 spin-once"></i>正在加载附件预览…
+            </div>
+            <div v-else-if="preview.kind === 'error'" class="alert alert-danger mb-0">{{ preview.error }}</div>
+            <div v-else-if="preview.kind === 'image'" class="text-center">
+              <img :src="preview.url" :alt="preview.attachment.filename || '附件图片'" class="img-fluid rounded" style="max-height: 70vh;">
+            </div>
+            <iframe v-else-if="preview.kind === 'pdf'" :src="preview.url" class="w-100 border-0 rounded" style="height: 70vh; background: #fff;"
+              :title="preview.attachment.filename || '附件 PDF'"></iframe>
+            <pre v-else-if="preview.kind === 'text'" class="mb-0">{{ preview.text }}</pre>
+            <div v-else class="text-center py-4">
+              <i class="bi bi-file-earmark-x fs-1 d-block mb-2 text-secondary"></i>
+              <p class="mb-3">该附件类型暂不支持在线预览<span v-if="preview.attachment.mime">（{{ preview.attachment.mime }}）</span>，请下载后查看。</p>
+              <button type="button" class="btn btn-primary" @click="downloadPreview"><i class="bi bi-download me-1"></i>下载附件</button>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" :disabled="!preview.url" @click="downloadPreview">
+              <i class="bi bi-download me-1"></i>下载
+            </button>
+            <button type="button" class="btn btn-primary" @click="closeAttachmentPreview">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="preview" class="modal-backdrop show" @click="closeAttachmentPreview"></div>
     <TaskDetailModal v-if="selectedTaskId" :task-id="selectedTaskId" @close="closeTaskModal" />
   </div>
 </template>
+
+<style scoped>
+/* pst_ ID：低对比 monospace，移出标题行 */
+.task-post-id {
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  padding: 0;
+}
+
+/* 元信息第二行：可见范围 / 工作目录 / 执行器 */
+.task-meta-faint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  color: var(--text-faint);
+}
+
+/* 右侧「任务操作」卡片：桌面端 sticky 吸附 */
+.task-actions-card {
+  position: sticky;
+  top: 1rem;
+}
+
+@media (max-width: 1199.98px) {
+  .task-actions-card {
+    position: static;
+  }
+}
+</style>

@@ -23,6 +23,7 @@ const labels = {
     done: '已完成',
     resolved: '已解决',
     failed: '失败',
+    rejected: '已打回',
     cancelled: '已取消',
   },
   host: {
@@ -32,21 +33,23 @@ const labels = {
   },
 };
 
+// 语义分色：待处理蓝 / 进行中紫 / 待确认橙 / 完成绿 / 失败·打回红 / 取消·阻塞灰
 const colors = {
   task: {
     active: 'text-bg-info',
     open: 'text-bg-info',
-    claimed: 'text-bg-info',
-    running: 'text-bg-info',
-    submitted: 'text-bg-info',
-    pending_confirm: 'text-bg-info',
+    assigned: 'text-bg-info',
+    pending: 'text-bg-info',
+    claimed: 'text-bg-primary',
+    running: 'text-bg-primary',
+    submitted: 'text-bg-warning',
+    pending_confirm: 'text-bg-warning',
     pending_audit: 'text-bg-warning',
-    assigned: 'text-bg-warning',
-    pending: 'text-bg-warning',
-    blocked: 'text-bg-warning',
+    blocked: 'text-bg-secondary',
     done: 'text-bg-success',
     resolved: 'text-bg-success',
     failed: 'text-bg-danger',
+    rejected: 'text-bg-danger',
     cancelled: 'text-bg-secondary',
   },
   host: {
