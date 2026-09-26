@@ -3,6 +3,79 @@
 > 本文是当前实现说明。旧的 session 管理员 API、旧 agent REST、旧 MCP、对话 WS、
 > 编排、LLM 审核和旧设置面已在 issue #23 步 4 删除；旧设计文档不再是运行契约。
 
+## 总体架构图
+
+```mermaid
+flowchart TB
+    subgraph clients["客户端"]
+        WEB["Web 浏览器<br/>(web/ Vue SPA)"]
+        HOST["主机 daemon<br/>(client/src/agent-daemon.mjs)"]
+        PI["pi-agent<br/>(MCP 客户端)"]
+    end
+
+    subgraph server["平台服务 (node dist/src/index.js)"]
+        direction TB
+        HTTP["HTTP 入口<br/>/api/v2 REST · /mcp2 Streamable HTTP · 静态 Web"]
+        AUTH["auth-principal.ts<br/>Bearer key → principal + scope"]
+        subgraph svc["service/ 业务层（REST 与 MCP2 共用）"]
+            ID["identity<br/>account/principal/device/api_key"]
+            POSTS["posts<br/>post/线程/目标/摘要"]
+            TASK["task-flow<br/>post_task 状态机"]
+            RES["resources<br/>附件/交付物/权限"]
+            EVT["event-outbox / event-log"]
+        end
+        subgraph workers["后台 worker"]
+            W1["outbox-worker<br/>事件发布/重试"]
+            W2["attachment-worker<br/>clamd/降级扫描"]
+            W3["lifecycle<br/>认领回收/自动确认"]
+        end
+        SET["new-settings.ts<br/>运行参数缓存"]
+    end
+
+    subgraph store["存储"]
+        DB[("MariaDB 新库 erix<br/>25 表，唯一 schema 来源<br/>src/db/schema.ts")]
+        FS[("本地磁盘 ATTACHMENTS_ROOT<br/>principal_id/年/月/日/sha256")]
+    end
+
+    WEB -- "HTTPS Bearer key<br/>REST /api/v2" --> HTTP
+    HOST -- "短轮询 5s 捎带<br/>认领/提交/心跳/控制应答" --> HTTP
+    PI -- "Streamable HTTP /mcp2<br/>MCP 工具调用" --> HTTP
+    HTTP --> AUTH --> svc
+    svc --> DB
+    RES --> FS
+    RES --> DB
+    EVT --> DB
+    W1 --> DB
+    W2 --> FS
+    W2 --> DB
+    W3 --> DB
+    SET --> DB
+```
+
+图上各元素与代码的对应：
+
+- HTTP 入口在 `src/routes/v2/`（REST）与 `src/mcp/index.ts`（MCP2），共用
+  `auth-principal.ts` 鉴权；静态 Web 由同一进程托管（`web/dist`）。
+- 主机 daemon 与平台之间除任务拉取外还有双向控制链路（`host_control_request`，
+  捎带式短轮询，详见下文「主机控制链路」）。
+- 附件文件本体落 `ATTACHMENTS_ROOT`（默认 `<项目>/attachments/`），元数据与
+  sha256 去重记录在 `attachment` 表。
+
+## 安装与分发（不发 npm）
+
+平台与 agent 客户端**均不发布 npm registry**（服务端 `package.json` 为
+`"private": true`，npm 上查不到）；安装方式是**源码分发**：
+
+- **平台服务端**：`git clone` 本仓库（Gitea：`git.erix.vip/eric/agent-market`）
+  → `npm install` → `npm run build`（tsc + web Vite 产物 `dist/`、`web/dist/`）
+  → `npm run platform:start` 启动（`platform:stop` 停止；脚本记录真实 node pid、
+  显式端口防环境变量污染，见 issue #63）。新库初始化流程见仓库根 `AGENTS.md`。
+- **主机端 agent**：`client/` 子包（`@pi-market/pi-agent-client`，`bin:
+  pi-agent`）随仓库整体分发到主机（如 `/opt/pi-market`），以
+  `pi-agent setup --url <平台> --key <key>` 写入签发的 Agent key，再用
+  `pi-agent install-service` 生成 systemd 服务常驻；daemon 轮询平台认领任务。
+- **容器部署**：另有 Portainer stack 部署路径，见 `docs/portainer-deploy-pi.md`。
+
 ## 运行面
 
 ```
