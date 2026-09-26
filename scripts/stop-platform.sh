@@ -5,13 +5,40 @@
 #     防止 pid 复用误杀无关进程；pid 文件指向的进程身份不符时不杀，走端口兜底。
 #   - 端口兜底同样校验 cmdline+cwd 后才杀。
 #   - ss 不可用时退化为 kill 后检查进程存活，不误判“端口已释放”。
+# 安全性（#63 终审加固）：
+#   - 与 start 共用 logs/platform.pid.lock 的 flock 串行化启停，带 30s 超时，
+#     抢不到锁报错退出（防止 start 持锁等端口时 stop 永久阻塞）。
+#   - 端口参数校验 1-65535，与 start 一致。
+#   - /proc 不可读（无法校验进程身份）且 ss 不可用时，明确报错让人工处理，
+#     宁可失败不误报成功。
 # 用法: scripts/stop-platform.sh [端口]（默认 3200）
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PORT_NUM="${1:-3200}"
+case "$PORT_NUM" in
+  *[!0-9]*)
+    echo "端口必须是 1-65535 的整数: $PORT_NUM" >&2
+    exit 2
+    ;;
+esac
+if (( PORT_NUM < 1 || PORT_NUM > 65535 )); then
+  echo "端口必须是 1-65535 的整数: $PORT_NUM" >&2
+  exit 2
+fi
+
 PID_FILE=logs/platform.pid
 REPO_ROOT="$(pwd)"
+
+mkdir -p logs
+
+# flock 串行化启停：与 start-platform.sh 共用同一把锁；带超时防止 start
+# 持锁等端口期间 stop 永久阻塞，抢不到锁报错退出
+exec 9>logs/platform.pid.lock
+if ! flock -w 30 9; then
+  echo "获取启停锁超时（30s），可能有 start-platform.sh 正在执行，请稍后重试" >&2
+  exit 1
+fi
 
 have_ss() { command -v ss >/dev/null 2>&1; }
 
@@ -44,6 +71,10 @@ if [[ -f "$PID_FILE" ]]; then
     if is_platform_pid "$pid"; then
       kill_tree "$pid"
       killed+=("$pid")
+    elif ! have_ss; then
+      # 身份校验失败（/proc 不可读或进程不符）且无法按端口复核：宁可失败不误报
+      echo "错误: 无法校验进程 $pid 的身份，且 ss 不可用无法探测端口，请人工处理" >&2
+      exit 1
     else
       echo "警告: pid 文件指向的进程 $pid 不是本平台进程（cmdline/cwd 校验失败），不杀，改走端口兜底" >&2
     fi
