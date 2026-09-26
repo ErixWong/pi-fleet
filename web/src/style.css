@@ -894,14 +894,18 @@ body {
 .task-tree-title { color: var(--text-strong); font-weight: 700; }
 .task-tree-summary { color: var(--text-muted); font-size: 0.76rem; }
 .task-tree-executor { max-width: 10rem; }
-.task-panorama-modal { z-index: 1055; }
-.task-panorama-modal .modal-content {
+.task-panorama-modal,
+.attachment-preview-modal { z-index: 1055; }
+.task-panorama-modal .modal-content,
+.attachment-preview-modal .modal-content {
   color: var(--text-strong);
   background: var(--bg-base);
   border: 1px solid var(--border-soft);
 }
 .task-panorama-modal .modal-header,
-.task-panorama-modal .modal-footer { border-color: var(--border-soft); }
+.task-panorama-modal .modal-footer,
+.attachment-preview-modal .modal-header,
+.attachment-preview-modal .modal-footer { border-color: var(--border-soft); }
 
 /* ─────────────────────────── 按钮 ─────────────────────────── */
 .btn { border-radius: 0.6rem; font-weight: 600; }

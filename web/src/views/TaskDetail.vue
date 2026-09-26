@@ -23,6 +23,9 @@ const subtree = ref(null);
 const subtreeLoading = ref(false);
 const subtreeError = ref('');
 const selectedTaskId = ref('');
+// 附件预览 modal 状态：{ attachment, url, kind, text, error }
+const preview = ref(null);
+let previewUrl = '';
 
 const task = computed(() => detail.value?.task);
 const post = computed(() => detail.value?.post);
@@ -177,21 +180,52 @@ async function runAction(action) {
   }
 }
 
+function previewKind(mime) {
+  if (!mime) return 'unknown';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime === 'application/pdf') return 'pdf';
+  if (
+    mime.startsWith('text/')
+    || mime.endsWith('+json')
+    || mime.endsWith('+xml')
+    || ['application/json', 'application/xml', 'application/javascript', 'application/x-yaml', 'application/yaml', 'application/sql'].includes(mime)
+  ) return 'text';
+  return 'unknown';
+}
+
 async function openAttachment(attachment) {
+  closeAttachmentPreview();
+  preview.value = { attachment, url: '', kind: 'loading', text: '', error: '' };
   try {
     const result = await api.attachmentBlob(attachment.id);
     const url = URL.createObjectURL(result.blob);
-    const opened = window.open(url, '_blank', 'noopener');
-    if (!opened) {
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = attachment.filename;
-      link.click();
+    previewUrl = url;
+    const kind = previewKind(attachment.mime || result.blob.type);
+    let text = '';
+    if (kind === 'text') {
+      text = await result.blob.text();
+      if (text.length > 200_000) text = `${text.slice(0, 200_000)}\n\n…（内容过长，已截断显示）`;
     }
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    preview.value = { attachment, url, kind, text, error: '' };
   } catch (e) {
-    error.value = e.message;
+    preview.value = { attachment, url: '', kind: 'error', text: '', error: e.message };
   }
+}
+
+function downloadPreview() {
+  if (!preview.value?.url) return;
+  const link = document.createElement('a');
+  link.href = preview.value.url;
+  link.download = preview.value.attachment.filename || 'attachment';
+  link.click();
+}
+
+function closeAttachmentPreview() {
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+  }
+  preview.value = null;
 }
 
 function targetName(target) {
@@ -364,6 +398,41 @@ watch(() => route.params.taskId, load);
         </div>
       </section>
     </template>
+    <div v-if="preview" class="modal show d-block attachment-preview-modal" tabindex="-1" role="dialog" aria-modal="true"
+      :aria-label="`预览 ${preview.attachment.filename || '附件'}`">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 class="modal-title h5 mb-0 text-truncate"><i class="bi bi-eye me-2"></i>{{ preview.attachment.filename || '附件预览' }}</h2>
+            <button type="button" class="btn-close" aria-label="关闭" @click="closeAttachmentPreview"></button>
+          </div>
+          <div class="modal-body">
+            <div v-if="preview.kind === 'loading'" class="text-secondary text-center py-5">
+              <i class="bi bi-arrow-repeat me-1 spin-once"></i>正在加载附件预览…
+            </div>
+            <div v-else-if="preview.kind === 'error'" class="alert alert-danger mb-0">{{ preview.error }}</div>
+            <div v-else-if="preview.kind === 'image'" class="text-center">
+              <img :src="preview.url" :alt="preview.attachment.filename || '附件图片'" class="img-fluid rounded" style="max-height: 70vh;">
+            </div>
+            <iframe v-else-if="preview.kind === 'pdf'" :src="preview.url" class="w-100 border-0 rounded" style="height: 70vh; background: #fff;"
+              :title="preview.attachment.filename || '附件 PDF'"></iframe>
+            <pre v-else-if="preview.kind === 'text'" class="mb-0">{{ preview.text }}</pre>
+            <div v-else class="text-center py-4">
+              <i class="bi bi-file-earmark-x fs-1 d-block mb-2 text-secondary"></i>
+              <p class="mb-3">该附件类型暂不支持在线预览<span v-if="preview.attachment.mime">（{{ preview.attachment.mime }}）</span>，请下载后查看。</p>
+              <button type="button" class="btn btn-primary" @click="downloadPreview"><i class="bi bi-download me-1"></i>下载附件</button>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" :disabled="!preview.url" @click="downloadPreview">
+              <i class="bi bi-download me-1"></i>下载
+            </button>
+            <button type="button" class="btn btn-primary" @click="closeAttachmentPreview">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="preview" class="modal-backdrop show" @click="closeAttachmentPreview"></div>
     <TaskDetailModal v-if="selectedTaskId" :task-id="selectedTaskId" @close="closeTaskModal" />
   </div>
 </template>
