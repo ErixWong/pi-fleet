@@ -223,9 +223,10 @@ async function openAttachment(attachment) {
   closeAttachmentPreview();
   const token = ++previewRequestSeq;
   preview.value = { attachment, url: '', kind: 'loading', text: '', error: '' };
+  let url = '';
   try {
     const result = await api.attachmentBlob(attachment.id);
-    const url = URL.createObjectURL(result.blob);
+    url = URL.createObjectURL(result.blob);
     const kind = previewKind(attachment.mime || result.blob.type);
     let text = '';
     if (kind === 'text') {
@@ -240,6 +241,8 @@ async function openAttachment(attachment) {
     previewUrl = url;
     preview.value = { attachment, url, kind, text, error: '' };
   } catch (e) {
+    // 异常路径：释放尚未交给 previewUrl 的 ObjectURL（含 token 过期分支），避免泄漏
+    if (url && url !== previewUrl) URL.revokeObjectURL(url);
     if (token !== previewRequestSeq) return;
     preview.value = { attachment, url: '', kind: 'error', text: '', error: e.message };
   }
