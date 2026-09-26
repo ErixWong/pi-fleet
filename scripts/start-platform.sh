@@ -30,7 +30,10 @@ for arg in "$@"; do
   esac
 done
 PORT_NUM="${PORT_NUM:-3200}"
-if (( PORT_NUM < 1 || PORT_NUM > 65535 )); then
+# 先限格式（1-5 位数字且无前导零），再强制十进制比较：前导零输入（03200/09/010）
+# 要么被 bash 按八进制解析（03200 变成 1664 静默错绑端口），要么直接报 base 错误，
+# 超长数字同样触发算术异常，因此一律拒绝
+if [[ ! "$PORT_NUM" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#$PORT_NUM < 1 || 10#$PORT_NUM > 65535 )); then
   echo "端口必须是 1-65535 的整数: $PORT_NUM" >&2
   exit 2
 fi
