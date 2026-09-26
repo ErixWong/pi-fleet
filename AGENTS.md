@@ -1,4 +1,7 @@
-# AGENTS.md — 任务分发平台
+# AGENTS.md — 任务分发平台（pifleet）
+
+> ℹ️ 仓库已更名 `agent-market` → **`pifleet`**（2026-09-26，Gitea 旧 URL 自动重定向）。
+> 本地目录 `~/projects/pi-market` 与 npm scope `@pi-market` 暂未随改，后续统一定名。
 
 本仓库是任务分发反馈平台（Web + REST v2 + MCP2），管理账号、主体、任务、交付物和
 Linux 主机上的 pi-agent。Issue #23 步 4 完成后，平台只认新数据结构和新数据库；旧模型、

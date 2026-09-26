@@ -1,5 +1,9 @@
 # pi-agent 接入指南（v2）
 
+> ℹ️ 仓库已更名 `agent-market` → **`pifleet`**（2026-09-26，旧 URL 自动重定向）。
+> npm scope `@pi-market` 暂未随改（包未发布），发布时统一定为 `@pifleet`；
+> 部署实例路径（`/opt/pi-market` 等）保持现状，见文末说明。
+
 本文说明如何把一台运行 pi 的 Linux 主机接入任务分发平台。当前客户端版本为
 `@pi-market/pi-agent-client` 0.4.0，使用平台 v2 API 和 `/mcp2`。
 
@@ -57,7 +61,7 @@ API key 的有效期、吊销和轮换由平台管理员管理（Hosts 页的 ke
 （`~/.pi/agent/models.json`）。无 GUI 环境可运行。
 
 客户端包 `@pi-market/pi-agent-client` **设计上走 npm 安装，但截至当前尚未发布
-到公共 registry**（实测 404），现状按源码分发：
+到公共 registry**（实测 404；scope 也待随仓库更名改为 `@pifleet`），现状按源码分发：
 
 ```bash
 # 包发布后的正式做法（保留在此，待发布后生效）

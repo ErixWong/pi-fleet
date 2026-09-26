@@ -85,6 +85,9 @@ flowchart TB
 平台与 agent 客户端**均不发布 npm registry**（服务端 `package.json` 为
 `"private": true`，npm 上查不到）；安装方式是**源码分发**：
 
+> ℹ️ 仓库已更名 `agent-market` → **`pifleet`**（2026-09-26）；npm scope
+> `@pi-market` 与部署路径 `/opt/pi-market` 暂未随改，待发布时统一定为 `@pifleet`。
+
 - **平台服务端**：`git clone` 本仓库（Gitea：`git.erix.vip/eric/pifleet`）
   → `npm install` → `npm run build`（tsc + web Vite 产物 `dist/`、`web/dist/`）
   → `npm run platform:start` 启动（`platform:stop` 停止；脚本记录真实 node pid、
