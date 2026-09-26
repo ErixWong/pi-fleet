@@ -85,7 +85,7 @@ flowchart TB
 平台与 agent 客户端**均不发布 npm registry**（服务端 `package.json` 为
 `"private": true`，npm 上查不到）；安装方式是**源码分发**：
 
-- **平台服务端**：`git clone` 本仓库（Gitea：`git.erix.vip/eric/agent-market`）
+- **平台服务端**：`git clone` 本仓库（Gitea：`git.erix.vip/eric/pifleet`）
   → `npm install` → `npm run build`（tsc + web Vite 产物 `dist/`、`web/dist/`）
   → `npm run platform:start` 启动（`platform:stop` 停止；脚本记录真实 node pid、
   显式端口防环境变量污染，见 issue #63）。新库初始化流程见仓库根 `AGENTS.md`。

@@ -64,7 +64,7 @@ API key 的有效期、吊销和轮换由平台管理员管理（Hosts 页的 ke
 npm install -g @pi-market/pi-agent-client
 
 # 现状做法：clone 整仓库（如 /opt/pi-market），pi-agent 入口在 client/bin/pi-agent.js
-git clone https://git.erix.vip/eric/agent-market.git /opt/pi-market
+git clone https://git.erix.vip/eric/pifleet.git /opt/pi-market
 ```
 
 ## 端到端 checklist（新设备从零到接单）
