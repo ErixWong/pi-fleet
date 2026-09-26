@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { api } from '../api';
 import { renderMd } from '../md';
@@ -26,6 +26,9 @@ const selectedTaskId = ref('');
 // 附件预览 modal 状态：{ attachment, url, kind, text, error }
 const preview = ref(null);
 let previewUrl = '';
+// 附件预览请求序号：连续打开或关闭后，旧请求返回时若 token 已过期则丢弃结果，
+// 避免覆盖最新预览；同时兜住组件卸载后异步回调写状态的问题。
+let previewRequestSeq = 0;
 
 const task = computed(() => detail.value?.task);
 const post = computed(() => detail.value?.post);
@@ -192,33 +195,52 @@ async function runAction(action) {
 }
 
 function previewKind(mime) {
-  if (!mime) return 'unknown';
-  if (mime.startsWith('image/')) return 'image';
-  if (mime === 'application/pdf') return 'pdf';
+  // 规范化：trim + 小写 + 截掉 `; charset=...` 等参数（后端文本类响应会追加 charset）
+  const normalized = String(mime ?? '').split(';', 1)[0].trim().toLowerCase();
+  if (!normalized) return 'unknown';
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized === 'application/pdf') return 'pdf';
   if (
-    mime.startsWith('text/')
-    || mime.endsWith('+json')
-    || mime.endsWith('+xml')
-    || ['application/json', 'application/xml', 'application/javascript', 'application/x-yaml', 'application/yaml', 'application/sql'].includes(mime)
+    normalized.startsWith('text/')
+    || normalized.endsWith('+json')
+    || normalized.endsWith('+xml')
+    || [
+      'application/json',
+      'application/xml',
+      'application/javascript',
+      'application/x-yaml',
+      'application/yaml',
+      'application/sql',
+      'application/markdown',
+      'application/x-sh',
+    ].includes(normalized)
   ) return 'text';
   return 'unknown';
 }
 
 async function openAttachment(attachment) {
+  // 先 revoke 上一轮 ObjectURL（closeAttachmentPreview 内部处理），再签发新 token
   closeAttachmentPreview();
+  const token = ++previewRequestSeq;
   preview.value = { attachment, url: '', kind: 'loading', text: '', error: '' };
   try {
     const result = await api.attachmentBlob(attachment.id);
     const url = URL.createObjectURL(result.blob);
-    previewUrl = url;
     const kind = previewKind(attachment.mime || result.blob.type);
     let text = '';
     if (kind === 'text') {
       text = await result.blob.text();
       if (text.length > 200_000) text = `${text.slice(0, 200_000)}\n\n…（内容过长，已截断显示）`;
     }
+    if (token !== previewRequestSeq) {
+      // 过期请求：立即释放本次 URL 并丢弃结果，不覆盖当前预览状态
+      URL.revokeObjectURL(url);
+      return;
+    }
+    previewUrl = url;
     preview.value = { attachment, url, kind, text, error: '' };
   } catch (e) {
+    if (token !== previewRequestSeq) return;
     preview.value = { attachment, url: '', kind: 'error', text: '', error: e.message };
   }
 }
@@ -232,6 +254,7 @@ function downloadPreview() {
 }
 
 function closeAttachmentPreview() {
+  previewRequestSeq += 1; // 使进行中的 openAttachment 请求过期
   if (previewUrl) {
     URL.revokeObjectURL(previewUrl);
     previewUrl = '';
@@ -253,6 +276,8 @@ function closeTaskModal() {
 
 onMounted(load);
 watch(() => route.params.taskId, load);
+// 路由离开/组件卸载时清理预览，避免 ObjectURL 泄漏和卸载后写状态
+onBeforeUnmount(closeAttachmentPreview);
 </script>
 
 <template>
