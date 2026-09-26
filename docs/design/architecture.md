@@ -92,11 +92,9 @@ flowchart TB
   → `npm install` → `npm run build`（tsc + web Vite 产物 `dist/`、`web/dist/`）
   → `npm run platform:start` 启动（`platform:stop` 停止；脚本记录真实 node pid、
   显式端口防环境变量污染，见 issue #63）。新库初始化流程见仓库根 `AGENTS.md`。
-- **主机端 agent**：`client/` 子包（`@pi-market/pi-agent-client`，`bin:
-  pi-agent`）。接入文档（`docs/agent-onboarding.md`）写的是
-  `npm install -g @pi-market/pi-agent-client`，但**截至当前尚未发布到公共
-  registry**（实测 404），现状按源码分发：clone 整仓库到主机（如
-  `/opt/pi-market`），接入流程为：管理员在平台上创建 host principal + API key →
+- **主机端 agent**：客户端包 **`pifleet-agent-client`** 已发布到公共 npm（2026-09-27，
+  v0.4.0，bin 仍为 `pi-agent`；旧 scope `@pi-market/pi-agent-client` 未发布过、已
+  废弃）。接入流程为：管理员在平台上创建 host principal + API key →
   `pi-agent setup --url <平台> --key <key>` 写入本机配置并合并 pi 的
   `mcp.json` → `pi-agent install-service` 生成 systemd 服务常驻。设备侧要求
   Node ≥18 + pi CLI，无 GUI 环境也可运行。
