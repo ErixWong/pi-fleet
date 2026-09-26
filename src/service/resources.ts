@@ -129,6 +129,16 @@ function isDuplicateKeyError(error: unknown): boolean {
   return candidate.code === 'ER_DUP_ENTRY' || Number(candidate.errno) === 1062;
 }
 
+// 并发上传同一内容时，另一事务在我们快照建立后提交了同 (owner, sha256) 记录，
+// MariaDB 在唯一键冲突检查阶段可能报 ER_CHECKREAD(errno 1020) 而非 ER_DUP_ENTRY。
+// 唯一键 uq_att_owner_sha 已保证不存在则插入成功、存在则冲突，两种错误都按 dedup 处理。
+function isDuplicateRaceError(error: unknown): boolean {
+  if (isDuplicateKeyError(error)) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; errno?: unknown };
+  return candidate.code === 'ER_CHECKREAD' || Number(candidate.errno) === 1020;
+}
+
 export async function createAttachment(
   input: CreateAttachmentInput,
 ): Promise<{ attachment: Attachment; deduped: boolean }> {
@@ -151,11 +161,13 @@ export async function createAttachment(
       throw notFound('attachment owner belongs to another account');
     }
 
+    // 不加 FOR UPDATE：普通快照读检查是否已存在。唯一键 uq_att_owner_sha(owner_principal_id,
+    // sha256) 保证正确性；加锁读会对不存在的间隙加 gap lock，并发 INSERT 时互相阻塞，
+    // 触发 ER_CHECKREAD(errno 1020) 竞态（issue #64）。
     const existingResult = await conn.query(
       `${attachmentSelect()}
         WHERE owner_principal_id = ? AND sha256 = ?
-        LIMIT 1
-        FOR UPDATE`,
+        LIMIT 1`,
       [input.owner_principal_id, input.sha256],
     );
     const existing = rows(existingResult)[0];
@@ -182,11 +194,14 @@ export async function createAttachment(
         ],
       );
     } catch (error) {
-      if (!isDuplicateKeyError(error)) throw error;
+      if (!isDuplicateRaceError(error)) throw error;
+      // 对方记录是在本事务快照建立后提交的，RR 快照读可能看不到，
+      // 必须用加锁读读取最新已提交数据。
       const duplicateResult = await conn.query(
         `${attachmentSelect()}
           WHERE owner_principal_id = ? AND sha256 = ?
-          LIMIT 1`,
+          LIMIT 1
+          FOR UPDATE`,
         [input.owner_principal_id, input.sha256],
       );
       const duplicate = rows(duplicateResult)[0];
