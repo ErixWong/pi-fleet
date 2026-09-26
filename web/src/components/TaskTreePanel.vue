@@ -52,13 +52,19 @@ const rollup = computed(() => {
   };
 });
 
+// 无下级节点且无父任务（且不在加载/报错）时不渲染整个面板，
+// 避免「0 个下级节点」标题下仍出现一行当前任务。
+const showPanel = computed(() => (
+  Boolean(props.parent) || rollup.value.total > 0 || props.loading || Boolean(props.error)
+));
+
 function selectNode(node) {
   emit('select', node.id);
 }
 </script>
 
 <template>
-  <section class="card mb-3 task-tree-panel">
+  <section v-if="showPanel" class="card mb-3 task-tree-panel">
     <div class="card-header d-flex align-items-center gap-2">
       <strong><i class="bi bi-diagram-3 me-2"></i>任务全景</strong>
       <span class="text-secondary small ms-auto">
@@ -85,7 +91,7 @@ function selectNode(node) {
       </div>
       <div v-if="!loading && nodes.length" class="task-tree" role="tree" aria-label="任务全景树">
         <button
-          v-for="node in nodes"
+          v-for="(node, index) in nodes"
           :key="node.id"
           type="button"
           class="task-tree-node"
@@ -95,6 +101,7 @@ function selectNode(node) {
           @click="selectNode(node)"
         >
           <span class="task-tree-branch" aria-hidden="true"><i class="bi bi-chevron-right"></i></span>
+          <span class="task-tree-current" v-if="tree && index === 0">当前任务</span>
           <span class="task-tree-main">
             <span class="task-tree-title text-truncate">{{ node.title || node.id }}</span>
             <span class="task-tree-summary text-truncate">{{ node.summary }}</span>

@@ -100,13 +100,13 @@ watch(() => props.taskId, load, { immediate: true });
 
             <div class="border-top pt-3 mb-3">
               <div class="text-secondary small mb-1">交付要求</div>
-              <pre class="small mb-0">{{ parseSpec(task.deliverable_spec) || '未填写' }}</pre>
+              <div class="deliverable-spec small mb-0">{{ parseSpec(task.deliverable_spec) || '未填写' }}</div>
             </div>
 
             <div v-if="detail.deliverables?.length" class="border-top pt-3 mb-3">
               <div class="text-secondary small mb-1">交付物</div>
               <div v-for="deliverable in detail.deliverables" :key="`${deliverable.name}-${deliverable.version}`" class="d-flex align-items-start gap-2 border-bottom py-2">
-                <span class="badge" :class="deliverable.current ? 'text-bg-success' : 'text-bg-secondary'">v{{ deliverable.version }}</span>
+                <span class="small text-secondary flex-shrink-0 pt-1">v{{ deliverable.version }}</span>
                 <div>
                   <strong>{{ deliverable.name }}</strong>
                   <div v-if="deliverable.note" class="text-secondary small">{{ deliverable.note }}</div>
