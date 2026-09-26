@@ -1,5 +1,5 @@
 {
-  "name": "@pi-market/pi-agent-client",
+  "name": "pifleet-agent-client",
   "version": "0.4.0",
   "description": "任务分发平台 Agent 客户端与常驻 daemon",
   "type": "module",
