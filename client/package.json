@@ -4,10 +4,10 @@
   "description": "任务分发平台 Agent 客户端与常驻 daemon",
   "type": "module",
   "license": "MIT",
-  "author": "pi-market",
+  "author": "pifleet",
   "repository": {
     "type": "git",
-    "url": "https://git.erix.vip/eric/agent-market.git"
+    "url": "https://github.com/ErixWong/pi-fleet.git"
   },
   "bin": {
     "pi-agent": "bin/pi-agent.js"
