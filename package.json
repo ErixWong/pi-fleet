@@ -1,6 +1,7 @@
 {
   "name": "task-dispatch-platform",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "任务分发反馈平台：Web 网站 + MCP 服务，pi-agent 用 key 接入领取任务、汇报结果",

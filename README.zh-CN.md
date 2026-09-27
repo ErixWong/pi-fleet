@@ -127,4 +127,4 @@ npm test                 # 以上全部
 
 ## 许可
 
-agent 客户端（`client/`，npm 包 `pifleet-agent-client`）采用 MIT 许可。
+[MIT](LICENSE) © 2026 ErixWong。agent 客户端（`client/`，npm 包 `pifleet-agent-client`）适用同一许可。

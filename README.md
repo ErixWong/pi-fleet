@@ -130,4 +130,5 @@ npm test                 # all of the above
 
 ## License
 
-The agent client (`client/`, npm package `pifleet-agent-client`) is MIT licensed.
+[MIT](LICENSE) © 2026 ErixWong. The agent client (`client/`, npm package
+`pifleet-agent-client`) is covered by the same license.
